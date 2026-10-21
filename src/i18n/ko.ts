@@ -1,0 +1,45 @@
+import type { Messages } from "./en";
+
+export const ko: Messages = {
+  "app.openFolder": "폴더 열기",
+  "app.changeFolder": "폴더 바꾸기",
+
+  "workspace.newTerminal": "새 터미널 (⌘T)",
+  "workspace.tabTitle": "터미널 {n}",
+  "workspace.closeTab": "탭 닫기",
+  "workspace.newTab": "새 탭 (⌘T)",
+  "workspace.splitRight": "오른쪽으로 분할 (⌘D)",
+  "workspace.splitDown": "아래로 분할 (⇧⌘D)",
+
+  "terminal.spawnFailed": "터미널 실행 실패: {error}",
+
+  "theme.dark": "다크",
+  "theme.solarizedLight": "Solarized Light",
+
+  "menu.about": "ddak에 관하여",
+  "menu.services": "서비스",
+  "menu.hide": "ddak 가리기",
+  "menu.hideOthers": "기타 가리기",
+  "menu.showAll": "모두 보기",
+  "menu.quit": "ddak 종료",
+  "menu.edit": "편집",
+  "menu.undo": "실행 취소",
+  "menu.redo": "실행 복귀",
+  "menu.cut": "오려두기",
+  "menu.copy": "복사하기",
+  "menu.paste": "붙여넣기",
+  "menu.selectAll": "전체 선택",
+  "menu.terminal": "터미널",
+  "menu.new_tab": "새 탭",
+  "menu.split_right": "오른쪽으로 분할",
+  "menu.split_down": "아래로 분할",
+  "menu.close_pane": "터미널 닫기",
+  "menu.view": "보기",
+  "menu.theme": "테마",
+  "menu.language": "언어",
+  "menu.window": "윈도우",
+  "menu.minimize": "최소화",
+  "menu.maximize": "확대/축소",
+  "menu.fullscreen": "전체 화면 전환",
+  "menu.close_window": "윈도우 닫기",
+};
