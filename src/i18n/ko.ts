@@ -58,11 +58,17 @@ export const ko: Messages = {
   "workspace.newTerminal": "새 터미널 (⌘T)",
   "workspace.tabTitle": "터미널 {n}",
   "workspace.closeTab": "탭 닫기",
+  "workspace.renameTab": "탭 이름 바꾸기…",
   "workspace.newTab": "새 탭 (⌘T)",
+  "workspace.newGroup": "새 작업그룹 (⇧⌘T)",
+  "workspace.openGroup": "프로젝트 폴더에서 {name} 열기",
   "workspace.splitRight": "오른쪽으로 분할 (⌘D)",
   "workspace.splitDown": "아래로 분할 (⇧⌘D)",
 
   "session.readOnly": "읽기 전용",
+
+  "group.createFailed": "작업그룹을 만들지 못했습니다: {detail}",
+  "group.noRepos": "이 프로젝트에 worktree를 만들 git 저장소가 없습니다.",
 
   "terminal.spawnFailed": "터미널 실행 실패: {error}",
 
@@ -85,6 +91,7 @@ export const ko: Messages = {
   "menu.selectAll": "전체 선택",
   "menu.terminal": "터미널",
   "menu.new_tab": "새 탭",
+  "menu.new_group": "새 작업그룹",
   "menu.split_right": "오른쪽으로 분할",
   "menu.split_down": "아래로 분할",
   "menu.close_pane": "터미널 닫기",

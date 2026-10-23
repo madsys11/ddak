@@ -117,6 +117,15 @@ button:hover {
 .project-row {
   font-weight: 600;
 }
+.project-worktree {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: normal;
+  font-size: 11px;
+  color: var(--icon-worktree);
+}
 .project-row.active {
   background: var(--row-active);
 }
@@ -140,10 +149,19 @@ button:hover {
   background: var(--hover);
 }
 .tree-twisty {
-  display: inline-block;
   flex-shrink: 0;
   width: 14px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--fg-dim);
+}
+.tree-twisty svg {
+  transition: transform 0.12s ease;
+}
+.tree-twisty.open svg {
+  transform: rotate(90deg);
 }
 .tree-error {
   color: var(--error);
@@ -172,6 +190,11 @@ button:hover {
   display: grid;
   place-items: center;
 }
+.workspace-empty-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 
 .tabbar {
   height: 35px;
@@ -180,9 +203,21 @@ button:hover {
   align-items: stretch;
   background: var(--tabbar-bg);
   border-bottom: 1px solid var(--border);
+}
+/* 탭 영역: 버튼 자리를 남기고 줄어들며, 넘치면 이 안에서만 가로 스크롤 */
+.tabs {
+  position: relative; /* 탭의 offsetLeft 기준 */
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
   overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 .tab {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -199,10 +234,26 @@ button:hover {
   background: var(--bg);
   box-shadow: inset 0 1px 0 var(--accent);
 }
+.tab.dragging {
+  opacity: 0.6;
+  cursor: grabbing;
+}
 .tab-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.tab-input {
+  min-width: 0;
+  max-width: 180px;
+  height: 20px;
+  padding: 0 4px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--focus-border);
+  outline: none;
+  user-select: text;
 }
 .tab-close {
   width: 18px;
@@ -219,7 +270,10 @@ button:hover {
 .tab-close:hover {
   background: var(--hover);
 }
+/* 인라인 SVG는 글자 기준선에 놓여 아래 여백만큼 위로 쏠린다. flex로 가운데에 놓는다. */
 .tabbar-btn {
+  display: flex;
+  align-items: center;
   border: none;
   background: none;
   color: var(--fg-dim);

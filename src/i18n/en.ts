@@ -58,11 +58,17 @@ export const en = {
   "workspace.newTerminal": "New Terminal (⌘T)",
   "workspace.tabTitle": "Terminal {n}",
   "workspace.closeTab": "Close Tab",
+  "workspace.renameTab": "Rename Tab…",
   "workspace.newTab": "New Tab (⌘T)",
+  "workspace.newGroup": "New Work Group (⇧⌘T)",
+  "workspace.openGroup": "Open {name} in Project Folder",
   "workspace.splitRight": "Split Right (⌘D)",
   "workspace.splitDown": "Split Down (⇧⌘D)",
 
   "session.readOnly": "Read-only",
+
+  "group.createFailed": "Could not create the work group: {detail}",
+  "group.noRepos": "This project has no git repository to make a worktree from.",
 
   "terminal.spawnFailed": "Failed to start terminal: {error}",
 
@@ -86,6 +92,7 @@ export const en = {
   "menu.selectAll": "Select All",
   "menu.terminal": "Terminal",
   "menu.new_tab": "New Tab",
+  "menu.new_group": "New Work Group",
   "menu.split_right": "Split Right",
   "menu.split_down": "Split Down",
   "menu.close_pane": "Close Terminal",

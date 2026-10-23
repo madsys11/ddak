@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AddRepoDialog } from "./AddRepoDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
-import { Children, TreeContext, indent, useFolderMenu, useOpenWhenCreating, useTree } from "./FileTree";
+import { Children, TreeContext, Twisty, indent, useFolderMenu, useOpenWhenCreating, useTree } from "./FileTree";
 import { ProjectIcon } from "./icons";
 import { useT } from "./prefs";
 import { baseName, type Project } from "./useProjects";
@@ -9,6 +9,8 @@ import { baseName, type Project } from "./useProjects";
 type Props = {
   projects: Project[];
   active: string | null;
+  // 프로젝트 → 파일 트리가 보여 줄 폴더 (보고 있는 탭이 작업그룹이면 그 worktree 폴더). 없으면 프로젝트 폴더
+  treeRoots: Record<string, { cwd: string; worktree: string | null }>;
   // 목록 파일·작업그룹 설정 오류 등. 비어 있는 것은 건너뛴다.
   errors: (string | null)[];
   onAdd: () => void;
@@ -17,7 +19,7 @@ type Props = {
 };
 
 // 프로젝트 목록. 프로젝트를 펼치면 그 폴더의 파일 트리가 보인다.
-export function Sidebar({ projects, active, errors, onAdd, onActivate, onRemove }: Props) {
+export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate, onRemove }: Props) {
   const t = useT();
   const [addingTo, setAddingTo] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -25,6 +27,14 @@ export function Sidebar({ projects, active, errors, onAdd, onActivate, onRemove 
   const [renaming, setRenaming] = useState<string | null>(null);
 
   const closeMenu = useCallback(() => setMenu(null), []);
+  // 트리 루트가 바뀌면 (작업그룹 탭 ↔ 원본) 이전 폴더 경로로 만든 메뉴·입력란을 닫는다 (리뷰 지적 2).
+  // 입력란은 탭을 바꿀 때 터미널이 포커스를 가져가 blur로 먼저 닫히지만, 메뉴는 열린 채 남았다.
+  const rootsKey = JSON.stringify(treeRoots);
+  useEffect(() => {
+    setCreating(null);
+    setRenaming(null);
+    setMenu(null);
+  }, [rootsKey]);
   const tree = useMemo(
     () => ({
       creating,
@@ -62,6 +72,7 @@ export function Sidebar({ projects, active, errors, onAdd, onActivate, onRemove 
               key={p.path}
               project={p}
               active={p.path === active}
+              treeRoot={treeRoots[p.path]}
               onActivate={() => onActivate(p.path)}
               onRemove={() => onRemove(p.path)}
               onAddRepo={() => setAddingTo(p.path)}
@@ -75,9 +86,16 @@ export function Sidebar({ projects, active, errors, onAdd, onActivate, onRemove 
   );
 }
 
-type NodeProps = { project: Project; active: boolean; onActivate: () => void; onRemove: () => void; onAddRepo: () => void };
+type NodeProps = {
+  project: Project;
+  active: boolean;
+  treeRoot?: { cwd: string; worktree: string | null };
+  onActivate: () => void;
+  onRemove: () => void;
+  onAddRepo: () => void;
+};
 
-function ProjectNode({ project, active, onActivate, onRemove, onAddRepo }: NodeProps) {
+function ProjectNode({ project, active, treeRoot, onActivate, onRemove, onAddRepo }: NodeProps) {
   const t = useT();
   const tree = useTree();
   const folderMenu = useFolderMenu();
@@ -87,11 +105,13 @@ function ProjectNode({ project, active, onActivate, onRemove, onAddRepo }: NodeP
     if (active) setOpen(true);
   }, [active]);
   const { path, missing } = project;
-  useOpenWhenCreating(path, setOpen);
+  // 트리가 보여 줄 폴더. 작업그룹 탭을 보고 있으면 그 worktree 폴더 (새 파일도 거기에 만든다)
+  const shown = treeRoot?.cwd ?? path;
+  useOpenWhenCreating(shown, setOpen);
 
   // + 버튼: 프로젝트에 넣을 것들. 오른쪽 클릭 메뉴는 여기에 "목록에서 제거"까지.
   const addItems: MenuItem[] = [
-    ...folderMenu(path),
+    ...folderMenu(shown),
     "separator",
     {
       label: t("repo.addMenu"),
@@ -114,17 +134,20 @@ function ProjectNode({ project, active, onActivate, onRemove, onAddRepo }: NodeP
         onContextMenu={(e) => tree.openMenu(e, missing ? [removeItem] : [...addItems, "separator", removeItem])}
       >
         {/* 화살표만 누르면 옮겨 가지 않고 접고 펼치기만 한다. */}
-        <span
-          className="tree-twisty"
+        <Twisty
+          open={missing ? null : open}
           onClick={(e) => {
             e.stopPropagation();
             if (!missing) setOpen(!open);
           }}
-        >
-          {missing ? "" : open ? "▾" : "▸"}
-        </span>
+        />
         <ProjectIcon />
         <span className="tree-name">{baseName(path)}</span>
+        {treeRoot?.worktree && (
+          <span className="project-worktree" title={treeRoot.cwd}>
+            {treeRoot.worktree}
+          </span>
+        )}
         {!missing && (
           <span className="row-action" data-action="add" title={t("sidebar.addTo")} onClick={(e) => tree.openMenu(e, addItems)}>
             +
@@ -142,7 +165,9 @@ function ProjectNode({ project, active, onActivate, onRemove, onAddRepo }: NodeP
           ×
         </span>
       </div>
-      {open && !missing && <Children path={path} depth={1} />}
+      {/* key: 루트가 바뀌면 새로 그린다. 같은 컴포넌트를 쓰면 새 목록이 올 때까지 이전 폴더의 항목이 남아서,
+          작업그룹으로 바꾼 뒤에도 그 항목으로 원본 파일을 바꿀 수 있었다 (리뷰 지적 2). */}
+      {open && !missing && <Children key={shown} path={shown} depth={1} />}
     </>
   );
 }

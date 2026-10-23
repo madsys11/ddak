@@ -1,4 +1,4 @@
-// 파일 트리 아이콘. 색은 CSS(.icon-*)에서 테마 토큰으로 정한다.
+// 파일 트리·탭 바 아이콘. 색은 CSS(.icon-*)에서 테마 토큰으로 정한다 (탭 바 버튼 아이콘은 버튼 글자색).
 
 const Svg = ({ className, title, children }: { className: string; title?: string; children: React.ReactNode }) => (
   <svg className={`icon ${className}`} viewBox="0 0 16 16" width="16" height="16" aria-hidden={title ? undefined : true}>
@@ -34,5 +34,32 @@ export const WorktreeIcon = ({ title }: { title?: string }) => (
       <circle cx="11" cy="5" r="1.5" />
       <path d="M5 5v6M11 6.5c0 3-6 2-6 4.5" />
     </g>
+  </Svg>
+);
+
+// 탭 바 버튼: 새 터미널 (프롬프트 >_)
+export const TerminalIcon = () => (
+  <Svg className="icon-tool">
+    <g fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" />
+      <path d="M4.5 6l2 2-2 2M8 10.5h3.5" />
+    </g>
+  </Svg>
+);
+
+// 탭 바 버튼: 오른쪽으로 분할 / 아래로 분할 (창 안의 세로·가로 구분선)
+export const SplitIcon = ({ dir }: { dir: "row" | "col" }) => (
+  <Svg className="icon-tool">
+    <g fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="1.5" />
+      <path d={dir === "row" ? "M8 3v10" : "M2 8h12"} />
+    </g>
+  </Svg>
+);
+
+// 파일 트리 펼치기/접기: 오른쪽 꺾쇠. 펼치면 CSS(.tree-twisty.open)가 90° 돌린다 (2026-10-23 시안 C).
+export const ChevronIcon = () => (
+  <Svg className="icon-chevron">
+    <path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
   </Svg>
 );

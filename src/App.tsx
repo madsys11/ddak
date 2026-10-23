@@ -37,6 +37,8 @@ function App() {
   // 한 번이라도 연 프로젝트의 터미널은 다른 프로젝트로 옮겨 가도 살려 둔다 (숨기기만 한다).
   // 앱을 켤 때 모든 프로젝트의 터미널을 띄우지 않도록, 처음 열 때 만든다.
   const [opened, setOpened] = useState<string[]>([]);
+  // 프로젝트마다 지금 보고 있는 탭의 폴더 (파일 트리가 보여 줄 폴더). 작업그룹 탭이면 worktree 폴더
+  const [treeRoots, setTreeRoots] = useState<Record<string, { cwd: string; worktree: string | null }>>({});
   useEffect(() => {
     if (active) setOpened((o) => (o.includes(active) ? o : [...o, active]));
   }, [active]);
@@ -92,13 +94,21 @@ function App() {
 
   return (
     <main className="layout">
-      <Sidebar projects={projects} active={active} errors={[shownError, groupsMessage]} onAdd={pickProject} onActivate={activate} onRemove={removeProject} />
+      <Sidebar projects={projects} active={active} treeRoots={treeRoots} errors={[shownError, groupsMessage]} onAdd={pickProject} onActivate={activate} onRemove={removeProject} />
       <section className="panel">
         {/* 작업그룹 설정을 읽은 뒤에 연다 (처음 띄울 세션을 알아야 해서). 못 읽었으면 셸 하나로 */}
         {groupsReady &&
           opened.map((path) => (
             <div key={path} className="project-workspace" data-project={path} style={{ display: path === active ? undefined : "none" }}>
-              <Workspace cwd={path} visible={path === active} group={defaultGroup} />
+              <Workspace
+                cwd={path}
+                visible={path === active}
+                group={defaultGroup}
+                onTreeRoot={(cwd, worktree) =>
+                  setTreeRoots((r) => (r[path]?.cwd === cwd && r[path]?.worktree === worktree ? r : { ...r, [path]: { cwd, worktree } }))
+                }
+                onError={setError}
+              />
             </div>
           ))}
         {!active && <div className="workspace-empty">{t("app.selectProject")}</div>}

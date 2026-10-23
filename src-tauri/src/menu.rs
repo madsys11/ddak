@@ -11,6 +11,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 const TERMINAL_ITEMS: &[(&str, &str)] = &[
     ("new_tab", "CmdOrCtrl+T"),
+    // 새 작업그룹 (worktree 세트 + 기본 그룹 세션). ⌘T는 셸 탭으로 둔다.
+    ("new_group", "CmdOrCtrl+Shift+T"),
     ("split_right", "CmdOrCtrl+D"),
     ("split_down", "CmdOrCtrl+Shift+D"),
     ("close_pane", "CmdOrCtrl+W"),

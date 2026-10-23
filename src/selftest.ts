@@ -85,12 +85,24 @@ async function testTree() {
   check("트리: 폴더 먼저, 대소문자 무시 정렬", names.join(",") === "A_dir,b_dir,server,web,a.txt,z.txt", names.join(","));
   check("트리: 저장소 아이콘", fileRow("server")?.dataset.git === "repo" && !!fileRow("server")?.querySelector("svg.icon-repo"));
   check("트리: worktree 아이콘", fileRow("web")?.dataset.git === "worktree" && !!fileRow("web")?.querySelector("svg.icon-worktree"));
-  check("트리: 일반 폴더는 아이콘 없음", !fileRow("A_dir")?.querySelector("svg"));
+  check("트리: 일반 폴더는 아이콘 없음 (화살표만)", !fileRow("A_dir")?.querySelector("svg:not(.icon-chevron)"));
+  const chevron = () => fileRow("A_dir")!.querySelector(".tree-twisty svg.icon-chevron")!;
+  const angle = () => {
+    const m = new DOMMatrix(getComputedStyle(chevron()).transform);
+    return Math.round((Math.atan2(m.b, m.a) * 180) / Math.PI);
+  };
+  check("트리: 접힌 폴더는 오른쪽 화살표", angle() === 0 && fileRow("A_dir")!.querySelector(".tree-twisty")!.getAttribute("data-open") === "false", `${angle()}`);
+  check("트리: 파일은 화살표 없음", !fileRow("a.txt")?.querySelector(".tree-twisty svg"));
 
   const aDir = fileRow("A_dir")!;
   aDir.click();
   const opened = await waitFor("폴더 펼치기", () => rowNames().includes("inner.txt") && rowNames());
   check("트리: 클릭하면 펼쳐짐", opened.indexOf("inner.txt") === opened.indexOf("A_dir") + 1, opened.join(","));
+  // 회전은 0.12초 애니메이션이라 끝날 때까지 기다린다
+  await waitFor("화살표 회전", () => angle() === 90, 3000).then(
+    () => check("트리: 펼치면 화살표가 아래로 (90° 회전)", true),
+    () => check("트리: 펼치면 화살표가 아래로 (90° 회전)", false, `${angle()}`),
+  );
   aDir.click();
   await waitFor("폴더 접기", () => !rowNames().includes("inner.txt"));
   check("트리: 다시 클릭하면 접힘", true);
@@ -138,6 +150,13 @@ const menu = (id: string) => emit("menu", id);
 const key = (k: string, code: string, shift = false) =>
   document.body.dispatchEvent(new KeyboardEvent("keydown", { key: k, code, metaKey: true, shiftKey: shift, bubbles: true }));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// 앱 창이 포커스를 잃으면 WebKit이 화면 갱신을 늦춘다 (자체 테스트 중 다른 앱을 쓸 때). 그러면 ResizeObserver·
+// DOM 렌더러 그리기처럼 화면 갱신에 묶인 것이 늦게 온다. 그런 검사가 실패하면 이 값을 같이 남긴다.
+async function frameInfo() {
+  const t0 = performance.now();
+  await new Promise((r) => requestAnimationFrame(r));
+  return `focus=${document.hasFocus()} vis=${document.visibilityState} raf=${Math.round(performance.now() - t0)}ms`;
+}
 const ready = (term: Terminal) => waitFor("셸 프롬프트", () => screen(term).some((l) => l.trim() !== ""), 15000);
 const near = (a: number, b: number) => Math.abs(a - b) < 0.03;
 // 진짜 클릭과 달리 합성 이벤트는 브라우저 기본 동작(포커스 이동)을 하지 않는다.
@@ -215,12 +234,16 @@ async function testTerminal(root: string) {
   ];
   for (const fast of [false, true]) {
     const name = `터미널: 한글 입력 (WebKit 바꾸기 이벤트로 조합${fast ? ", 빠르게 쳐서 키가 겹침" : ""})`;
+    // 실패하면 터미널로 나간 입력을 그대로 남긴다 (2026-10-23 빠른 입력에서 "[??한글]" 1회, 원인 미확인)
+    const sent: string[] = [];
+    const rec = term.onData((x) => sent.push(x));
     term.input("echo '[", true);
     await ime(hangul, fast);
     term.input("]'\r", true);
+    rec.dispose();
     await waitFor("한글 입력 결과", () => screen(term).filter((l) => l.trim() === "[한글]").length === (fast ? 2 : 1), 5000).then(
       () => check(name, true),
-      () => check(name, false, screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")),
+      () => check(name, false, `${screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")} 보낸 것: ${JSON.stringify(sent).replace(/\x7f/g, "<DEL>")}`),
     );
   }
   // 실제 앱에서 기록한 "마찬가지로" 빠른 입력 (2026-10-23). 받침이 다음 음절로 넘어갈 때
@@ -532,7 +555,7 @@ async function testTabsAndSplits(root: string, first: Terminal) {
   // 구분선 끌기: 왼쪽 터미널을 30%로
   const divider = document.querySelector<HTMLElement>(".tab-body:not([style*='none']) .divider.row")!;
   divider.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: body.left + body.width / 2, clientY: body.top + 10 }));
-  window.dispatchEvent(new PointerEvent("pointermove", { clientX: body.left + body.width * 0.3, clientY: body.top + 10 }));
+  window.dispatchEvent(new PointerEvent("pointermove", { buttons: 1, clientX: body.left + body.width * 0.3, clientY: body.top + 10 }));
   window.dispatchEvent(new PointerEvent("pointerup", {}));
   await waitFor("구분선 이동", () => near(left.el.getBoundingClientRect().width / body.width, 0.3)).then(
     () => check("분할: 구분선을 끌면 크기 변경", true),
@@ -633,9 +656,9 @@ async function testWebglLoss(term: Terminal) {
   await run(term, "echo AFTER_LOSS");
   // 버퍼에 들어온 뒤 DOM 렌더러가 다음 화면 갱신 때 그리므로 기다린다.
   const rows = () => term.element!.querySelector(".xterm-rows")?.textContent ?? "";
-  await waitFor("DOM에 그려짐", () => rows().includes("AFTER_LOSS"), 3000).then(
+  await waitFor("DOM에 그려짐", () => rows().includes("AFTER_LOSS"), 10000).then(
     () => check("WebGL: 전환 후에도 새 출력이 화면에 그려짐", true),
-    (e) => check("WebGL: 전환 후에도 새 출력이 화면에 그려짐", false, String(e)),
+    async (e) => check("WebGL: 전환 후에도 새 출력이 화면에 그려짐", false, `${e} ${await frameInfo()}`),
   );
 }
 
@@ -704,9 +727,9 @@ async function testProjects(root: string, first: Terminal) {
   // 화살표는 접고 펼치기만, 활성 프로젝트는 그대로
   // other는 빈 폴더라 펼쳐도 행이 없다. 화살표 모양으로 본다.
   const twisty = (path: string) => projectRow(path)!.querySelector<HTMLElement>(".tree-twisty")!;
-  const otherWas = twisty(other).textContent;
+  const otherWas = twisty(other).dataset.open;
   twisty(other).click();
-  await waitFor("두 번째 프로젝트 접고 펼치기", () => twisty(other).textContent !== otherWas);
+  await waitFor("두 번째 프로젝트 접고 펼치기", () => twisty(other).dataset.open !== otherWas);
   check("프로젝트: 화살표로는 활성 프로젝트가 바뀌지 않음", projectRow(root)!.classList.contains("active"));
   projectRow(root)!.querySelector<HTMLElement>(".tree-twisty")!.click();
   await waitFor("첫 프로젝트 접기", () => !rowNames().includes("server"));
@@ -1114,7 +1137,7 @@ async function testRename(root: string, term: Terminal) {
   const dir = await startRename("b_dir");
   check("이름 바꾸기: 폴더는 이름 전체 선택", dir.selectionStart === 0 && dir.selectionEnd === 5, `${dir.selectionStart}-${dir.selectionEnd}`);
   dir.click();
-  check("이름 바꾸기: 입력란을 눌러도 폴더가 펼쳐지지 않음", dir.closest(".tree-row")?.querySelector(".tree-twisty")?.textContent === "▸");
+  check("이름 바꾸기: 입력란을 눌러도 폴더가 펼쳐지지 않음", dir.closest(".tree-row")?.querySelector(".tree-twisty")?.getAttribute("data-open") === "false");
   setInput(dir, "b_dir2");
   press(dir, "Enter");
   await waitFor("폴더 이름", () => !input() && rowNames().includes("b_dir2"), 3000).then(
@@ -1133,14 +1156,286 @@ async function testRename(root: string, term: Terminal) {
   await waitFor("되돌리기", () => rowNames().includes("a.txt") && rowNames().includes("b_dir"), 3000);
 }
 
+// 새 작업그룹 (⇧⌘T): 저장소마다 worktree를 만들고 그 폴더에서 기본 그룹(테스트 설정 "test" = 셸 하나)을 띄운다.
+// 이때 프로젝트: server(저장소), web(server의 worktree), cloned(저장소), linked(링크한 저장소), 나머지는 일반 항목.
+async function testGroupWorktree(root: string, first: Terminal) {
+  const tabTitles = () => [...document.querySelectorAll(".project-workspace:not([style*='none']) .tab .tab-title")].map((el) => el.textContent);
+  const worktreeLabel = () => projectRow(root)?.querySelector(".project-worktree")?.textContent ?? "";
+  const before = tabCount();
+  // 트리 루트가 바뀌는 순간 이전 폴더의 항목이 남아 있으면 안 된다 (리뷰 지적 2: 그 항목으로 원본 파일을 바꿀 수 있었다).
+  // React가 그린 직후마다 본다: 작업그룹 표시와 다른 폴더의 행이 함께 있으면 기록한다.
+  const stale: string[] = [];
+  const watchStale = new MutationObserver(() => {
+    const label = worktreeLabel();
+    const rows = fileRows().map((el) => el.title);
+    const wrong = label ? rows.filter((r) => r.startsWith(`${root}/`)) : rows.filter((r) => r.includes("/worktrees/") && !r.includes("\n"));
+    if (wrong.length) stale.push(`${label || "원본"}: ${wrong[0]}`);
+  });
+  watchStale.observe(document.querySelector(".sidebar")!, { childList: true, subtree: true, characterData: true, attributes: true });
+  await clickMenu("Terminal", "New Work Group");
+  await waitFor("작업그룹 탭", () => tabCount() === before + 1, 15000);
+  check("작업그룹 추가: ⇧⌘T(메뉴)로 새 탭, 이름은 <그룹>-1", tabTitles().at(-1) === "test-1" && activeTabIndex() === before, tabTitles().join(","));
+  const [g] = await waitFor("작업그룹 터미널", () => visiblePanes().length === 1 && visiblePanes()[0].term !== first && visiblePanes());
+  await ready(g.term);
+  const pwd = (await run(g.term, "pwd")).map((l) => l.trim()).find((l) => l.startsWith("/")) ?? "";
+  check("작업그룹 추가: 터미널이 worktree 폴더에서 시작 (DDAK_HOME/worktrees/<프로젝트>-<해시>/test-1)", /\/home-main\/worktrees\/proj-[0-9a-f]{6}\/test-1$/.test(pwd), pwd);
+
+  const out = async (cmd: string) => (await run(g.term, cmd)).map((l) => l.trim()).filter(Boolean);
+  const branches = await out("for d in server web cloned linked; do printf '%s=' $d; git -C $d branch --show-current; done");
+  check(
+    "작업그룹 추가: 저장소마다 worktree, 브랜치 ddak/test-1 (같은 저장소의 두 번째는 이름을 붙임)",
+    ["server=ddak/test-1", "web=ddak/test-1-web", "cloned=ddak/test-1", "linked=ddak/test-1"].every((x) => branches.includes(x)),
+    branches.join("|"),
+  );
+  const links = await out("readlink A_dir a.txt");
+  check("작업그룹 추가: 저장소가 아닌 항목은 원본으로 링크", links.includes(`${root}/A_dir`) && links.includes(`${root}/a.txt`), links.join("|"));
+  const origin = await out(`git -C "${root}/server" branch --show-current`);
+  check("작업그룹 추가: 원본 저장소의 브랜치는 그대로", !origin.includes("ddak/test-1"), origin.join("|"));
+
+  // 파일 트리는 보고 있는 탭의 폴더를 따라간다
+  await waitFor("트리가 worktree로", () => worktreeLabel() === "test-1" && fileRow("server")?.title === `${pwd}/server`, 3000).then(
+    () => check("작업그룹 추가: 파일 트리가 작업그룹 폴더를 보여 줌 (프로젝트 행에 그룹 이름)", true),
+    () => check("작업그룹 추가: 파일 트리가 작업그룹 폴더를 보여 줌 (프로젝트 행에 그룹 이름)", false, `${worktreeLabel()} ${fileRow("server")?.title}`),
+  );
+  check("작업그룹 추가: 트리에서 worktree 저장소 아이콘", fileRow("server")?.dataset.git === "worktree");
+  key("1", "Digit1");
+  await waitFor("원본 탭으로", () => worktreeLabel() === "" && fileRow("server")?.title === `${root}/server`, 3000).then(
+    () => check("작업그룹 추가: 원본 탭으로 가면 트리도 원본", true),
+    () => check("작업그룹 추가: 원본 탭으로 가면 트리도 원본", false, `${worktreeLabel()} ${fileRow("server")?.title}`),
+  );
+  watchStale.disconnect();
+  check("작업그룹 추가: 트리 루트가 바뀔 때 이전 폴더 항목이 남지 않음", stale.length === 0, stale.slice(0, 2).join(" | "));
+  // 오른쪽 클릭 메뉴도 루트가 바뀌면 닫는다. 메뉴 항목은 이전 폴더 경로로 만들어져 있다.
+  // (이름 입력란은 탭을 바꾸면 터미널이 포커스를 가져가 blur로 이미 닫힌다)
+  key("2", "Digit2");
+  await waitFor("작업그룹 탭으로", () => worktreeLabel() === "test-1" && fileRow("a.txt")?.title.startsWith(pwd), 3000);
+  rightClick(fileRow("a.txt")!);
+  await waitFor("메뉴", contextMenu, 3000);
+  key("1", "Digit1");
+  await waitFor("원본으로", () => worktreeLabel() === "" && fileRow("a.txt")?.title.startsWith(`${root}/`), 3000);
+  check("작업그룹 추가: 트리 루트가 바뀌면 오른쪽 클릭 메뉴를 닫음", !contextMenu());
+
+
+  // 두 번째는 -2. 탭 바 버튼으로
+  const groupBtn = document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) [data-action=new-group]")!;
+  // 탭 바 버튼은 모두 아이콘이고 세로 가운데에 (인라인 SVG는 글자 기준선에 놓여 위로 쏠렸었다)
+  const offs = [...groupBtn.parentElement!.querySelectorAll<HTMLElement>(".tabbar-btn")].map((btn) => {
+    const [br, ir] = [btn.getBoundingClientRect(), btn.querySelector("svg")?.getBoundingClientRect()];
+    return ir ? ir.top + ir.height / 2 - (br.top + br.height / 2) : NaN;
+  });
+  check("작업그룹 추가: 탭 바 버튼 아이콘 넷이 세로 가운데", offs.length === 4 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
+  groupBtn.click();
+  await waitFor("두 번째 작업그룹", () => tabCount() === before + 2, 15000);
+  check("작업그룹 추가: 탭 바 버튼으로 두 번째는 test-2", tabTitles().at(-1) === "test-2", tabTitles().join(","));
+
+  // 실패하면 되돌린다: 커밋 없는 저장소가 있으면 worktree를 만들 수 없다
+  await run(first, `git init -q "${root}/zempty"`);
+  await clickMenu("Terminal", "New Work Group");
+  const err = await waitFor("실패 오류", () => [...document.querySelectorAll(".sidebar .sidebar-error")].map((e) => e.textContent ?? "").find((e) => e.startsWith("Could not create the work group")), 15000);
+  check("작업그룹 추가: 실패하면 오류 표시, 탭은 그대로", err.includes("zempty") && tabCount() === before + 2, err);
+  const left = (await run(first, `git -C "${root}/server" branch --list 'ddak/test-3*' | wc -l; ls "${pwd.replace(/test-1$/, "")}"`)).map((l) => l.trim()).filter(Boolean);
+  check("작업그룹 추가: 실패하면 만든 worktree·브랜치를 지움", left.includes("0") && !left.includes("test-3"), left.join("|"));
+  await run(first, `rm -rf "${root}/zempty"`);
+
+  // 작업그룹 탭 닫기 (worktree는 남긴다: 정리는 6단계)
+  for (let i = 0; i < 2; i++) await menu("close_pane");
+  await waitFor("작업그룹 탭 닫기", () => tabCount() === before, 5000);
+}
+
+// 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
+async function testTabRename() {
+  const tab = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active")!;
+  const title = () => tab().querySelector(".tab-title")?.textContent ?? "";
+  const input = () => tab().querySelector<HTMLInputElement>(".tab-input");
+  const press = (el: HTMLElement, key: string, keyCode = 0) => {
+    const ev = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "keyCode", { get: () => keyCode });
+    el.dispatchEvent(ev);
+  };
+  const terminalFocused = () => document.activeElement?.classList.contains("xterm-helper-textarea") ?? false;
+  const original = title();
+
+  tab().querySelector(".tab-title")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  const a = await waitFor("탭 이름 입력란", input, 3000);
+  check("탭 이름: 더블클릭하면 입력란, 포커스, 지금 이름 전체 선택", document.activeElement === a && a.value === original && a.selectionStart === 0 && a.selectionEnd === original.length, `${a.value} ${a.selectionStart}-${a.selectionEnd}`);
+  check("탭 이름: 입력란을 눌러도 기본 동작을 막지 않음 (커서 옮기기)", !mouseDown(a));
+  setInput(a, "내 작업");
+  // 한글 조합을 확정하는 Enter(keyCode 229)는 확정이 아니다
+  press(a, "Enter", 229);
+  await sleep(100); // 끝났다면 React가 입력란을 지울 때까지
+  check("탭 이름: 조합 확정 Enter로는 끝나지 않음", input() === a && title() === "", title());
+  press(a, "Enter", 13);
+  await waitFor("바뀐 탭 이름", () => !input() && title() === "내 작업", 3000).then(
+    () => check("탭 이름: Enter로 확정, 터미널로 포커스", terminalFocused(), document.activeElement?.className ?? ""),
+    () => check("탭 이름: Enter로 확정, 터미널로 포커스", false, title()),
+  );
+
+  rightClick(tab());
+  await waitFor("탭 메뉴", contextMenu);
+  check("탭 이름: 오른쪽 클릭 메뉴에 항목", menuLabels().join(",") === "Rename Tab…", menuLabels().join(","));
+  await pickMenu("Rename Tab…");
+  const b = await waitFor("탭 이름 입력란", input, 3000);
+  setInput(b, "never");
+  press(b, "Escape");
+  await waitFor("Esc로 취소", () => !input(), 3000);
+  check("탭 이름: Esc로 취소, 이름 그대로", title() === "내 작업", title());
+
+  tab().dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  const c = await waitFor("탭 이름 입력란", input, 3000);
+  setInput(c, "blurred");
+  c.blur();
+  await waitFor("다른 곳을 누르면 확정", () => !input(), 3000);
+  check("탭 이름: 다른 곳을 누르면 확정", title() === "blurred", title());
+
+  tab().dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  const d = await waitFor("탭 이름 입력란", input, 3000);
+  setInput(d, "  ");
+  press(d, "Enter", 13);
+  await waitFor("비우면 원래 이름", () => !input(), 3000);
+  check("탭 이름: 비우면 원래 이름으로", title() === original, title());
+}
+
+// 탭을 끌어서 순서 바꾸기
+async function testTabMove() {
+  const tabs = document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tabs")!;
+  const ids = () => [...tabs.querySelectorAll<HTMLElement>(".tab")].map((el) => el.dataset.tab!);
+  const tabEl = (id: string) => tabs.querySelector<HTMLElement>(`.tab[data-tab="${id}"]`)!;
+  const center = (el: Element) => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  };
+  // 실제 끌기처럼 누르고, 몇 번에 나눠 움직이고, 뗀다
+  const drag = async (id: string, toX: number, steps = 5) => {
+    const from = center(tabEl(id));
+    tabEl(id).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: from.x, clientY: from.y }));
+    for (let i = 1; i <= steps; i++) {
+      window.dispatchEvent(new PointerEvent("pointermove", { buttons: 1, clientX: from.x + ((toX - from.x) * i) / steps, clientY: from.y }));
+      await sleep(30);
+    }
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: toX, clientY: from.y }));
+    await sleep(50);
+  };
+
+  const before = tabCount();
+  for (let i = 0; i < 2; i++) await menu("new_tab");
+  await waitFor("탭 셋 이상", () => tabCount() === before + 2, 5000);
+  const start = ids();
+  const [first, last] = [start[0], start.at(-1)!];
+
+  await drag(last, tabEl(first).getBoundingClientRect().left + 2);
+  check("탭 순서: 마지막 탭을 맨 앞으로 끌기", ids().join() === [last, ...start.slice(0, -1)].join(), `${start.join()} → ${ids().join()}`);
+  check("탭 순서: 끈 탭이 활성", tabEl(last).classList.contains("active"));
+  check("탭 순서: 끝나면 끄는 표시가 사라짐", !tabs.querySelector(".tab.dragging"));
+
+  const moved = ids();
+  await drag(moved[1], center(tabEl(moved[1])).x + 2, 1);
+  check("탭 순서: 4px 안쪽 움직임은 끌기가 아님", ids().join() === moved.join(), ids().join());
+
+  await drag(last, tabEl(ids().at(-1)!).getBoundingClientRect().right - 2);
+  check("탭 순서: 다시 맨 뒤로", ids().join() === start.join(), ids().join());
+
+  // 끌기가 끝나는 다른 경우들 (리뷰 지적 5). 끝난 뒤의 움직임으로 순서가 바뀌면 안 된다.
+  const farLeft = tabEl(first).getBoundingClientRect().left + 2;
+  const press = (id: string) => {
+    const c = center(tabEl(id));
+    tabEl(id).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: c.x, clientY: c.y }));
+    return c;
+  };
+  let c = press(last);
+  window.dispatchEvent(new PointerEvent("pointercancel", {}));
+  window.dispatchEvent(new PointerEvent("pointermove", { buttons: 1, clientX: farLeft, clientY: c.y }));
+  await sleep(50);
+  check("탭 순서: pointercancel 뒤 움직임은 끌기가 아님", ids().join() === start.join(), ids().join());
+  window.dispatchEvent(new PointerEvent("pointerup", {})); // 수정 전 코드에서도 다음 검사가 섞이지 않게
+
+  // 창 밖에서 버튼을 떼면 pointerup이 오지 않는다. 버튼이 눌려 있지 않은 움직임이 오면 끝난 것으로 본다.
+  c = press(last);
+  window.dispatchEvent(new PointerEvent("pointermove", { buttons: 0, clientX: farLeft, clientY: c.y }));
+  await sleep(50);
+  check("탭 순서: 버튼을 뗀 뒤 움직임은 끌기가 아님", ids().join() === start.join(), ids().join());
+  window.dispatchEvent(new PointerEvent("pointerup", {}));
+
+  for (const id of start.slice(-2)) tabEl(id).querySelector<HTMLElement>(".tab-close")!.click();
+  await waitFor("추가한 탭 닫기", () => tabCount() === before, 5000);
+}
+
+// 탭이 많으면 탭 영역만 스크롤하고 버튼은 늘 보인다. 활성 탭은 보이게 스크롤한다.
+async function testTabScroll() {
+  const bar = document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tabbar")!;
+  const tabs = bar.querySelector<HTMLElement>(".tabs")!;
+  const before = tabCount();
+  const added = 15;
+  for (let i = 0; i < added; i++) await menu("new_tab");
+  await waitFor("탭 여럿", () => tabCount() === before + added, 5000);
+  await sleep(100);
+  const inside = (el: Element, box: Element) => {
+    const [r, b] = [el.getBoundingClientRect(), box.getBoundingClientRect()];
+    return r.left >= b.left - 0.5 && r.right <= b.right + 0.5;
+  };
+  const active = () => tabs.querySelector(".tab.active")!;
+  check("탭 스크롤: 탭 영역이 넘침", tabs.scrollWidth > tabs.clientWidth, `${tabs.scrollWidth} > ${tabs.clientWidth}`);
+  check("탭 스크롤: 탭 바 전체는 스크롤되지 않음", bar.scrollWidth <= bar.clientWidth, `${bar.scrollWidth} ${bar.clientWidth}`);
+  check("탭 스크롤: 버튼 넷이 모두 보임", [...bar.querySelectorAll(".tabbar-btn")].every((b) => inside(b, bar)));
+  const diag = async () => {
+    const el = active() as HTMLElement;
+    return `scroll=${tabs.scrollLeft} active=${activeTabIndex()} left=${el.offsetLeft} w=${el.offsetWidth} box=${tabs.clientWidth}/${tabs.scrollWidth} ${await frameInfo()}`;
+  };
+  // 스크롤 맞추기는 ResizeObserver(화면 갱신)로 오므로 고정 시간이 아니라 조건을 기다린다
+  const visibleCheck = (name: string) =>
+    waitFor(name, () => tabs.scrollLeft > 0 && inside(active(), tabs), 3000).then(
+      () => check(name, true),
+      async () => check(name, false, await diag()),
+    );
+  await visibleCheck("탭 스크롤: 새 탭(활성)이 보이게 스크롤됨");
+  // 뒤늦게 터미널 제목이 와서 앞 탭이 넓어져도 활성 탭은 계속 보인다 (예전에 밀려나 실패했다)
+  tabs.querySelector<HTMLElement>(".tab:first-child .tab-title")!.textContent += " a much longer title";
+  await sleep(100);
+  await visibleCheck("탭 스크롤: 앞 탭이 넓어져도 활성 탭이 보임");
+  check("탭 스크롤: 탭 높이에 스크롤바 자리 없음", tabs.clientHeight === tabs.offsetHeight, `${tabs.clientHeight} ${tabs.offsetHeight}`);
+  key("1", "Digit1");
+  await waitFor("첫 탭으로", () => activeTabIndex() === 0 && inside(active(), tabs), 3000).then(
+    () => check("탭 스크롤: ⌘1로 첫 탭이 보이게 스크롤됨", tabs.scrollLeft === 0, `${tabs.scrollLeft}`),
+    () => check("탭 스크롤: ⌘1로 첫 탭이 보이게 스크롤됨", false, `${activeTabIndex()} ${tabs.scrollLeft}`),
+  );
+  tabs.dispatchEvent(new WheelEvent("wheel", { deltaY: 200, bubbles: true }));
+  await sleep(50);
+  check("탭 스크롤: 마우스 휠로 가로 스크롤", tabs.scrollLeft > 0, `${tabs.scrollLeft}`);
+  // 활성 탭(첫 탭)을 밀어낸 상태에서 탭 크기가 바뀌어도 (터미널 제목 등) 되돌아오지 않는다
+  const last = tabs.querySelector<HTMLElement>(".tab:last-child .tab-title")!;
+  last.textContent += " longer title";
+  await sleep(100);
+  check("탭 스크롤: 휠로 넘긴 뒤 탭 크기가 바뀌어도 그대로", tabs.scrollLeft === 200, `${tabs.scrollLeft}`);
+  // 다른 탭을 닫아도 넘겨 둔 자리 그대로 (리뷰 지적 6)
+  tabs.querySelector<HTMLElement>(".tab:last-child .tab-close")!.click();
+  await waitFor("탭 하나 닫기", () => tabCount() === before + added - 1, 3000);
+  await frameInfo();
+  await sleep(50);
+  check("탭 스크롤: 휠로 넘긴 뒤 다른 탭을 닫아도 그대로", activeTabIndex() === 0 && tabs.scrollLeft === 200, `${activeTabIndex()} ${tabs.scrollLeft}`);
+
+  key("9", "Digit9");
+  await waitFor("마지막 탭으로", () => activeTabIndex() === before + added - 2, 3000);
+  for (let i = 0; i < added - 1; i++) await menu("close_pane");
+  await waitFor("추가한 탭 닫기", () => tabCount() === before, 5000);
+}
+
 async function testLastExit(first: Terminal) {
   first.input("exit\r");
   await waitFor("빈 화면", () => document.querySelector(".workspace-empty"), 10000);
   check("닫기: 모든 터미널을 닫으면 빈 화면", true);
-  document.querySelector<HTMLElement>(".workspace-empty button")!.click();
+  const ws = document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const buttons = [...ws.querySelectorAll(".workspace-empty button")].map((b) => b.textContent);
+  check(
+    "닫기: 빈 화면에서 원본 작업그룹·새 작업그룹·새 터미널을 열 수 있음",
+    buttons.join("|") === "Open Test in Project Folder|New Work Group (⇧⌘T)|New Terminal (⌘T)",
+    buttons.join("|"),
+  );
+  const btns = [...ws.querySelectorAll<HTMLButtonElement>(".tabbar-btn")];
+  check("닫기: 빈 화면에도 탭 바 (분할 버튼만 비활성)", btns.length === 4 && btns.map((b) => b.disabled).join() === "false,false,true,true", btns.map((b) => b.disabled).join());
+  ws.querySelector<HTMLElement>("[data-action=origin-group]")!.click();
   const term = await waitFor("다시 열기", () => visiblePanes()[0]?.term);
   await ready(term);
-  check("닫기: 빈 화면에서 새 터미널", tabCount() === 1);
+  const pwd = (await run(term, "pwd")).map((l) => l.trim());
+  check("닫기: 빈 화면에서 원본 폴더의 기본 작업그룹", tabCount() === 1 && ws.querySelector(".tab-title")?.textContent === "Test" && pwd.includes(ws.dataset.project!), `${ws.querySelector(".tab-title")?.textContent} ${pwd.join("|")}`);
 }
 
 // 프로젝트를 열면 기본 작업그룹(scripts/selftest.sh의 "trio")의 세션들이 첫 탭에 나란히 뜬다.
@@ -1236,11 +1531,16 @@ export async function runSelftest(root: string, scenario: string) {
     await testRename(root, first);
     await testImeUnit();
     await testGroups(first);
+    await testGroupWorktree(root, first);
+    await testTabRename();
     await testPrefs();
     await testZoom(first);
     await testClaude(first);
     await testTabsAndSplits(root, first);
     await testWebglLoss(first);
+    // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다
+    await testTabMove();
+    await testTabScroll();
     await testManyTerminals(20);
     await testProjects(root, first);
     await testLastExit(first);

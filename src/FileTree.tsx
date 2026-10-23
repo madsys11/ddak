@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MenuItem } from "./ContextMenu";
 import { codeError } from "./errors";
-import { RepoIcon, WorktreeIcon } from "./icons";
+import { ChevronIcon, RepoIcon, WorktreeIcon } from "./icons";
 import { useT } from "./prefs";
 import { watchDir } from "./watchDir";
 
@@ -132,7 +132,7 @@ function NewEntry({ dir, kind, depth }: { dir: string; kind: Kind; depth: number
   return (
     <>
       <div className="tree-row tree-input-row" style={{ paddingLeft: indent(depth) }}>
-        <span className="tree-twisty">{kind === "dir" ? "▸" : ""}</span>
+        <Twisty open={kind === "dir" ? false : null} />
         <input {...inputProps} data-kind={kind} placeholder={t(kind === "dir" ? "tree.newFolder" : "tree.newFile")} />
       </div>
       {nameError(error, depth)}
@@ -179,7 +179,7 @@ function Node({ entry, dir, depth }: { entry: Entry; dir: string; depth: number 
         data-git={entry.git ?? undefined}
         data-link={entry.link ?? undefined}
       >
-        <span className="tree-twisty">{entry.is_dir ? (open ? "▾" : "▸") : ""}</span>
+        <Twisty open={entry.is_dir ? open : null} />
         {entry.git === "repo" && <RepoIcon title={t("tree.repo")} />}
         {entry.git === "worktree" && <WorktreeIcon title={t("tree.worktree")} />}
         {tree.renaming === entry.path ? <RenameInput entry={entry} /> : <span className="tree-name">{entry.name}</span>}
@@ -192,3 +192,12 @@ function Node({ entry, dir, depth }: { entry: Entry; dir: string; depth: number 
 }
 
 export const indent = (depth: number) => 8 + depth * 12;
+
+// 펼치기/접기 화살표. open이 null이면 (파일) 자리만 차지한다. 같은 요소의 클래스만 바뀌어서 회전이 애니메이션된다.
+export function Twisty({ open, onClick }: { open: boolean | null; onClick?: (e: React.MouseEvent) => void }) {
+  return (
+    <span className={`tree-twisty${open ? " open" : ""}`} data-open={open ?? undefined} onClick={onClick}>
+      {open !== null && <ChevronIcon />}
+    </span>
+  );
+}

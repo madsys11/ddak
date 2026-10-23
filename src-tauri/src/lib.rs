@@ -6,6 +6,7 @@ mod pty;
 mod repos;
 mod selftest;
 mod watch;
+mod worktrees;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,6 +29,7 @@ pub fn run() {
             watch::fs_unwatch,
             repos::repo_link,
             repos::repo_clone,
+            worktrees::group_create,
             projects::projects_load,
             projects::projects_save,
             menu::set_menu,

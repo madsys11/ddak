@@ -4,12 +4,15 @@
 set -e
 cd "$(dirname "$0")/.."
 
-# base/proj: 테스트할 프로젝트, base/other: 두 번째 프로젝트, base/data-<시나리오>: 앱 데이터(프로젝트 목록)
+# base/proj: 테스트할 프로젝트, base/other: 두 번째 프로젝트, base/data-<시나리오>: 앱 데이터(프로젝트 목록),
+# base/home-<시나리오>: ~/.ddak 대신 (작업그룹 worktree)
 base=$(mktemp -d -t ddak-selftest)
 trap 'rm -rf "$base"' EXIT
 base=$(cd "$base" && pwd -P) # /var → /private/var. 셸의 pwd와 맞추기 위해
 root="$base/proj"
-mkdir -p "$root/A_dir" "$root/b_dir" "$root/.git" "$base/other"
+# (프로젝트 폴더에 .git을 두지 않는다. 있으면 프로젝트 자체가 저장소로 잡혀 작업그룹 worktree가 달라진다.
+#  .git 숨기기는 Rust 단위 테스트가 본다)
+mkdir -p "$root/A_dir" "$root/b_dir" "$base/other"
 touch "$root/a.txt" "$root/z.txt" "$root/.DS_Store" "$root/A_dir/inner.txt"
 # server: 저장소, web: server의 worktree (파일 트리 아이콘 확인용)
 git init -q "$root/server"
@@ -27,7 +30,7 @@ config="{\"build\":{\"devUrl\":\"http://localhost:$port\",\"beforeDevCommand\":\
 run() {
   local scenario=$1 data="$base/data-$1"
   echo "--- $scenario" >&2
-  DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_DATA_DIR="$data" \
+  DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_DATA_DIR="$data" DDAK_HOME="$base/home-$1" \
     npx tauri dev --no-watch --config "$config" 2>&1 \
     | sed -n '/=== DDAK SELFTEST BEGIN ===/,/=== DDAK SELFTEST \(PASS\|FAIL\) ===/p' \
     | tee /dev/stderr | grep -q "=== DDAK SELFTEST PASS ==="
