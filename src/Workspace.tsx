@@ -83,17 +83,22 @@ const MENU: Record<string, Action> = {
 
 const pct = (v: number) => `${v * 100}%`;
 
-const focusPane = (pane: number) =>
-  document.querySelector<HTMLElement>(`.pane[data-pane="${pane}"] .xterm-helper-textarea`)?.focus();
-
-export function Workspace({ cwd }: { cwd: string }) {
+// 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
+export function Workspace({ cwd, visible }: { cwd: string; visible: boolean }) {
   const t = useT();
   const [s, dispatch] = useReducer(reducer, initial);
   const bodies = useRef<Record<number, HTMLDivElement | null>>({});
+  const root = useRef<HTMLDivElement>(null);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+
+  // 터미널 번호는 Workspace마다 따로 매기므로 자기 영역 안에서만 찾는다.
+  const focusPane = (pane: number) =>
+    root.current?.querySelector<HTMLElement>(`.pane[data-pane="${pane}"] .xterm-helper-textarea`)?.focus();
 
   // 단축키 대부분은 네이티브 메뉴(src-tauri/src/menu.rs)가 받아서 "menu" 이벤트로 보낸다.
   useEffect(() => {
-    const unlisten = listen<string>("menu", (e) => MENU[e.payload] && dispatch(MENU[e.payload]));
+    const unlisten = listen<string>("menu", (e) => visibleRef.current && MENU[e.payload] && dispatch(MENU[e.payload]));
     return () => {
       unlisten.then((f) => f());
     };
@@ -102,7 +107,7 @@ export function Workspace({ cwd }: { cwd: string }) {
   // 메뉴에 넣기 애매한 탭 이동 단축키. 터미널보다 먼저 받도록 capture 단계에서 처리한다.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.metaKey || e.altKey || e.ctrlKey) return;
+      if (!visibleRef.current || !e.metaKey || e.altKey || e.ctrlKey) return;
       let action: Action | undefined;
       if (!e.shiftKey && e.key >= "1" && e.key <= "9") {
         action = e.key === "9" ? { type: "selectTabAt", index: s.tabs.length - 1 } : { type: "selectTabAt", index: Number(e.key) - 1 };
@@ -138,14 +143,14 @@ export function Workspace({ cwd }: { cwd: string }) {
 
   if (s.tabs.length === 0) {
     return (
-      <div className="workspace-empty">
+      <div className="workspace-empty" ref={root}>
         <button onClick={() => dispatch({ type: "newTab" })}>{t("workspace.newTerminal")}</button>
       </div>
     );
   }
 
   return (
-    <div className="workspace">
+    <div className="workspace" ref={root}>
       {/* 탭 바를 눌러도 터미널이 포커스를 잃지 않게 한다. Terminal의 포커스 효과는
           focused 값이 바뀔 때만 돌아서, 활성 탭을 다시 누르거나 다른 탭의 ×를 누르면 복원되지 않는다. */}
       <div className="tabbar" onMouseDownCapture={(e) => e.preventDefault()}>
@@ -210,7 +215,7 @@ export function Workspace({ cwd }: { cwd: string }) {
               >
                 <Terminal
                   cwd={cwd}
-                  focused={active && tab.focus === id}
+                  focused={visible && active && tab.focus === id}
                   onFocus={() => dispatch({ type: "focus", pane: id })}
                   onTitle={(title) => dispatch({ type: "title", pane: id, title })}
                   onExit={() => dispatch({ type: "closePane", pane: id })}

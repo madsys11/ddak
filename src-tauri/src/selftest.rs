@@ -4,15 +4,31 @@
 use tauri::AppHandle;
 use tauri::menu::MenuItemKind;
 
+#[derive(serde::Serialize)]
+pub struct Config {
+    root: String,
+    // 시나리오 묶음 (src/selftest.ts의 runSelftest). 앱을 다시 켜야 하는 경우를 위해 나눈다.
+    scenario: String,
+}
+
 #[tauri::command]
-pub fn selftest_config() -> Option<String> {
-    std::env::var("DDAK_SELFTEST").ok()
+pub fn selftest_config() -> Option<Config> {
+    Some(Config {
+        root: std::env::var("DDAK_SELFTEST").ok()?,
+        scenario: std::env::var("DDAK_SELFTEST_SCENARIO").unwrap_or_else(|_| "main".into()),
+    })
 }
 
 #[tauri::command]
 pub fn selftest_report(app: AppHandle, ok: bool, log: String) {
     println!("=== DDAK SELFTEST BEGIN ===\n{log}\n=== DDAK SELFTEST {} ===", if ok { "PASS" } else { "FAIL" });
     app.exit(if ok { 0 } else { 1 });
+}
+
+// 파일 트리가 감시 중인 폴더 (접으면 감시가 풀리는지 확인용)
+#[tauri::command]
+pub fn selftest_watched(state: tauri::State<crate::watch::Watches>) -> Vec<String> {
+    state.watched()
 }
 
 // 실제로 걸린 네이티브 메뉴를 "상위/항목" 목록으로 돌려준다. 체크된 항목은 끝에 " [x]".

@@ -30,6 +30,20 @@ const dark: Theme = {
     "--button-fg": "#CCCCCC",
     "--button-border": "#3C3C3C",
     "--button-hover": "#3A3A3A",
+    "--row-active": "#37373D", // list.inactiveSelectionBackground
+    // 파일 트리 아이콘. 저장소·worktree는 git 장식 색(수정됨·추가됨)
+    "--icon-project": "#4DAAFC",
+    "--icon-repo": "#E2C08D",
+    "--icon-worktree": "#81B88B",
+    "--tree-link": "#9D9D9D",
+    // 대화상자
+    "--overlay": "#00000080",
+    "--widget-bg": "#202020", // editorWidget.background
+    "--input-bg": "#313131",
+    "--input-border": "#3C3C3C",
+    "--focus-border": "#0078D4",
+    "--menu-hover-bg": "#0078D4", // menu.selectionBackground
+    "--menu-hover-fg": "#FFFFFF",
   },
   terminal: {
     background: "#1F1F1F",
@@ -74,6 +88,18 @@ const solarizedLight: Theme = {
     "--button-fg": "#FFFFFF",
     "--button-border": "#AC9D57",
     "--button-hover": "#9D8E4C",
+    "--row-active": "#DFCA8888",
+    "--icon-project": "#268BD2",
+    "--icon-repo": "#B58900",
+    "--icon-worktree": "#859900",
+    "--tree-link": "#93A1A1",
+    "--overlay": "#00000033",
+    "--widget-bg": "#EEE8D5",
+    "--input-bg": "#DDD6C1",
+    "--input-border": "#D3AF86",
+    "--focus-border": "#B49471",
+    "--menu-hover-bg": "#DFCA88", // list.activeSelectionBackground
+    "--menu-hover-fg": "#6C6C6C",
   },
   terminal: {
     background: "#FDF6E3",
@@ -111,6 +137,9 @@ export function applyTheme(id: ThemeId) {
   const root = document.documentElement;
   const theme = THEMES[id];
   for (const [name, value] of Object.entries(theme.ui)) root.style.setProperty(name, value);
+  // xterm.css가 .xterm-viewport 배경을 #000으로 고정해 둔다. 마지막 줄 아래 남는 공간이 이 색으로 보이므로
+  // 터미널 배경색으로 덮는다 (App.css).
+  root.style.setProperty("--terminal-bg", theme.terminal.background!);
   root.style.colorScheme = theme.scheme;
   root.dataset.theme = id;
 }

@@ -46,8 +46,41 @@ button:hover {
   background: var(--sidebar-bg);
   border-right: 1px solid var(--border);
 }
-.sidebar-open {
-  margin: 8px;
+.sidebar-header {
+  height: 35px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+.icon-btn {
+  padding: 0 6px;
+  line-height: 20px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: none;
+}
+.icon-btn:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.sidebar-error {
+  padding: 4px 12px;
+  color: var(--error);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.empty-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
 }
 
 .tree {
@@ -55,24 +88,60 @@ button:hover {
   overflow: auto;
   user-select: none;
 }
-.tree-title {
-  padding: 8px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--fg-dim);
-}
 .tree-row {
   height: 22px;
-  line-height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   white-space: nowrap;
   cursor: pointer;
+}
+.tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.icon {
+  flex-shrink: 0;
+}
+.icon-project {
+  color: var(--icon-project);
+}
+.icon-repo {
+  color: var(--icon-repo);
+}
+.icon-worktree {
+  color: var(--icon-worktree);
+}
+.project-row {
+  font-weight: 600;
+}
+.project-row.active {
+  background: var(--row-active);
+}
+.project-row.missing {
+  color: var(--fg-dim);
+  text-decoration: line-through;
+  cursor: default;
+}
+.row-action {
+  visibility: hidden;
+  padding: 0 8px;
+  color: var(--fg-dim);
+}
+.tree-row:hover .row-action {
+  visibility: visible;
+}
+.row-action:hover {
+  color: var(--fg);
 }
 .tree-row:hover {
   background: var(--hover);
 }
 .tree-twisty {
   display: inline-block;
+  flex-shrink: 0;
   width: 14px;
   color: var(--fg-dim);
 }
@@ -81,6 +150,12 @@ button:hover {
 }
 
 .panel {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+
+.project-workspace {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -175,6 +250,10 @@ button:hover {
 .terminal {
   height: 100%;
 }
+/* xterm.css의 background-color: #000을 덮는다 (불러오는 순서와 무관하게 이기도록 선택자를 더 구체적으로) */
+.terminal .xterm .xterm-viewport {
+  background-color: var(--terminal-bg);
+}
 .divider {
   position: absolute;
   z-index: 1;
@@ -193,4 +272,161 @@ button:hover {
 }
 .divider:hover {
   background: var(--accent-dim);
+}
+
+.tree-link {
+  flex-shrink: 0;
+  padding-right: 8px;
+  font-size: 11px;
+  color: var(--tree-link);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.secondary {
+  color: var(--fg);
+  background: transparent;
+  border-color: var(--input-border);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: start center;
+  padding-top: 12vh;
+  background: var(--overlay);
+}
+.modal {
+  width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: var(--widget-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px var(--overlay);
+}
+.modal label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--fg-dim);
+}
+.modal input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  outline: none;
+}
+.modal input:focus {
+  border-color: var(--focus-border);
+}
+.modal-title {
+  font-weight: 600;
+}
+.modal-sub,
+.modal-hint {
+  margin-top: -8px;
+  color: var(--fg-dim);
+}
+.modal-hint {
+  margin-top: 0;
+  font-size: 12px;
+}
+.modal-error {
+  color: var(--error);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.field-row {
+  display: flex;
+  gap: 6px;
+}
+.segmented {
+  display: flex;
+}
+.segmented button {
+  flex: 1;
+  color: var(--fg-dim);
+  background: transparent;
+  border-color: var(--input-border);
+  border-radius: 0;
+}
+.segmented button:first-child {
+  border-radius: 4px 0 0 4px;
+}
+.segmented button:last-child {
+  border-left: none;
+  border-radius: 0 4px 4px 0;
+}
+.segmented button.on {
+  color: var(--button-fg);
+  background: var(--button-bg);
+  border-color: var(--button-border);
+}
+
+.context-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--widget-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px var(--overlay);
+  user-select: none;
+}
+.context-item {
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.context-item:hover {
+  color: var(--menu-hover-fg);
+  background: var(--menu-hover-bg);
+}
+.context-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.tree-input-row {
+  cursor: default;
+}
+.tree-input-row:hover {
+  background: none;
+}
+.tree-input {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+  margin-right: 8px;
+  padding: 0 4px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--focus-border);
+  outline: none;
+}
+.tree-input.invalid {
+  border-color: var(--error);
 }

@@ -16,6 +16,13 @@ const TERMINAL_ITEMS: &[(&str, &str)] = &[
     ("close_pane", "CmdOrCtrl+W"),
 ];
 
+// 화면 배율 (프론트 src/prefs.tsx). ⌘+는 Shift+=라 ⌘=로 건다 (Safari·VS Code와 같은 키).
+const ZOOM_ITEMS: &[(&str, &str)] = &[
+    ("zoom_in", "CmdOrCtrl+="),
+    ("zoom_out", "CmdOrCtrl+-"),
+    ("zoom_reset", "CmdOrCtrl+0"),
+];
+
 const CLOSE_WINDOW: &str = "close_window";
 const THEME_PREFIX: &str = "theme:";
 const LOCALE_PREFIX: &str = "locale:";
@@ -74,7 +81,12 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         }
         sub.build()
     };
-    let view = SubmenuBuilder::new(app, l("view"))
+    let mut view = SubmenuBuilder::new(app, l("view"));
+    for (id, accel) in ZOOM_ITEMS {
+        view = view.item(&MenuItemBuilder::with_id(*id, l(id)).accelerator(*accel).build(app)?);
+    }
+    let view = view
+        .separator()
         .item(&choices(l("theme"), THEME_PREFIX, &spec.themes)?)
         .item(&choices(l("language"), LOCALE_PREFIX, &spec.locales)?)
         .build()?;
@@ -106,7 +118,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.close();
             }
-        } else if TERMINAL_ITEMS.iter().any(|(item, _)| *item == id)
+        } else if TERMINAL_ITEMS.iter().chain(ZOOM_ITEMS).any(|(item, _)| *item == id)
             || id.starts_with(THEME_PREFIX)
             || id.starts_with(LOCALE_PREFIX)
         {

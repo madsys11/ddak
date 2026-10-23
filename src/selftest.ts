@@ -3,9 +3,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import type { Terminal } from "@xterm/xterm";
-import { liveTerms } from "./devHooks";
+import { devHooks, liveTerms } from "./devHooks";
 import { LOCALES } from "./i18n";
 import { en } from "./i18n/en";
+import { screenPixelRatio } from "./zoom";
 
 const log: string[] = [];
 let failed = false;
@@ -37,14 +38,53 @@ function screen(term: Terminal) {
   return lines;
 }
 
-const rowNames = () => [...document.querySelectorAll(".tree-row")].map((el) => el.lastChild!.textContent!);
+const fileRows = () => [...document.querySelectorAll<HTMLElement>(".tree-row:not(.project-row):not(.tree-input-row)")];
+const rowNames = () => fileRows().map((el) => el.querySelector(".tree-name")!.textContent!);
+const fileRow = (name: string) => fileRows().find((el) => el.querySelector(".tree-name")!.textContent === name);
+const projectRows = () => [...document.querySelectorAll<HTMLElement>(".project-row")];
+const projectRow = (path: string) => projectRows().find((el) => el.dataset.project === path);
+const tabsIn = (path: string) => document.querySelectorAll(`.project-workspace[data-project="${CSS.escape(path)}"] .tab`).length;
+type Store = { projects: { path: string }[]; active: string | null };
+const loadStore = () => invoke<Store>("projects_load");
+// 목록 저장은 화면이 바뀐 뒤 효과에서 일어나므로 조건이 맞을 때까지 다시 읽는다.
+async function waitStore(ok: (s: Store) => boolean, ms = 3000) {
+  const end = Date.now() + ms;
+  let s = await loadStore();
+  while (!ok(s) && Date.now() < end) {
+    await sleep(100);
+    s = await loadStore();
+  }
+  return s;
+}
 
-async function testTree(root: string) {
+// 목록이 빈 상태에서 시작해 테스트용 폴더를 프로젝트로 추가한다.
+async function testProjectStart(root: string) {
+  await waitFor("빈 목록 화면", () => document.querySelector(".empty-box"));
+  check("프로젝트: 목록이 비어 있으면 추가 화면", true);
+  check("프로젝트: 저장된 목록도 비어 있음", (await loadStore()).projects.length === 0);
+
+  const missing = root.replace(/\/proj$/, "/nope");
+  await devHooks.addProject!(missing);
+  const err = await waitFor("없는 폴더 오류", () => document.querySelector(".sidebar-error")?.textContent);
+  check("프로젝트: 없는 폴더는 추가되지 않고 오류 표시", err.includes(missing) && !!document.querySelector(".empty-box"), err);
+
+  await devHooks.addProject!(root + "/"); // 끝의 /는 떼고 저장해야 한다
+  const row = await waitFor("프로젝트 행", () => projectRow(root));
+  check("프로젝트: 추가하면 목록에 나오고 활성", row.classList.contains("active") && row.querySelector(".tree-name")?.textContent === "proj");
+  check("프로젝트: 프로젝트 아이콘", !!row.querySelector("svg.icon-project"));
+  check("프로젝트: 오류 표시가 사라짐", !document.querySelector(".sidebar-error"));
+  const store = await waitStore((s) => s.projects.length === 1);
+  check("프로젝트: 앱 데이터에 저장", store.projects[0]?.path === root && store.active === root, JSON.stringify(store));
+}
+
+async function testTree() {
   const names = await waitFor("트리 표시", () => rowNames().length > 0 && rowNames());
-  check("트리: 폴더 먼저, 대소문자 무시 정렬", names.join(",") === "A_dir,b_dir,a.txt,z.txt", names.join(","));
-  check("트리: 루트 이름 표시", document.querySelector(".tree-title")?.textContent === root.split("/").pop());
+  check("트리: 폴더 먼저, 대소문자 무시 정렬", names.join(",") === "A_dir,b_dir,server,web,a.txt,z.txt", names.join(","));
+  check("트리: 저장소 아이콘", fileRow("server")?.dataset.git === "repo" && !!fileRow("server")?.querySelector("svg.icon-repo"));
+  check("트리: worktree 아이콘", fileRow("web")?.dataset.git === "worktree" && !!fileRow("web")?.querySelector("svg.icon-worktree"));
+  check("트리: 일반 폴더는 아이콘 없음", !fileRow("A_dir")?.querySelector("svg"));
 
-  const aDir = [...document.querySelectorAll<HTMLElement>(".tree-row")].find((el) => el.lastChild!.textContent === "A_dir")!;
+  const aDir = fileRow("A_dir")!;
   aDir.click();
   const opened = await waitFor("폴더 펼치기", () => rowNames().includes("inner.txt") && rowNames());
   check("트리: 클릭하면 펼쳐짐", opened.indexOf("inner.txt") === opened.indexOf("A_dir") + 1, opened.join(","));
@@ -68,10 +108,12 @@ async function run(term: Terminal, cmd: string, ms = 10000) {
 }
 
 // 지금 보이는 탭의 터미널들. 화면에 놓인 순서(위→아래, 왼→오른)대로.
+// 방금 만든 창은 xterm이 등록되기 전일 수 있어 등록된 것만 센다 (안 그러면 term이 비어 있는 창을 집는다).
 function visiblePanes() {
   return [...document.querySelectorAll<HTMLElement>(".pane")]
     .filter((el) => el.offsetParent !== null)
     .map((el) => ({ el, rect: el.getBoundingClientRect(), term: liveTerms.get(el.querySelector(".terminal")!)! }))
+    .filter((p) => p.term)
     .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
 }
 const tabCount = () => document.querySelectorAll(".tab").length;
@@ -217,6 +259,7 @@ async function testPrefs() {
   );
   const terms = [...liveTerms.values()];
   check("테마: 열린 터미널 색도 바뀜", terms.length > 0 && terms.every((tm) => tm.options.theme?.background === "#FDF6E3"));
+  check("테마: 터미널 빈 공간(viewport)도 테마 배경색", bg(".xterm-viewport") === "rgb(253, 246, 227)", bg(".xterm-viewport"));
   const sMenu = await waitMenu((m) => m.includes("보기/테마/Solarized Light [x]"));
   check("메뉴: 테마 선택 표시", sMenu.includes("보기/테마/Solarized Light [x]") && sMenu.includes("보기/테마/다크"));
   check("설정: 언어·테마 저장", localStorage.getItem("ddak.locale") === "ko" && localStorage.getItem("ddak.theme") === "solarized-light");
@@ -230,6 +273,80 @@ async function testPrefs() {
   await clickMenu("View", "Theme", "Dark");
   await waitFor("기본값 복귀", () => document.documentElement.lang === "en" && document.documentElement.dataset.theme === "dark");
   check("테마: 다크로 돌아오면 터미널도 다크", terms.every((tm) => tm.options.theme?.background === "#1F1F1F"));
+}
+
+// 화면 배율: 보기 메뉴(⌘= ⌘- ⌘0)로 웹뷰 전체를 키우고 줄인다.
+// 배율을 바꾸면 CSS 픽셀 기준 창 폭(innerWidth)이 반비례로 바뀌고, 터미널 칸 수도 따라 바뀐다.
+async function testZoom(term: Terminal) {
+  const width = window.innerWidth;
+  const cols = term.cols;
+  const zoomed = (z: number) => Math.abs(window.innerWidth - width / z) < 3;
+  const viewMenu = await waitMenu((m) => m.includes("View/Zoom In"));
+  check("배율: 보기 메뉴에 확대·축소·실제 크기", ["View/Zoom In", "View/Zoom Out", "View/Actual Size"].every((x) => viewMenu.includes(x)));
+
+  await clickMenu("View", "Zoom In");
+  await waitFor("확대", () => zoomed(1.1), 3000).then(
+    () => check("배율: 확대하면 화면 전체가 1.1배", true),
+    (e) => check("배율: 확대하면 화면 전체가 1.1배", false, `${String(e)} ${window.innerWidth} vs ${width}`),
+  );
+  await waitFor("터미널 칸 수 줄어듦", () => term.cols < cols, 3000).then(
+    () => check("배율: 확대하면 터미널 글자도 커짐 (칸 수 줄어듦)", true, `${term.cols} < ${cols}`),
+    (e) => check("배율: 확대하면 터미널 글자도 커짐 (칸 수 줄어듦)", false, String(e)),
+  );
+  // 번짐 방지: 터미널 캔버스 해상도가 (CSS 크기 × 배율 × 화면 픽셀 비율)이어야 늘어나지 않고 그려진다.
+  const sharp = () => {
+    const canvas = term.element!.querySelector<HTMLCanvasElement>(".xterm-screen > canvas:not(.xterm-link-layer)");
+    if (!canvas) return "WebGL 캔버스 없음";
+    const want = canvas.getBoundingClientRect().width * Number(localStorage.getItem("ddak.zoom") ?? 1) * screenPixelRatio();
+    return Math.abs(canvas.width - want) <= 2 ? "" : `canvas ${canvas.width}px, want ${Math.round(want)}px`;
+  };
+  await waitFor("캔버스 해상도", () => sharp() === "", 3000).then(
+    () => check("배율: 터미널 캔버스가 배율만큼 높은 해상도로 그려짐 (번지지 않음)", true),
+    () => check("배율: 터미널 캔버스가 배율만큼 높은 해상도로 그려짐 (번지지 않음)", false, sharp()),
+  );
+  // 리뷰 지적 3: 모니터 변경 감지는 실제 화면 비율 기준 쿼리여야 한다 (덮어쓴 값의 쿼리는 늘 안 맞음).
+  const q = (v: number) => matchMedia(`screen and (resolution: ${v}dppx)`).matches;
+  check("배율: CSS 해상도는 실제 화면 비율을 따름 (모니터 감시는 실제 값으로)", q(screenPixelRatio()) && !q(window.devicePixelRatio), `real=${screenPixelRatio()} dpr=${window.devicePixelRatio}`);
+  const size = await run(term, "stty size");
+  check("배율: 바뀐 칸 수가 PTY에 반영", size.some((l) => l.trim() === `${term.rows} ${term.cols}`), size.join("|"));
+  check("배율: 저장", localStorage.getItem("ddak.zoom") === "1.1");
+
+  await clickMenu("View", "Zoom Out");
+  await clickMenu("View", "Zoom Out");
+  await waitFor("축소", () => zoomed(0.9), 3000).then(
+    () => check("배율: 축소 두 번이면 0.9배", localStorage.getItem("ddak.zoom") === "0.9"),
+    (e) => check("배율: 축소 두 번이면 0.9배", false, `${String(e)} ${window.innerWidth} vs ${width}`),
+  );
+  await waitFor("0.9 해상도", () => sharp() === "", 3000).then(
+    () => check("배율: 축소해도 해상도 맞춤", true),
+    () => check("배율: 축소해도 해상도 맞춤", false, sharp()),
+  );
+  // 2배: 줄 높이가 커서 마지막 줄 아래 남는 공간이 크다. 그 공간(xterm-viewport)이 테마 배경색이어야 한다.
+  // xterm.css가 이 배경을 #000으로 고정해 둬서, 밝은 테마에서 검은 띠로 보였다.
+  for (let i = 0; i < 6; i++) await clickMenu("View", "Zoom In");
+  await waitFor("2배", () => zoomed(2) && sharp() === "", 3000).then(
+    () => check("배율: 최대 2배에서도 해상도 맞춤", localStorage.getItem("ddak.zoom") === "2"),
+    () => check("배율: 최대 2배에서도 해상도 맞춤", false, `${localStorage.getItem("ddak.zoom")} ${sharp()}`),
+  );
+  const pane = term.element!.closest(".pane")!.getBoundingClientRect();
+  const gap = pane.bottom - term.element!.querySelector(".xterm-screen")!.getBoundingClientRect().bottom;
+  const below = document.elementFromPoint(pane.left + pane.width / 2, pane.bottom - 3)!;
+  check(
+    "배율: 마지막 줄 아래 빈 공간도 터미널 배경색",
+    gap > 5 && below.classList.contains("xterm-viewport") && getComputedStyle(below).backgroundColor === "rgb(31, 31, 31)",
+    `gap=${Math.round(gap)} ${below.className} ${getComputedStyle(below).backgroundColor}`,
+  );
+  for (let i = 0; i < 10; i++) await clickMenu("View", "Zoom Out");
+  await waitFor("최소 배율", () => zoomed(0.5), 3000).then(
+    () => check("배율: 최소 0.5배에서 멈춤", localStorage.getItem("ddak.zoom") === "0.5"),
+    (e) => check("배율: 최소 0.5배에서 멈춤", false, `${String(e)} ${localStorage.getItem("ddak.zoom")}`),
+  );
+
+  await clickMenu("View", "Actual Size");
+  await waitFor("원래 크기", () => zoomed(1) && term.cols === cols, 3000).then(
+    () => check("배율: 실제 크기로 돌아오면 화면·터미널 원래대로", localStorage.getItem("ddak.zoom") === "1" && sharp() === "", sharp()),
+    (e) => check("배율: 실제 크기로 돌아오면 화면·터미널 원래대로", false, `${String(e)} ${window.innerWidth}/${width} ${term.cols}/${cols}`),
+  );
 }
 
 async function testTabsAndSplits(root: string, first: Terminal) {
@@ -403,6 +520,318 @@ async function testManyTerminals(count: number) {
   await waitFor("탭 정리", () => tabCount() === startTabs, 15000);
 }
 
+// 프로젝트 두 개 사이를 오간다. 각 프로젝트의 터미널은 따로 살아 있어야 한다.
+async function testProjects(root: string, first: Terminal) {
+  const other = root.replace(/\/proj$/, "/other");
+  await devHooks.addProject!(other);
+  await waitFor("두 번째 프로젝트 활성", () => projectRow(other)?.classList.contains("active"));
+  check("프로젝트: 추가 순서대로 목록", projectRows().map((el) => el.dataset.project).join(",") === `${root},${other}`);
+  check("프로젝트: 이전 프로젝트는 활성 해제", !projectRow(root)!.classList.contains("active"));
+  const [o] = await waitFor("두 번째 프로젝트 터미널", () => visiblePanes().length === 1 && visiblePanes()[0].term !== first && visiblePanes());
+  await ready(o.term);
+  const pwd = await run(o.term, "pwd");
+  check("프로젝트: 터미널이 그 프로젝트 폴더에서 시작", pwd.some((l) => l.trim() === other), pwd.join("|"));
+  check("프로젝트: 이전 프로젝트 터미널은 숨겨짐", !visiblePanes().some((p) => p.term === first));
+  await waitFor("두 번째 프로젝트 포커스", () => document.activeElement === o.term.textarea, 3000).then(
+    () => check("프로젝트: 옮겨 간 프로젝트의 터미널에 포커스", true),
+    (e) => check("프로젝트: 옮겨 간 프로젝트의 터미널에 포커스", false, String(e)),
+  );
+
+  // 단축키는 보이는 프로젝트에만
+  await menu("new_tab");
+  await waitFor("새 탭", () => tabsIn(other) === 2).then(
+    () => check("프로젝트: ⌘T는 보이는 프로젝트에만 탭 추가", tabsIn(root) === 1, `${tabsIn(root)}`),
+    (e) => check("프로젝트: ⌘T는 보이는 프로젝트에만 탭 추가", false, String(e)),
+  );
+  await menu("close_pane");
+  await waitFor("탭 닫기", () => tabsIn(other) === 1);
+  check("프로젝트: ⌘W도 보이는 프로젝트에만", tabsIn(root) === 1);
+
+  // 첫 프로젝트로 돌아가기
+  projectRow(root)!.click();
+  await waitFor("첫 프로젝트로", () => visiblePanes()[0]?.term === first);
+  check("프로젝트: 행을 누르면 그 프로젝트로", projectRow(root)!.classList.contains("active"));
+  await waitFor("첫 프로젝트 포커스", () => document.activeElement === first.textarea, 3000).then(
+    () => check("프로젝트: 돌아오면 그 터미널에 포커스", true),
+    (e) => check("프로젝트: 돌아오면 그 터미널에 포커스", false, String(e)),
+  );
+  const alive = await run(first, "echo alive");
+  check("프로젝트: 숨겨졌던 셸도 살아 있음", alive.some((l) => l.trim() === "alive"));
+
+  await devHooks.addProject!(root);
+  check("프로젝트: 같은 폴더는 다시 추가되지 않음", projectRows().length === 2);
+  const store = await waitStore((s) => s.projects.length === 2 && s.active === root);
+  check("프로젝트: 목록과 활성 프로젝트 저장", store.projects.map((p) => p.path).join(",") === `${root},${other}` && store.active === root, JSON.stringify(store));
+
+  // 화살표는 접고 펼치기만, 활성 프로젝트는 그대로
+  // other는 빈 폴더라 펼쳐도 행이 없다. 화살표 모양으로 본다.
+  const twisty = (path: string) => projectRow(path)!.querySelector<HTMLElement>(".tree-twisty")!;
+  const otherWas = twisty(other).textContent;
+  twisty(other).click();
+  await waitFor("두 번째 프로젝트 접고 펼치기", () => twisty(other).textContent !== otherWas);
+  check("프로젝트: 화살표로는 활성 프로젝트가 바뀌지 않음", projectRow(root)!.classList.contains("active"));
+  projectRow(root)!.querySelector<HTMLElement>(".tree-twisty")!.click();
+  await waitFor("첫 프로젝트 접기", () => !rowNames().includes("server"));
+  check("프로젝트: 화살표로 접힘", true);
+  projectRow(root)!.querySelector<HTMLElement>(".tree-twisty")!.click();
+  await waitFor("첫 프로젝트 펼치기", () => rowNames().includes("server"));
+  check("프로젝트: 화살표로 다시 펼침", true);
+
+  // 열려 있는 프로젝트를 제거하면 먼저 묻는다
+  projectRow(other)!.click();
+  await waitFor("두 번째 프로젝트로", () => visiblePanes()[0]?.term === o.term);
+  const realConfirm = devHooks.confirm;
+  let asked = "";
+  devHooks.confirm = async (m) => ((asked = m), false);
+  projectRow(other)!.querySelector<HTMLElement>("[data-action=remove]")!.click();
+  await waitFor("확인 질문", () => asked);
+  await sleep(200);
+  check("프로젝트: 열린 프로젝트 제거 전에 확인", asked.includes("other") && !!projectRow(other), asked);
+  devHooks.confirm = async () => true;
+  projectRow(other)!.querySelector<HTMLElement>("[data-action=remove]")!.click();
+  await waitFor("제거", () => !projectRow(other));
+  devHooks.confirm = realConfirm;
+  check("프로젝트: 제거하면 터미널도 닫힘", ![...liveTerms.values()].includes(o.term) && !document.querySelector(`.project-workspace[data-project="${CSS.escape(other)}"]`));
+  await waitFor("남은 프로젝트로", () => visiblePanes()[0]?.term === first).then(
+    () => check("프로젝트: 활성 프로젝트를 제거하면 남은 프로젝트로", projectRow(root)!.classList.contains("active")),
+    (e) => check("프로젝트: 활성 프로젝트를 제거하면 남은 프로젝트로", false, String(e)),
+  );
+  const after = await waitStore((s) => s.projects.length === 1);
+  check("프로젝트: 제거도 저장", after.projects.map((p) => p.path).join(",") === root && after.active === root, JSON.stringify(after));
+}
+
+// 터미널에서 바꾼 폴더 내용이 펼쳐진 트리에 바로 반영되는지 본다.
+async function testWatch(root: string, term: Terminal) {
+  const watched = () => invoke<string[]>("selftest_watched");
+  await run(term, "mkdir watched_new");
+  await waitFor("새 폴더 표시", () => rowNames().includes("watched_new"), 3000).then(
+    () => check("감시: 터미널에서 만든 폴더가 트리에 나타남", rowNames().indexOf("watched_new") < rowNames().indexOf("a.txt")),
+    (e) => check("감시: 터미널에서 만든 폴더가 트리에 나타남", false, String(e)),
+  );
+  await run(term, "rmdir watched_new");
+  await waitFor("지운 폴더 사라짐", () => !rowNames().includes("watched_new"), 3000).then(
+    () => check("감시: 지운 폴더가 트리에서 사라짐", true),
+    (e) => check("감시: 지운 폴더가 트리에서 사라짐", false, String(e)),
+  );
+
+  fileRow("A_dir")!.click();
+  await waitFor("A_dir 펼치기", () => rowNames().includes("inner.txt"));
+  await run(term, "touch A_dir/new.txt");
+  await waitFor("하위 폴더 새 파일", () => rowNames().includes("new.txt"), 3000).then(
+    () => check("감시: 펼친 하위 폴더도 반영", rowNames().indexOf("new.txt") === rowNames().indexOf("inner.txt") + 1),
+    (e) => check("감시: 펼친 하위 폴더도 반영", false, String(e)),
+  );
+  check("감시: 펼친 폴더만 감시", (await watched()).join(",") === `${root},${root}/A_dir`, (await watched()).join(","));
+  await run(term, "rm A_dir/new.txt");
+  fileRow("A_dir")!.click();
+  await waitFor("A_dir 접기", () => !rowNames().includes("inner.txt"));
+  await sleep(200);
+  check("감시: 접으면 감시 해제", (await watched()).join(",") === root, (await watched()).join(","));
+
+  await run(term, "git init -q gitnew");
+  await waitFor("새 저장소 아이콘", () => fileRow("gitnew")?.dataset.git === "repo", 3000).then(
+    () => check("감시: git init 한 폴더에 저장소 아이콘", true),
+    (e) => check("감시: git init 한 폴더에 저장소 아이콘", false, `${String(e)} git=${fileRow("gitnew")?.dataset.git}`),
+  );
+  await run(term, "rm -rf gitnew");
+  await waitFor("새 저장소 지움", () => !fileRow("gitnew"), 3000);
+}
+
+// React가 관리하는 입력란은 value만 바꾸면 상태가 안 바뀐다. 네이티브 setter + input 이벤트로 넣는다.
+function setInput(el: HTMLInputElement, value: string) {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, value);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+}
+const modal = () => document.querySelector<HTMLFormElement>(".modal");
+const modalInput = (name: string) => modal()!.querySelector<HTMLInputElement>(`input[name=${name}]`)!;
+const modalError = () => modal()?.querySelector(".modal-error")?.textContent ?? "";
+const contextMenu = () => document.querySelector<HTMLElement>(".context-menu");
+const menuLabels = () => [...document.querySelectorAll(".context-menu > *")].map((el) => (el.classList.contains("context-sep") ? "-" : el.textContent));
+const rightClick = (el: Element) => el.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }));
+async function pickMenu(label: string) {
+  const find = () => [...document.querySelectorAll<HTMLElement>(".context-item")].find((el) => el.textContent === label);
+  const item = await waitFor(`메뉴 항목 ${label}`, find, 3000).catch(() => {
+    throw new Error(`메뉴 항목 없음: ${label} (${menuLabels().join(",")})`);
+  });
+  item.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  item.click();
+  await waitFor("메뉴 닫힘", () => !contextMenu());
+}
+async function openAddRepo(root: string) {
+  projectRow(root)!.querySelector<HTMLElement>("[data-action=add]")!.click();
+  await waitFor("추가 메뉴", contextMenu);
+  await pickMenu("Add Repository…");
+  return waitFor("저장소 추가 창", modal);
+}
+async function submitModal() {
+  const failures = modal()!.dataset.failures;
+  modal()!.querySelector<HTMLButtonElement>("button[type=submit]")!.click();
+  // 창이 닫히거나 새로 실패할 때까지 (이전 시도의 오류가 남아 있을 수 있다)
+  await waitFor("저장소 추가 결과", () => !modal() || modal()!.dataset.failures !== failures, 30000);
+}
+
+async function testRepos(root: string, term: Terminal) {
+  const base = root.replace(/\/proj$/, "");
+  const linkedSrc = `${base}/linked`;
+
+  // clone
+  await openAddRepo(root);
+  check("저장소: 추가 창이 열리고 입력란에 포커스", document.activeElement === modalInput("source"));
+  setInput(modalInput("source"), "git@example.com:org/linked.git");
+  check("저장소: URL에서 폴더 이름을 만듦", modalInput("name").value === "linked", modalInput("name").value);
+  setInput(modalInput("source"), linkedSrc);
+  setInput(modalInput("name"), "cloned");
+  await submitModal();
+  check("저장소: clone 하면 창이 닫힘", !modal(), modalError());
+  await waitFor("clone 한 저장소 표시", () => fileRow("cloned")?.dataset.git === "repo", 3000).then(
+    () => check("저장소: clone 한 저장소가 트리에 나타남", true),
+    (e) => check("저장소: clone 한 저장소가 트리에 나타남", false, String(e)),
+  );
+  const log = await run(term, "git --no-pager -C cloned log --format=%s");
+  check("저장소: clone 내용", log.some((l) => l.trim() === "init"), log.join("|"));
+
+  await openAddRepo(root);
+  setInput(modalInput("source"), `${base}/no-such-remote`);
+  await submitModal();
+  check("저장소: clone 실패는 창에 오류 표시", modalError().startsWith("git clone failed"), modalError());
+  const leftover = await run(term, "test -e no-such-remote && echo left || echo none");
+  check("저장소: 실패한 clone은 폴더를 남기지 않음", leftover.some((l) => l.trim() === "none"), leftover.join("|"));
+  modal()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await waitFor("Esc로 닫기", () => !modal());
+  check("저장소: Esc로 창 닫기", true);
+
+  // 링크
+  await openAddRepo(root);
+  modal()!.querySelector<HTMLElement>("[data-mode=link]")!.click();
+  await waitFor("연결 모드", () => modal()!.querySelector(".modal-hint"));
+  setInput(modalInput("source"), `${base}/other`);
+  await submitModal();
+  check("저장소: 저장소가 아닌 폴더는 연결 안 됨", modalError().startsWith("Not a git repository"), modalError());
+  setInput(modalInput("source"), linkedSrc);
+  check("저장소: 폴더 경로에서 이름을 만듦", modalInput("name").value === "linked", modalInput("name").value);
+  await submitModal();
+  check("저장소: 연결하면 창이 닫힘", !modal(), modalError());
+  const linked = await waitFor("연결한 저장소 표시", () => fileRow("linked"), 3000);
+  check("저장소: 연결한 저장소에 저장소 아이콘과 링크 표시", linked.dataset.git === "repo" && linked.dataset.link === linkedSrc && !!linked.querySelector(".tree-link"), `${linked.dataset.git} ${linked.dataset.link}`);
+  const target = await run(term, "readlink linked");
+  check("저장소: 프로젝트 안에 링크 생성", target.some((l) => l.trim() === linkedSrc), target.join("|"));
+
+  await openAddRepo(root);
+  modal()!.querySelector<HTMLElement>("[data-mode=link]")!.click();
+  setInput(modalInput("source"), linkedSrc);
+  await submitModal();
+  check("저장소: 같은 이름이 있으면 오류", modalError() === "“linked” already exists in this project.", modalError());
+  modal()!.querySelector<HTMLElement>("button.secondary")!.click();
+  await waitFor("취소로 닫기", () => !modal());
+
+  // 링크로 연결한 폴더를 펼치면, 원래 위치에서 바꾼 내용도 반영된다 (실제 경로 ↔ 트리 경로 변환).
+  linked.click();
+  await run(term, `touch "${linkedSrc}/from_outside.txt"`);
+  await waitFor("링크 폴더 감시", () => rowNames().includes("from_outside.txt"), 3000).then(
+    () => check("감시: 링크로 연결한 폴더도 반영", true),
+    (e) => check("감시: 링크로 연결한 폴더도 반영", false, String(e)),
+  );
+  fileRow("linked")!.click();
+}
+
+// 오른쪽 클릭 메뉴로 파일·폴더 만들기
+async function testCreate(root: string, term: Terminal) {
+  const treeInput = () => document.querySelector<HTMLInputElement>(".tree-input");
+  const treeError = () => document.querySelector(".tree-input-row + .tree-error")?.textContent ?? "";
+  const enter = (el: HTMLElement, key: string) => el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  const exists = async (test: string, path: string) => (await run(term, `test ${test} "${path}" && echo yes || echo no`)).some((l) => l.trim() === "yes");
+
+  // + 버튼 메뉴와 프로젝트 오른쪽 클릭 메뉴
+  projectRow(root)!.querySelector<HTMLElement>("[data-action=add]")!.click();
+  await waitFor("+ 메뉴", contextMenu);
+  check("만들기: + 메뉴 항목", menuLabels().join(",") === "New File…,New Folder…,-,Add Repository…", menuLabels().join(","));
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  await waitFor("Esc로 메뉴 닫기", () => !contextMenu());
+  rightClick(projectRow(root)!);
+  await waitFor("오른쪽 클릭 메뉴", contextMenu);
+  check("만들기: 프로젝트 오른쪽 클릭 메뉴", menuLabels().join(",") === "New File…,New Folder…,-,Add Repository…,-,Remove from List", menuLabels().join(","));
+  document.querySelector<HTMLElement>(".panel")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  await waitFor("바깥 클릭으로 메뉴 닫기", () => !contextMenu());
+  check("만들기: 바깥을 누르면 메뉴 닫힘", true);
+
+  // 프로젝트에 새 폴더
+  rightClick(projectRow(root)!);
+  await pickMenu("New Folder…");
+  const input = await waitFor("이름 입력란", treeInput);
+  check("만들기: 프로젝트 맨 위에 입력란, 포커스", document.activeElement === input && input.dataset.kind === "dir" && !!projectRow(root)!.nextElementSibling?.contains(input));
+  setInput(input, "made_dir");
+  enter(input, "Enter");
+  await waitFor("새 폴더 표시", () => !treeInput() && rowNames().includes("made_dir"), 3000).then(
+    () => check("만들기: 새 폴더가 트리에 나타남", rowNames().indexOf("made_dir") < rowNames().indexOf("a.txt")),
+    (e) => check("만들기: 새 폴더가 트리에 나타남", false, String(e)),
+  );
+  check("만들기: 디스크에 폴더 생성", await exists("-d", `${root}/made_dir`));
+
+  // 접힌 폴더에 새 파일 → 펼쳐지고 그 안에 생김
+  rightClick(fileRow("A_dir")!);
+  await pickMenu("New File…");
+  const fileInput = await waitFor("파일 이름 입력란", treeInput);
+  check("만들기: 접힌 폴더는 펼쳐지고 그 안에 입력란", rowNames().includes("inner.txt") && fileInput.dataset.kind === "file");
+  setInput(fileInput, "made.txt");
+  enter(fileInput, "Enter");
+  await waitFor("새 파일 표시", () => !treeInput() && rowNames().includes("made.txt"), 3000).then(
+    () => check("만들기: 폴더 안에 새 파일", rowNames().indexOf("made.txt") > rowNames().indexOf("A_dir") && rowNames().indexOf("made.txt") < rowNames().indexOf("b_dir")),
+    (e) => check("만들기: 폴더 안에 새 파일", false, String(e)),
+  );
+  check("만들기: 디스크에 파일 생성", await exists("-f", `${root}/A_dir/made.txt`));
+  fileRow("A_dir")!.click();
+
+  // 한글 조합을 확정하는 Enter는 만들기가 아니다 (리뷰 지적 5). WebKit은 isComposing 대신 keyCode 229만 주기도 한다.
+  rightClick(fileRow("z.txt")!);
+  await pickMenu("New File…");
+  const ime = await waitFor("입력란", treeInput);
+  setInput(ime, "한글");
+  ime.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }));
+  const enter229 = new KeyboardEvent("keydown", { key: "Enter", bubbles: true });
+  Object.defineProperty(enter229, "keyCode", { get: () => 229 });
+  ime.dispatchEvent(enter229);
+  await sleep(300);
+  check("만들기: 한글 조합 확정 Enter로는 만들지 않음", treeInput() === ime && !(await exists("-e", `${root}/한글`)));
+  enter(ime, "Enter");
+  await waitFor("조합 뒤 Enter로 만들기", () => !treeInput() && rowNames().includes("한글"), 3000).then(
+    () => check("만들기: 조합이 끝난 뒤 Enter로 만듦 (한글 이름)", true),
+    (e) => check("만들기: 조합이 끝난 뒤 Enter로 만듦 (한글 이름)", false, String(e)),
+  );
+  await run(term, "rm 한글");
+
+  // 파일을 오른쪽 클릭하면 그 파일이 든 폴더에. 이미 있는 이름·잘못된 이름은 입력란에 오류
+  rightClick(fileRow("z.txt")!);
+  await pickMenu("New File…");
+  const again = await waitFor("입력란", treeInput);
+  setInput(again, "a.txt");
+  enter(again, "Enter");
+  await waitFor("이미 있음 오류", treeError).then(
+    () => check("만들기: 이미 있는 이름은 오류, 입력란 유지", treeError() === "“a.txt” already exists here." && treeInput() === again),
+    (e) => check("만들기: 이미 있는 이름은 오류, 입력란 유지", false, String(e)),
+  );
+  setInput(again, "x/y");
+  check("만들기: 고치면 오류 사라짐", treeError() === "");
+  enter(again, "Enter");
+  await waitFor("잘못된 이름 오류", treeError).then(
+    () => check("만들기: “/” 들어간 이름은 오류", treeError() === "Enter a name without “/”."),
+    (e) => check("만들기: “/” 들어간 이름은 오류", false, String(e)),
+  );
+  enter(again, "Escape");
+  await waitFor("Esc로 취소", () => !treeInput());
+  check("만들기: Esc로 취소", !(await exists("-e", `${root}/x`)));
+
+  rightClick(fileRow("z.txt")!);
+  await pickMenu("New File…");
+  const blurred = await waitFor("입력란", treeInput);
+  setInput(blurred, "never.txt");
+  blurred.blur();
+  await waitFor("다른 곳을 누르면 취소", () => !treeInput());
+  check("만들기: 다른 곳을 누르면 만들지 않고 취소", !(await exists("-e", `${root}/never.txt`)));
+
+  await run(term, "rm -r made_dir A_dir/made.txt");
+  await waitFor("정리", () => !rowNames().includes("made_dir"), 3000);
+}
+
 async function testLastExit(first: Terminal) {
   first.input("exit\r");
   await waitFor("빈 화면", () => document.querySelector(".workspace-empty"), 10000);
@@ -413,14 +842,63 @@ async function testLastExit(first: Terminal) {
   check("닫기: 빈 화면에서 새 터미널", tabCount() === 1);
 }
 
-export async function runSelftest(root: string) {
-  for (const step of [() => testTree(root), async () => {
+// 앱을 다시 켠 상황: scripts/selftest.sh가 목록 파일에 [proj, gone(없는 폴더)]을 넣고 gone을 활성으로 저장해 둔다.
+async function testRestart(root: string) {
+  const gone = root.replace(/\/proj$/, "/gone");
+  const row = await waitFor("저장된 목록", () => projectRow(gone));
+  check("다시 켜기: 저장된 목록을 불러옴", projectRows().map((el) => el.dataset.project).join(",") === `${root},${gone}`);
+  check("다시 켜기: 없는 폴더는 취소선 표시", row.classList.contains("missing") && row.title === `Folder not found: ${gone}`, row.title);
+  check("다시 켜기: 없는 폴더가 활성이었으면 다른 프로젝트로", projectRow(root)!.classList.contains("active") && !row.classList.contains("active"));
+  const term = await waitFor("터미널", () => visiblePanes()[0]?.term);
+  await ready(term);
+  const pwd = await run(term, "pwd");
+  check("다시 켜기: 터미널이 그 프로젝트에서 시작", pwd.some((l) => l.trim() === root), pwd.join("|"));
+  row.click();
+  await sleep(300);
+  check("다시 켜기: 없는 폴더는 눌러도 열리지 않음", projectRow(root)!.classList.contains("active") && !document.querySelector(`.project-workspace[data-project="${CSS.escape(gone)}"]`));
+  rightClick(row);
+  await waitFor("메뉴", contextMenu);
+  check("다시 켜기: 없는 폴더의 메뉴는 목록에서 제거만", menuLabels().join(",") === "Remove from List", menuLabels().join(","));
+  await pickMenu("Remove from List");
+  const store = await waitStore((s) => s.projects.length === 1);
+  check("다시 켜기: 없는 폴더를 목록에서 빼고 저장", store.projects[0]?.path === root && store.active === root, JSON.stringify(store));
+}
+
+// 목록 파일이 깨진 상황 (리뷰 지적 4): 오류를 계속 보여 주고, 목록을 바꾸지도 저장하지도 않는다.
+async function testCorrupt(root: string) {
+  const err = await waitFor("오류 표시", () => document.querySelector(".empty-box .sidebar-error")?.textContent);
+  check("깨진 목록: 오류 표시", err.startsWith("Could not read the project list"), err);
+  check("깨진 목록: 추가 버튼 비활성", !!document.querySelector<HTMLButtonElement>(".empty-box button")?.disabled);
+  await devHooks.addProject!(root);
+  await sleep(500);
+  check("깨진 목록: 추가해도 목록이 바뀌지 않음", !projectRow(root) && !!document.querySelector(".empty-box"));
+  check("깨진 목록: 오류가 지워지지 않음", (document.querySelector(".empty-box .sidebar-error")?.textContent ?? "") === err);
+  const still = await loadStore().then(() => "읽힘", (e) => String(e));
+  check("깨진 목록: 파일을 덮어쓰지 않음", still !== "읽힘", still);
+}
+
+export async function runSelftest(root: string, scenario: string) {
+  if (scenario === "restart" || scenario === "corrupt") {
+    try {
+      await (scenario === "restart" ? testRestart(root) : testCorrupt(root));
+    } catch (e) {
+      check("예외", false, String(e));
+    }
+    await invoke("selftest_report", { ok: !failed, log: log.join("\n") });
+    return;
+  }
+  for (const step of [() => testProjectStart(root), testTree, async () => {
     const first = await testTerminal(root);
+    await testWatch(root, first);
+    await testRepos(root, first);
+    await testCreate(root, first);
     await testPrefs();
+    await testZoom(first);
     await testClaude(first);
     await testTabsAndSplits(root, first);
     await testWebglLoss(first);
     await testManyTerminals(20);
+    await testProjects(root, first);
     await testLastExit(first);
   }]) {
     try {
