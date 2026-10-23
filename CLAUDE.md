@@ -15,6 +15,7 @@
 ## 테스트
 
 - Rust 단위 테스트: `cd src-tauri && cargo test`
+  (느린 테스트는 `#[ignore]`: `cargo test -- --ignored`. 대소문자 구분 볼륨 rename 등 파일 시스템 동작을 바꿀 때 돌린다)
 - 앱 자체 테스트: `scripts/selftest.sh` — 실제 앱을 띄워 `src/selftest.ts` 시나리오를 돌리고
   결과를 출력한 뒤 종료한다 (통과 시 종료 코드 0). 기능을 추가하면 시나리오도 추가한다.
   이 환경에서는 화면 캡처가 안 되므로 UI 확인은 이 방식으로 한다.

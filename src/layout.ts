@@ -11,6 +11,13 @@ export function paneIds(l: Layout): number[] {
   return "pane" in l ? [l.pane] : [...paneIds(l.a), ...paneIds(l.b)];
 }
 
+// 여러 터미널을 왼쪽부터 같은 폭으로 나란히 놓는다 (작업그룹의 세션들).
+export function row(panes: number[]): Layout {
+  const [first, ...rest] = panes;
+  if (rest.length === 0) return { pane: first };
+  return { dir: "row", ratio: 1 / panes.length, a: { pane: first }, b: row(rest) };
+}
+
 // 터미널 하나를 두 개로 나눈다. 새 터미널은 오른쪽(row) 또는 아래(col)에 놓인다.
 export function split(l: Layout, target: number, dir: "row" | "col", added: number): Layout {
   if ("pane" in l) return l.pane === target ? { dir, ratio: 0.5, a: l, b: { pane: added } } : l;

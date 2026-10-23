@@ -1,11 +1,14 @@
 import { useEffect, useReducer, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Layout, Path, measure, paneIds, remove, setRatio, split } from "./layout";
+import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { Terminal } from "./Terminal";
 import { useT } from "./prefs";
+import type { Group, Session } from "./useGroups";
 
-type Tab = { id: number; layout: Layout; focus: number };
-type State = { tabs: Tab[]; active: number; titles: Record<number, string>; nextId: number };
+// group: 작업그룹으로 연 탭이면 그 그룹 이름 (탭 제목). 아니면 터미널 제목을 쓴다.
+type Tab = { id: number; layout: Layout; focus: number; group?: string };
+// sessions: 작업그룹 세션으로 띄운 터미널 → 그 세션. 없으면 그냥 셸.
+type State = { tabs: Tab[]; active: number; titles: Record<number, string>; sessions: Record<number, Session>; nextId: number };
 
 type Action =
   | { type: "newTab" }
@@ -19,7 +22,21 @@ type Action =
   | { type: "ratio"; tab: number; path: Path; ratio: number }
   | { type: "title"; pane: number; title: string };
 
-const initial: State = { tabs: [{ id: 1, layout: { pane: 2 }, focus: 2 }], active: 1, titles: {}, nextId: 3 };
+// 첫 탭 = 원본 폴더에서 작업하는 작업그룹. 그룹의 세션들을 나란히 띄운다.
+// 설정을 못 읽었으면 (group 없음) 셸 하나로 시작한다.
+function initial(group: Group | null): State {
+  if (!group) return { tabs: [{ id: 1, layout: { pane: 2 }, focus: 2 }], active: 1, titles: {}, sessions: {}, nextId: 3 };
+  const panes = group.sessions.map((_, i) => 2 + i);
+  return {
+    tabs: [{ id: 1, layout: row(panes), focus: panes[0], group: group.name }],
+    active: 1,
+    titles: {},
+    sessions: Object.fromEntries(group.sessions.map((s, i) => [panes[i], s])),
+    nextId: 2 + panes.length,
+  };
+}
+
+const commandOf = (s: Session | undefined) => (s?.command ? [s.command, ...s.args] : undefined);
 
 function closeTab(s: State, id: number): State {
   const i = s.tabs.findIndex((t) => t.id === id);
@@ -84,9 +101,10 @@ const MENU: Record<string, Action> = {
 const pct = (v: number) => `${v * 100}%`;
 
 // 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
-export function Workspace({ cwd, visible }: { cwd: string; visible: boolean }) {
+// group: 처음 열 때 띄울 작업그룹 (기본 그룹). 열린 뒤에 설정이 바뀌어도 이미 뜬 세션은 그대로 둔다.
+export function Workspace({ cwd, visible, group }: { cwd: string; visible: boolean; group: Group | null }) {
   const t = useT();
-  const [s, dispatch] = useReducer(reducer, initial);
+  const [s, dispatch] = useReducer(reducer, group, initial);
   const bodies = useRef<Record<number, HTMLDivElement | null>>({});
   const root = useRef<HTMLDivElement>(null);
   const visibleRef = useRef(visible);
@@ -164,7 +182,7 @@ export function Workspace({ cwd, visible }: { cwd: string; visible: boolean }) {
               else dispatch({ type: "selectTab", id: tab.id });
             }}
           >
-            <span className="tab-title">{s.titles[tab.focus] || t("workspace.tabTitle", { n: i + 1 })}</span>
+            <span className="tab-title">{tab.group ?? (s.titles[tab.focus] || t("workspace.tabTitle", { n: i + 1 }))}</span>
             <span
               className="tab-close"
               title={t("workspace.closeTab")}
@@ -203,7 +221,7 @@ export function Workspace({ cwd, visible }: { cwd: string; visible: boolean }) {
             {panes.map(({ id, rect }) => (
               <div
                 key={id}
-                className={`pane${panes.length > 1 && tab.focus === id ? " focused" : ""}`}
+                className={`pane${panes.length > 1 && tab.focus === id ? " focused" : ""}${s.sessions[id] ? " session" : ""}`}
                 data-pane={id}
                 style={{ left: pct(rect.x), top: pct(rect.y), width: pct(rect.w), height: pct(rect.h) }}
                 onMouseDown={(e) => {
@@ -213,8 +231,17 @@ export function Workspace({ cwd, visible }: { cwd: string; visible: boolean }) {
                   focusPane(id);
                 }}
               >
+                {/* 작업그룹 세션이면 역할 이름. 같은 탭에 CLI가 여럿이라 어느 창이 누구인지 보이게 */}
+                {s.sessions[id] && (
+                  <div className="pane-label">
+                    {s.sessions[id].name}
+                    {s.sessions[id].readOnly && <span className="pane-badge">{t("session.readOnly")}</span>}
+                  </div>
+                )}
                 <Terminal
                   cwd={cwd}
+                  command={commandOf(s.sessions[id])}
+                  shiftEnter={s.sessions[id]?.shiftEnter}
                   focused={visible && active && tab.focus === id}
                   onFocus={() => dispatch({ type: "focus", pane: id })}
                   onTitle={(title) => dispatch({ type: "title", pane: id, title })}

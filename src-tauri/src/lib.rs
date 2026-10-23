@@ -1,4 +1,5 @@
 mod fs;
+mod groups;
 mod menu;
 mod projects;
 mod pty;
@@ -20,6 +21,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             fs::list_dir,
             fs::fs_create,
+            fs::fs_rename,
+            groups::groups_load,
+            groups::groups_dir,
             watch::fs_watch,
             watch::fs_unwatch,
             repos::repo_link,

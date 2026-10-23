@@ -7,24 +7,40 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { liveTerms } from "./devHooks";
+import { fixImeInput, passesImeKey } from "./hangul";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 
+// xterm이 따로 보내지 않는 키 조합을 셸·CLI가 아는 입력으로 바꾼다.
+// - ⌘⌫ → Ctrl+U (커서 앞 지우기, zsh는 줄 전체). VS Code 터미널과 같은 값.
+// - ⇧↩ → 세션 구성의 shiftEnter (기본 설정의 claude·codex는 ESC CR). xterm 6은 Shift+Enter를 그냥 Enter로
+//   보낸다 (kitty 키보드 프로토콜 없음). 모든 창에 ESC CR을 걸면 Vim 삽입 모드가 끝나서 (리뷰 지적 7) 세션별로 둔다.
+//   없으면 xterm 기본 (Enter).
+export function terminalKey(ev: KeyboardEvent, shiftEnter?: string | null): string | undefined {
+  const only = (meta: boolean, shift: boolean) => ev.metaKey === meta && ev.shiftKey === shift && !ev.ctrlKey && !ev.altKey;
+  if (ev.key === "Backspace" && only(true, false)) return "\x15";
+  if (ev.key === "Enter" && only(false, true) && shiftEnter) return shiftEnter;
+}
+
 type Props = {
   cwd: string;
+  // 작업그룹 세션의 명령과 인자. 없으면 그냥 셸. 처음 띄울 때만 쓴다.
+  command?: string[];
+  // Shift+Enter로 보낼 입력 (세션 구성). 없으면 그냥 Enter.
+  shiftEnter?: string | null;
   focused: boolean;
   onFocus: () => void;
   onTitle: (title: string) => void;
   onExit: () => void;
 };
 
-export function Terminal({ cwd, focused, onFocus, onTitle, onExit }: Props) {
+export function Terminal({ cwd, command, shiftEnter, focused, onFocus, onTitle, onExit }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, theme, t });
-  latest.current = { onFocus, onTitle, onExit, theme, t };
+  const latest = useRef({ onFocus, onTitle, onExit, theme, t, command, shiftEnter });
+  latest.current = { onFocus, onTitle, onExit, theme, t, command, shiftEnter };
 
   useEffect(() => {
     const el = ref.current!;
@@ -54,13 +70,24 @@ export function Terminal({ cwd, focused, onFocus, onTitle, onExit }: Props) {
     }
     fit.fit();
     if (import.meta.env.DEV) liveTerms.set(el, term);
+    // 한글 입력기 글자 보정 (macOS WebKit은 composition 이벤트 없이 "바꾸기"로 조합한다. src/hangul.ts)
+    const unfixIme = term.textarea ? fixImeInput(term, el, term.textarea) : () => {};
+    term.attachCustomKeyEventHandler((ev) => {
+      const seq = ev.type === "keydown" ? terminalKey(ev, latest.current.shiftEnter) : undefined;
+      if (seq) {
+        ev.preventDefault(); // 입력란 자체의 줄 지우기 등 기본 동작은 막는다
+        term.input(seq, true);
+        return false;
+      }
+      return passesImeKey(ev);
+    });
 
     let id: number | undefined;
     let disposed = false;
     const onData = new Channel<ArrayBuffer>();
     onData.onmessage = (buf) => term.write(new Uint8Array(buf));
 
-    invoke<number>("pty_spawn", { cwd, cols: term.cols, rows: term.rows, onData }).then(
+    invoke<number>("pty_spawn", { cwd, cols: term.cols, rows: term.rows, onData, command: latest.current.command ?? null }).then(
       (newId) => {
         // StrictMode처럼 spawn이 끝나기 전에 언마운트된 경우
         if (disposed) {
@@ -75,8 +102,13 @@ export function Terminal({ cwd, focused, onFocus, onTitle, onExit }: Props) {
     const unlistenExit = listen<{ id: number }>("pty-exit", (e) => {
       if (e.payload.id === id) latest.current.onExit();
     });
+    // 입력은 앞의 전송이 끝난 뒤에 보낸다. invoke는 호출마다 따로 가서 도착 순서가 보장되지 않는다
+    // (tauri scripts/ipc-protocol.js). 한글 보정의 DEL+글자가 앞 글자보다 먼저 가면 엉뚱한 글자를 지운다.
+    let sending: Promise<unknown> = Promise.resolve();
     const input = term.onData((data) => {
-      if (id !== undefined) invoke("pty_write", { id, data });
+      if (id === undefined) return;
+      const target = id;
+      sending = sending.then(() => invoke("pty_write", { id: target, data })).catch(() => {});
     });
     const resize = term.onResize(({ cols, rows }) => {
       if (id !== undefined) invoke("pty_resize", { id, cols, rows });
@@ -92,6 +124,7 @@ export function Terminal({ cwd, focused, onFocus, onTitle, onExit }: Props) {
       disposed = true;
       observer.disconnect();
       input.dispose();
+      unfixIme();
       resize.dispose();
       title.dispose();
       term.textarea?.removeEventListener("focus", focus);

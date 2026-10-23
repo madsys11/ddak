@@ -9,18 +9,20 @@ import { baseName, type Project } from "./useProjects";
 type Props = {
   projects: Project[];
   active: string | null;
-  error: string | null;
+  // 목록 파일·작업그룹 설정 오류 등. 비어 있는 것은 건너뛴다.
+  errors: (string | null)[];
   onAdd: () => void;
   onActivate: (path: string) => void;
   onRemove: (path: string) => void;
 };
 
 // 프로젝트 목록. 프로젝트를 펼치면 그 폴더의 파일 트리가 보인다.
-export function Sidebar({ projects, active, error, onAdd, onActivate, onRemove }: Props) {
+export function Sidebar({ projects, active, errors, onAdd, onActivate, onRemove }: Props) {
   const t = useT();
   const [addingTo, setAddingTo] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [creating, setCreating] = useState<{ dir: string; kind: "file" | "dir" } | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
 
   const closeMenu = useCallback(() => setMenu(null), []);
   const tree = useMemo(
@@ -28,13 +30,16 @@ export function Sidebar({ projects, active, error, onAdd, onActivate, onRemove }
       creating,
       startCreate: (dir: string, kind: "file" | "dir") => setCreating({ dir, kind }),
       endCreate: () => setCreating(null),
+      renaming,
+      startRename: (path: string) => setRenaming(path),
+      endRename: () => setRenaming(null),
       openMenu: (e: React.MouseEvent, items: MenuItem[]) => {
         e.preventDefault();
         e.stopPropagation();
         setMenu({ x: e.clientX, y: e.clientY, items });
       },
     }),
-    [creating],
+    [creating, renaming],
   );
 
   return (
@@ -45,7 +50,11 @@ export function Sidebar({ projects, active, error, onAdd, onActivate, onRemove }
           +
         </button>
       </div>
-      {error && <div className="sidebar-error">{error}</div>}
+      {errors.filter(Boolean).map((e) => (
+        <div key={e} className="sidebar-error">
+          {e}
+        </div>
+      ))}
       <TreeContext.Provider value={tree}>
         <div className="tree">
           {projects.map((p) => (

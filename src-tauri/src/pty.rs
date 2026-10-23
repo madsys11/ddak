@@ -24,11 +24,22 @@ struct ExitEvent {
     id: u32,
 }
 
-fn shell_command(cwd: &str) -> CommandBuilder {
+// 셸 한 단어로 감싼다: 작은따옴표 안에서는 아무것도 해석되지 않고, 작은따옴표 자체만 '\''로 끊어 넣는다.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+// command가 있으면 (작업그룹 세션) 셸 안에서 그 명령을 실행하고, 끝나면 그 자리에 셸을 띄운다.
+// 셸을 거쳐야 .zshrc 등에서 잡는 PATH로 claude·codex를 찾는다. CLI를 끝내도 창이 닫히지 않고 셸이 남는다.
+fn shell_command(cwd: &str, command: Option<&[String]>) -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let mut cmd = CommandBuilder::new(shell);
+    let mut cmd = CommandBuilder::new(&shell);
     // 로그인 셸로 띄워야 GUI 앱에서도 사용자의 PATH(.zprofile 등)가 잡힌다.
     cmd.arg("-l");
+    if let Some(argv) = command.filter(|a| !a.is_empty()) {
+        let line = argv.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+        cmd.args(["-i", "-c", &format!("{line}; exec {} -l", sh_quote(&shell))]);
+    }
     cmd.cwd(cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -47,11 +58,12 @@ pub fn pty_spawn(
     cols: u16,
     rows: u16,
     on_data: Channel<InvokeResponseBody>,
+    command: Option<Vec<String>>,
 ) -> Result<u32, String> {
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
-    let child = pair.slave.spawn_command(shell_command(&cwd)).map_err(|e| e.to_string())?;
+    let child = pair.slave.spawn_command(shell_command(&cwd, command.as_deref())).map_err(|e| e.to_string())?;
     drop(pair.slave);
 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -108,4 +120,22 @@ pub fn pty_kill(ptys: State<'_, Ptys>, id: u32) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 감싼 인자를 실제 셸에 넘겨서 그대로 돌아오는지 본다.
+    #[test]
+    fn quoting_survives_shell() {
+        let args = ["it's", "a b", "$HOME", "\"q\"", "`x`", "\\n", "한글"];
+        let line = args.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("printf '%s\\n' {line}")])
+            .output()
+            .unwrap();
+        let got: Vec<String> = String::from_utf8(out.stdout).unwrap().lines().map(String::from).collect();
+        assert_eq!(got, args);
+    }
 }

@@ -24,6 +24,7 @@ const ZOOM_ITEMS: &[(&str, &str)] = &[
 ];
 
 const CLOSE_WINDOW: &str = "close_window";
+const EDIT_GROUPS: &str = "edit_groups";
 const THEME_PREFIX: &str = "theme:";
 const LOCALE_PREFIX: &str = "locale:";
 
@@ -47,6 +48,8 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
 
     let app_menu = SubmenuBuilder::new(app, "ddak")
         .about_with_text(l("about"), None)
+        .separator()
+        .item(&MenuItemBuilder::with_id(EDIT_GROUPS, l(EDIT_GROUPS)).build(app)?)
         .separator()
         .services_with_text(l("services"))
         .separator()
@@ -114,7 +117,15 @@ pub fn set_menu<R: Runtime>(app: AppHandle<R>, spec: MenuSpec) -> Result<(), Str
 pub fn install<R: Runtime>(app: &AppHandle<R>) {
     app.on_menu_event(|app, event| {
         let id = event.id().0.as_str();
-        if id == CLOSE_WINDOW {
+        if id == EDIT_GROUPS {
+            // 편집 화면이 생기기 전까지는 기본 텍스트 편집기로 연다 (open -t).
+            match crate::groups::ensure_file(app) {
+                Ok(path) => {
+                    let _ = std::process::Command::new("open").arg("-t").arg(path).spawn();
+                }
+                Err(e) => eprintln!("작업그룹 설정 파일 실패: {e:?}"),
+            }
+        } else if id == CLOSE_WINDOW {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.close();
             }

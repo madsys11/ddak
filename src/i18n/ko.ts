@@ -17,7 +17,17 @@ export const ko: Messages = {
 
   "sidebar.addTo": "프로젝트에 추가",
 
+  "groups.invalid": "작업그룹 설정에 오류가 있어 마지막으로 올바르던 설정을 씁니다. (ddak > 작업그룹 설정…)\n{message}",
+  "groups.error.badJson": "설정 파일 형식 오류: {detail}",
+  "groups.error.noGroups": "작업그룹이 하나도 없습니다.",
+  "groups.error.emptyId": "id가 비어 있는 작업그룹이 있습니다 ({detail}).",
+  "groups.error.duplicateGroup": "작업그룹 id “{detail}”이(가) 두 번 이상 쓰였습니다.",
+  "groups.error.emptyGroup": "작업그룹 “{detail}”에 세션이 없습니다.",
+  "groups.error.emptyName": "작업그룹 “{detail}”에 이름 없는 세션이 있습니다.",
+  "groups.error.unknownDefault": "기본 작업그룹 “{detail}”이(가) 없습니다.",
+
   "tree.newFile": "새 파일…",
+  "tree.rename": "이름 바꾸기…",
   "tree.newFolder": "새 폴더…",
   "tree.error.exists": "여기에 “{name}”이(가) 이미 있습니다.",
   "tree.error.badName": "“/” 없는 이름을 입력하세요.",
@@ -52,12 +62,15 @@ export const ko: Messages = {
   "workspace.splitRight": "오른쪽으로 분할 (⌘D)",
   "workspace.splitDown": "아래로 분할 (⇧⌘D)",
 
+  "session.readOnly": "읽기 전용",
+
   "terminal.spawnFailed": "터미널 실행 실패: {error}",
 
   "theme.dark": "다크",
   "theme.solarizedLight": "Solarized Light",
 
   "menu.about": "ddak에 관하여",
+  "menu.edit_groups": "작업그룹 설정…",
   "menu.services": "서비스",
   "menu.hide": "ddak 가리기",
   "menu.hideOthers": "기타 가리기",

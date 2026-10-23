@@ -17,7 +17,17 @@ export const en = {
 
   "sidebar.addTo": "Add to Project",
 
+  "groups.invalid": "Work group settings have an error, so the last valid settings are used. (ddak > Work Groups…)\n{message}",
+  "groups.error.badJson": "Invalid settings file: {detail}",
+  "groups.error.noGroups": "No work groups are defined.",
+  "groups.error.emptyId": "A work group has an empty id ({detail}).",
+  "groups.error.duplicateGroup": "Work group id “{detail}” is used more than once.",
+  "groups.error.emptyGroup": "Work group “{detail}” has no sessions.",
+  "groups.error.emptyName": "A session in work group “{detail}” has no name.",
+  "groups.error.unknownDefault": "Default work group “{detail}” does not exist.",
+
   "tree.newFile": "New File…",
+  "tree.rename": "Rename…",
   "tree.newFolder": "New Folder…",
   "tree.error.exists": "“{name}” already exists here.",
   "tree.error.badName": "Enter a name without “/”.",
@@ -52,6 +62,8 @@ export const en = {
   "workspace.splitRight": "Split Right (⌘D)",
   "workspace.splitDown": "Split Down (⇧⌘D)",
 
+  "session.readOnly": "Read-only",
+
   "terminal.spawnFailed": "Failed to start terminal: {error}",
 
   "theme.dark": "Dark",
@@ -59,6 +71,7 @@ export const en = {
 
   // 네이티브 메뉴 (src-tauri/src/menu.rs가 "menu." 뒤의 이름으로 찾는다)
   "menu.about": "About ddak",
+  "menu.edit_groups": "Work Groups…",
   "menu.services": "Services",
   "menu.hide": "Hide ddak",
   "menu.hideOthers": "Hide Others",

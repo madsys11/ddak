@@ -1,5 +1,6 @@
-// 파일 트리 자동 갱신. 트리에서 펼쳐진 폴더만 (하위 폴더 제외) 감시하고,
-// 그 폴더의 항목이 바뀌면 "fs-changed" 이벤트로 프론트가 쓰는 경로를 보낸다.
+// 폴더 감시. 파일 트리(펼쳐진 폴더)와 작업그룹 설정 파일(앱 데이터 폴더)이 쓴다. 하위 폴더는 보지 않는다.
+// 그 폴더 안이 바뀌면 "fs-changed" 이벤트로 { path: 프론트가 쓰는 경로, entries } 를 보낸다.
+// entries: 항목이 생기거나 없어지거나 이름이 바뀜. false면 파일 내용·속성만 바뀐 것 (트리는 무시, 설정 파일은 다시 읽음).
 //
 // FSEvents는 링크를 따라간 실제 경로로 이벤트를 준다 (notify fsevent.rs가 경로를 canonicalize).
 // 링크로 연결한 저장소를 펼치면 프론트 경로와 실제 경로가 달라서, 실제 경로 → 프론트 경로로 바꿔 보낸다.
@@ -12,6 +13,12 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
 
 type Dirs = Arc<Mutex<HashMap<PathBuf, HashMap<String, usize>>>>;
+
+#[derive(Clone, serde::Serialize)]
+struct Changed {
+    path: String,
+    entries: bool,
+}
 
 #[derive(Default)]
 pub struct Watches {
@@ -34,10 +41,10 @@ impl Watches {
 fn create(app: AppHandle, dirs: Dirs) -> notify::Result<RecommendedWatcher> {
     notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(ev) = res else { return };
-        // 파일 내용·속성 변경은 목록에 영향이 없다.
-        if matches!(ev.kind, EventKind::Access(_) | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_))) {
+        if matches!(ev.kind, EventKind::Access(_)) {
             return;
         }
+        let entries = !matches!(ev.kind, EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)));
         let dirs = dirs.lock().unwrap();
         let mut changed = HashSet::new();
         for p in &ev.paths {
@@ -54,7 +61,7 @@ fn create(app: AppHandle, dirs: Dirs) -> notify::Result<RecommendedWatcher> {
         }
         drop(dirs);
         for path in changed {
-            let _ = app.emit("fs-changed", path);
+            let _ = app.emit("fs-changed", Changed { path, entries });
         }
     })
 }

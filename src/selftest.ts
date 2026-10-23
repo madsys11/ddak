@@ -2,8 +2,9 @@
 // 테스트용 폴더 구조는 그 스크립트가 만든다.
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import type { Terminal } from "@xterm/xterm";
+import { Terminal } from "@xterm/xterm";
 import { devHooks, liveTerms } from "./devHooks";
+import { fixImeInput } from "./hangul";
 import { LOCALES } from "./i18n";
 import { en } from "./i18n/en";
 import { screenPixelRatio } from "./zoom";
@@ -39,8 +40,10 @@ function screen(term: Terminal) {
 }
 
 const fileRows = () => [...document.querySelectorAll<HTMLElement>(".tree-row:not(.project-row):not(.tree-input-row)")];
-const rowNames = () => fileRows().map((el) => el.querySelector(".tree-name")!.textContent!);
-const fileRow = (name: string) => fileRows().find((el) => el.querySelector(".tree-name")!.textContent === name);
+// 이름을 바꾸는 중인 행은 이름 대신 입력란이 있다 (이름 없음으로 센다)
+const rowName = (el: Element) => el.querySelector(".tree-name")?.textContent ?? "";
+const rowNames = () => fileRows().map(rowName);
+const fileRow = (name: string) => fileRows().find((el) => rowName(el) === name);
 const projectRows = () => [...document.querySelectorAll<HTMLElement>(".project-row")];
 const projectRow = (path: string) => projectRows().find((el) => el.dataset.project === path);
 const tabsIn = (path: string) => document.querySelectorAll(`.project-workspace[data-project="${CSS.escape(path)}"] .tab`).length;
@@ -107,6 +110,19 @@ async function run(term: Terminal, cmd: string, ms = 10000) {
   return lines.slice(lines.findIndex((l) => l.trim() === begin) + 1, lines.findIndex((l) => l.trim() === end));
 }
 
+// 터미널 입력란에 키를 보내고 그 동안 터미널로 나간 입력을 돌려준다.
+// xterm은 키를 keyCode로 가린다. 합성 이벤트는 keyCode가 0이라 실제 브라우저처럼 채워 준다.
+const KEY_CODES: Record<string, number> = { Enter: 13, Backspace: 8 };
+function keySends(term: Terminal, init: KeyboardEventInit) {
+  const got: string[] = [];
+  const d = term.onData((x) => got.push(x));
+  const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+  Object.defineProperty(ev, "keyCode", { get: () => KEY_CODES[init.key ?? ""] ?? 0 });
+  term.textarea!.dispatchEvent(ev);
+  d.dispose();
+  return got.join("");
+}
+
 // 지금 보이는 탭의 터미널들. 화면에 놓인 순서(위→아래, 왼→오른)대로.
 // 방금 만든 창은 xterm이 등록되기 전일 수 있어 등록된 것만 센다 (안 그러면 term이 비어 있는 창을 집는다).
 function visiblePanes() {
@@ -149,6 +165,119 @@ async function testTerminal(root: string) {
     }
   }
   check("터미널: 한글 폭 2칸", width === 2, `width=${width}`);
+
+  // 한글 입력: 실제 앱에서 기록한 WebKit의 이벤트 순서를 그대로 재현한다 (src/hangul.ts).
+  // composition 이벤트 없이 첫 자모는 insertText, 이후 조합은 insertReplacementText로 온다.
+  // 실제 기록 순서: 키마다 beforeinput/input → keydown(keyCode 229) → keyup. 실제 입력 이벤트는 composed=true.
+  // fast: 빠르게 치면 앞 키를 떼기 전에 다음 키를 누른다. 다음 키의 입력이 앞 키의 keydown 바로 뒤에
+  // (keyup 없이) 온다: input(ㄱ) → keyup(ㄴ) → keydown(ㄱ).
+  const ta = term.textarea!;
+  const key = (type: string, k: string, code: number) => {
+    const ev = new KeyboardEvent(type, { key: k, bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "keyCode", { get: () => code });
+    Object.defineProperty(ev, "charCode", { get: () => (type === "keypress" ? code : 0) });
+    Object.defineProperty(ev, "which", { get: () => code });
+    return ta.dispatchEvent(ev); // false면 취소됨
+  };
+  // 입력기를 거치지 않는 키 (영문, 스페이스): keydown → keypress → beforeinput/input → keyup.
+  // 브라우저처럼 keydown이 취소되면(xterm이 keydown에서 보내고 취소함) keypress·input은 일어나지 않는다.
+  const plain = async (text: string) => {
+    for (const ch of text) {
+      if (key("keydown", ch, ch.toUpperCase().charCodeAt(0)) && key("keypress", ch, ch.charCodeAt(0))) {
+        ta.dispatchEvent(new InputEvent("beforeinput", { inputType: "insertText", data: ch, bubbles: true, cancelable: true, composed: true }));
+        ta.value += ch;
+        ta.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: ch, bubbles: true, composed: true }));
+      }
+      key("keyup", ch, ch.toUpperCase().charCodeAt(0));
+      await sleep(20);
+    }
+  };
+  const ime = async (steps: [string, string, string][], fast: boolean) => {
+    let held: string | null = null;
+    for (const [inputType, data, k] of steps) {
+      ta.dispatchEvent(new InputEvent("beforeinput", { inputType, data, bubbles: true, cancelable: true, composed: true }));
+      ta.value = inputType === "insertText" ? ta.value + data : ta.value.slice(0, -1) + data;
+      ta.dispatchEvent(new InputEvent("input", { inputType, data, bubbles: true, composed: true }));
+      if (held) key("keyup", held, 0);
+      key("keydown", k, 229);
+      held = k;
+      if (!fast) {
+        key("keyup", k, 0);
+        held = null;
+      }
+      await sleep(fast ? 5 : 30);
+    }
+    if (held) key("keyup", held, 0);
+  };
+  const hangul: [string, string, string][] = [
+    ["insertText", "ㅎ", "ㅎ"], ["insertReplacementText", "하", "ㅏ"], ["insertReplacementText", "한", "ㄴ"],
+    ["insertText", "ㄱ", "ㄱ"], ["insertReplacementText", "그", "ㅡ"], ["insertReplacementText", "글", "ㄹ"],
+  ];
+  for (const fast of [false, true]) {
+    const name = `터미널: 한글 입력 (WebKit 바꾸기 이벤트로 조합${fast ? ", 빠르게 쳐서 키가 겹침" : ""})`;
+    term.input("echo '[", true);
+    await ime(hangul, fast);
+    term.input("]'\r", true);
+    await waitFor("한글 입력 결과", () => screen(term).filter((l) => l.trim() === "[한글]").length === (fast ? 2 : 1), 5000).then(
+      () => check(name, true),
+      () => check(name, false, screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")),
+    );
+  }
+  // 실제 앱에서 기록한 "마찬가지로" 빠른 입력 (2026-10-23). 받침이 다음 음절로 넘어갈 때
+  // "맟" → 바꾸기 "마" + 새 입력 "차"로 온다. 키를 떼기 전에 다음 입력이 오는 순서도 그대로다.
+  // ["i", 글자] = insertText, ["r", 글자] = insertReplacementText, ["d"/"u", 키] = keydown(229)/keyup
+  const recorded: [string, string][] = [
+    ["i", "ㅁ"], ["d", "ㅁ"], ["u", "ㅁ"], ["r", "마"], ["d", "ㅏ"], ["u", "ㅏ"], ["r", "맟"], ["d", "ㅊ"], ["u", "ㅊ"],
+    ["r", "마"], ["i", "차"], ["d", "ㅏ"], ["r", "찬"], ["d", "ㄴ"], ["u", "ㅏ"], ["u", "ㄴ"],
+    ["r", "찬"], ["i", "ㄱ"], ["d", "ㄱ"], ["r", "가"], ["d", "ㅏ"], ["u", "ㄱ"], ["u", "ㅏ"],
+    ["r", "갖"], ["d", "ㅈ"], ["r", "가"], ["i", "지"], ["d", "ㅣ"], ["u", "ㅈ"],
+    ["r", "질"], ["d", "ㄹ"], ["u", "ㅣ"], ["r", "지"], ["i", "로"], ["d", "ㅗ"], ["u", "ㄹ"], ["u", "ㅗ"],
+  ];
+  term.input("echo '[", true);
+  for (const [kind, v] of recorded) {
+    if (kind === "d" || kind === "u") key(kind === "d" ? "keydown" : "keyup", v, kind === "d" ? 229 : 0);
+    else {
+      const inputType = kind === "i" ? "insertText" : "insertReplacementText";
+      ta.dispatchEvent(new InputEvent("beforeinput", { inputType, data: v, bubbles: true, cancelable: true, composed: true }));
+      ta.value = kind === "i" ? ta.value + v : ta.value.slice(0, -1) + v;
+      ta.dispatchEvent(new InputEvent("input", { inputType, data: v, bubbles: true, composed: true }));
+    }
+    await sleep(5);
+  }
+  term.input("]'\r", true);
+  await waitFor("기록한 입력 재현", () => screen(term).some((l) => l.trim() === "[마찬가지로]"), 5000).then(
+    () => check("터미널: 실제로 기록한 빠른 한글 입력 재현 (받침이 넘어감)", true),
+    () => check("터미널: 실제로 기록한 빠른 한글 입력 재현 (받침이 넘어감)", false, screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")),
+  );
+
+  // ⌘⌫ → Ctrl+U, ⇧↩ → 세션 구성의 shiftEnter (테스트 설정은 ESC CR). 실제로 보내는 값과 셸에서의 동작을 본다.
+  const sentBy = (init: KeyboardEventInit) => keySends(term, init);
+  term.input("echo SHOULD_NOT_RUN", true);
+  check("터미널: ⌘⌫는 Ctrl+U를 보냄", sentBy({ key: "Backspace", metaKey: true }) === "\x15");
+  const killed = await run(term, "echo AFTER_KILL");
+  check("터미널: ⌘⌫로 셸 입력줄이 지워짐", killed.some((l) => l.trim() === "AFTER_KILL") && !screen(term).some((l) => l.includes("SHOULD_NOT_RUNecho")), killed.join("|"));
+  // 실행됐다면 곧바로 SHIFT_ENTER_1이 출력된다. 줄바꿈이면 다음 Enter 전까지 아무것도 출력되지 않는다.
+  const printed = (t: string) => screen(term).some((l) => l.trim() === t);
+  term.input("echo SHIFT_ENTER_1", true);
+  check("터미널: ⇧↩는 ESC CR을 보냄", sentBy({ key: "Enter", shiftKey: true }) === "\x1b\r");
+  await sleep(800);
+  const ranEarly = printed("SHIFT_ENTER_1");
+  term.input("echo SHIFT_ENTER_2\r", true);
+  await waitFor("두 줄 실행", () => printed("SHIFT_ENTER_1") && printed("SHIFT_ENTER_2"), 5000).then(
+    () => check("터미널: ⇧↩는 셸에서 실행하지 않고 줄바꿈 (Enter에 두 줄이 함께 실행)", !ranEarly),
+    () => check("터미널: ⇧↩는 셸에서 실행하지 않고 줄바꿈 (Enter에 두 줄이 함께 실행)", false, screen(term).slice(-6).join("|")),
+  );
+
+  // 영문·스페이스는 xterm이 키 이벤트로 보낸다. 입력란 보정이 한 번 더 보내면 안 된다.
+  term.input("echo '[", true);
+  await plain("ab ");
+  await ime(hangul, true);
+  await plain(" c");
+  term.input("]'\r", true);
+  await waitFor("영문·한글 섞어 입력", () => screen(term).some((l) => l.trim() === "[ab 한글 c]"), 5000).then(
+    () => check("터미널: 영문·스페이스·한글을 섞어 쳐도 겹치거나 빠지지 않음", true),
+    () => check("터미널: 영문·스페이스·한글을 섞어 쳐도 겹치거나 빠지지 않음", false, screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")),
+  );
 
   const locale = await run(term, "locale charmap");
   check("터미널: UTF-8 로캘", locale.some((l) => l.trim() === "UTF-8"), locale.join("|"));
@@ -258,9 +387,13 @@ async function testPrefs() {
     `${bg("html")} / ${bg(".sidebar")}`,
   );
   const terms = [...liveTerms.values()];
-  check("테마: 열린 터미널 색도 바뀜", terms.length > 0 && terms.every((tm) => tm.options.theme?.background === "#FDF6E3"));
+  // 터미널 색은 React 효과에서 바뀌어서 화면 테마 값보다 조금 늦다
+  const termBg = (bg: string) => terms.length > 0 && terms.every((tm) => tm.options.theme?.background === bg);
+  await waitFor("터미널 색", () => termBg("#FDF6E3"), 3000).catch(() => {});
+  check("테마: 열린 터미널 색도 바뀜", termBg("#FDF6E3"));
   check("테마: 터미널 빈 공간(viewport)도 테마 배경색", bg(".xterm-viewport") === "rgb(253, 246, 227)", bg(".xterm-viewport"));
-  const sMenu = await waitMenu((m) => m.includes("보기/테마/Solarized Light [x]"));
+  // 누른 항목은 muda가 바로 체크하지만, 이전 선택(다크)의 체크는 프론트가 메뉴를 다시 만들어야 풀린다
+  const sMenu = await waitMenu((m) => m.includes("보기/테마/Solarized Light [x]") && m.includes("보기/테마/다크"));
   check("메뉴: 테마 선택 표시", sMenu.includes("보기/테마/Solarized Light [x]") && sMenu.includes("보기/테마/다크"));
   check("설정: 언어·테마 저장", localStorage.getItem("ddak.locale") === "ko" && localStorage.getItem("ddak.theme") === "solarized-light");
 
@@ -272,7 +405,8 @@ async function testPrefs() {
   await waitMenu((m) => m.includes("View/")); // 메뉴가 영어로 다시 만들어진 뒤에 누른다
   await clickMenu("View", "Theme", "Dark");
   await waitFor("기본값 복귀", () => document.documentElement.lang === "en" && document.documentElement.dataset.theme === "dark");
-  check("테마: 다크로 돌아오면 터미널도 다크", terms.every((tm) => tm.options.theme?.background === "#1F1F1F"));
+  await waitFor("터미널 다크", () => termBg("#1F1F1F"), 3000).catch(() => {});
+  check("테마: 다크로 돌아오면 터미널도 다크", termBg("#1F1F1F"));
 }
 
 // 화면 배율: 보기 메뉴(⌘= ⌘- ⌘0)로 웹뷰 전체를 키우고 줄인다.
@@ -356,7 +490,8 @@ async function testTabsAndSplits(root: string, first: Terminal) {
   // 새 탭
   await menu("new_tab");
   await waitFor("새 탭", () => tabCount() === 2);
-  const [second] = await waitFor("새 탭 터미널", () => visiblePanes()[0]?.term !== first && visiblePanes());
+  // 빈 배열도 참이라 창 수까지 본다 (새 창의 xterm이 등록되기 전에는 목록이 비어 있다)
+  const [second] = await waitFor("새 탭 터미널", () => visiblePanes().length === 1 && visiblePanes()[0].term !== first && visiblePanes());
   check("탭: ⌘T로 새 탭이 열리고 활성화", activeTabIndex() === 1 && visiblePanes().length === 1);
   await waitFor("새 탭 포커스", () => document.activeElement === second.term.textarea, 3000).then(
     () => check("탭: 새 터미널에 포커스", true),
@@ -365,6 +500,9 @@ async function testTabsAndSplits(root: string, first: Terminal) {
   await ready(second.term);
   const pwd = await run(second.term, "pwd");
   check("탭: 새 탭도 루트에서 시작", pwd.some((l) => l.trim() === root), pwd.join("|"));
+  // 세션이 아닌 창은 Shift+Enter를 바꾸지 않는다 (Vim 등에서 ESC가 모드를 바꿔서. 리뷰 지적 7)
+  const se = keySends(second.term, { key: "Enter", shiftKey: true });
+  check("탭: 세션이 아닌 창의 ⇧↩는 그냥 Enter", se === "\r", JSON.stringify(se));
 
   // 오른쪽 분할
   await menu("split_right");
@@ -602,7 +740,8 @@ async function testProjects(root: string, first: Terminal) {
 
 // 터미널에서 바꾼 폴더 내용이 펼쳐진 트리에 바로 반영되는지 본다.
 async function testWatch(root: string, term: Terminal) {
-  const watched = () => invoke<string[]>("selftest_watched");
+  // 트리가 감시하는 프로젝트 안 폴더만 본다 (앱 데이터 폴더는 작업그룹 설정 때문에 따로 감시된다)
+  const watched = () => invoke<string[]>("selftest_watched").then((all) => all.filter((p) => p === root || p.startsWith(`${root}/`)));
   await run(term, "mkdir watched_new");
   await waitFor("새 폴더 표시", () => rowNames().includes("watched_new"), 3000).then(
     () => check("감시: 터미널에서 만든 폴더가 트리에 나타남", rowNames().indexOf("watched_new") < rowNames().indexOf("a.txt")),
@@ -832,6 +971,168 @@ async function testCreate(root: string, term: Terminal) {
   await waitFor("정리", () => !rowNames().includes("made_dir"), 3000);
 }
 
+// 작업그룹 설정 파일: 고치면 다시 읽기, 잘못되면 오류 표시 + 마지막 올바른 설정 유지.
+// 시작 설정은 scripts/selftest.sh가 넣은 테스트용 그룹 "test" (셸 하나). 기본 설정 생성은 corrupt 시나리오가 본다.
+async function testGroups(term: Terminal) {
+  const file = `${await invoke<string>("groups_dir")}/groups.json`;
+  const sidebarErrors = () => [...document.querySelectorAll(".sidebar .sidebar-error")].map((el) => el.textContent ?? "");
+  const write = (json: string) => run(term, `printf '%s' '${json}' > "${file}"`);
+  const testConfig = `{"default":"test","groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\\u001b\\r"}]}]}`;
+
+  const g = await waitFor("작업그룹 설정", () => devHooks.groups);
+  check("작업그룹: 설정 파일을 읽음", g.default === "test" && sidebarErrors().length === 0, sidebarErrors().join("|"));
+  check("작업그룹: 앱 메뉴에 설정 항목", (await nativeMenu()).includes("ddak/Work Groups…"));
+  const firstTab = document.querySelector(".project-workspace:not([style*='none']) .tab .tab-title")?.textContent;
+  check("작업그룹: 첫 탭 제목은 기본 그룹 이름", firstTab === "Test", firstTab ?? "");
+
+  await write("{");
+  const bad = await waitFor("형식 오류 표시", () => sidebarErrors().find((e) => e.startsWith("Work group settings have an error")), 3000);
+  check("작업그룹: 형식이 깨지면 오류 표시", bad.includes("Invalid settings file"), bad);
+  check("작업그룹: 오류 동안 마지막 올바른 설정 유지", devHooks.groups?.default === "test");
+
+  const one = (id: string) => `{"id":"${id}","name":"X","sessions":[{"name":"s"}]}`;
+  await write(`{"default":"a","groups":[${one("a")},${one("a")}]}`);
+  await waitFor("중복 id 오류", () => sidebarErrors().some((e) => e.includes("“a” is used more than once")), 3000).then(
+    () => check("작업그룹: 중복 id 오류", true),
+    () => check("작업그룹: 중복 id 오류", false, sidebarErrors().join("|")),
+  );
+  await write(`{"default":"a","groups":[{"id":"a","name":"X","sessions":[{"name":"s","readonly":true}]}]}`);
+  await waitFor("모르는 키 오류", () => sidebarErrors().some((e) => e.includes("readonly")), 3000).then(
+    () => check("작업그룹: 오타 난 키(readonly)도 오류", true),
+    () => check("작업그룹: 오타 난 키(readonly)도 오류", false, sidebarErrors().join("|")),
+  );
+
+  await write(`{"default":"solo","groups":[{"id":"solo","name":"Solo","sessions":[{"name":"dev","command":"claude","args":["--model","opus"]}]}]}`);
+  await waitFor("고친 설정 반영", () => devHooks.groups?.default === "solo", 3000).then(
+    () => check("작업그룹: 고친 설정을 다시 읽고 오류 사라짐", devHooks.groups!.groups[0].sessions[0].args.join(" ") === "--model opus" && sidebarErrors().length === 0, sidebarErrors().join("|")),
+    (e) => check("작업그룹: 고친 설정을 다시 읽고 오류 사라짐", false, String(e)),
+  );
+  check("작업그룹: 이미 열린 탭은 설정이 바뀌어도 그대로", document.querySelector(".project-workspace:not([style*='none']) .tab .tab-title")?.textContent === "Test");
+
+  await run(term, `rm "${file}"`);
+  await waitFor("기본 설정 복구", () => devHooks.groups?.default === "dev-review", 3000).then(
+    () => check("작업그룹: 파일을 지우면 기본 설정으로 다시 만듦", true),
+    (e) => check("작업그룹: 파일을 지우면 기본 설정으로 다시 만듦", false, String(e)),
+  );
+  // 뒤의 시나리오가 새 프로젝트를 열 때 진짜 claude·codex가 뜨지 않게 테스트 설정으로 되돌린다.
+  await write(testConfig);
+  await waitFor("테스트 설정 복귀", () => devHooks.groups?.default === "test", 3000);
+}
+
+// 한글 보정(src/hangul.ts)만 따로: 화면 밖 xterm에 붙여서 나가는 입력을 본다.
+async function testImeUnit() {
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed; left:-2000px; top:0; width:400px; height:200px";
+  document.body.appendChild(box);
+  const term = new Terminal();
+  term.open(box);
+  const ta = term.textarea!;
+  const undo = fixImeInput(term, box, ta);
+  const out: string[] = [];
+  const d = term.onData((x) => out.push(x));
+  const input = (inputType: string, data: string, value: string) => {
+    ta.dispatchEvent(new InputEvent("beforeinput", { inputType, data, bubbles: true, cancelable: true, composed: true }));
+    ta.value = value;
+    ta.dispatchEvent(new InputEvent("input", { inputType, data, bubbles: true, composed: true }));
+  };
+  try {
+    // 키 구간(입력기 keydown 직후)에 키와 무관한 전송(터미널 응답 등)이 있어도 다음 첫 자모는 나가야 한다 (리뷰 지적 3)
+    const k = new KeyboardEvent("keydown", { key: "ㄴ", bubbles: true, cancelable: true });
+    Object.defineProperty(k, "keyCode", { get: () => 229 });
+    ta.dispatchEvent(k);
+    term.input("\x1b[0n", false); // 상태 보고 응답 같은 자동 전송
+    input("insertText", "ㅎ", "ㅎ");
+    check("한글 보정: 키 구간의 자동 응답 뒤에도 첫 자모를 보냄", out.includes("ㅎ"), JSON.stringify(out));
+    await sleep(20);
+
+    // 이모지 바꾸기: 코드 포인트 단위로 바꿔야 한다 (리뷰 지적 4)
+    ta.value = "x😀";
+    out.length = 0;
+    input("insertReplacementText", "😁", "x😁");
+    check("한글 보정: 이모지 바꾸기를 코드 포인트 단위로", out.join("") === "\x7f😁", JSON.stringify(out));
+  } finally {
+    d.dispose();
+    undo();
+    term.dispose();
+    box.remove();
+  }
+}
+
+// 오른쪽 클릭 → 이름 바꾸기
+async function testRename(root: string, term: Terminal) {
+  const input = () => document.querySelector<HTMLInputElement>("input[data-rename]");
+  const error = () => document.querySelector(".tree-input-error")?.textContent ?? "";
+  const press = (el: HTMLElement, key: string) => el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+  const onDisk = async (path: string) => (await run(term, `ls -d "${path}" 2>/dev/null || echo none`)).map((l) => l.trim());
+  const startRename = async (name: string) => {
+    rightClick(fileRow(name)!);
+    await pickMenu("Rename…");
+    return waitFor("이름 입력란", input);
+  };
+
+  rightClick(fileRow("a.txt")!);
+  await waitFor("메뉴", contextMenu);
+  check("이름 바꾸기: 파일 메뉴에 항목", menuLabels().join(",") === "New File…,New Folder…,-,Rename…", menuLabels().join(","));
+  await pickMenu("Rename…");
+  const a = await waitFor("이름 입력란", input);
+  check("이름 바꾸기: 그 자리에 입력란, 포커스, 확장자 앞까지 선택", document.activeElement === a && a.value === "a.txt" && a.selectionStart === 0 && a.selectionEnd === 1, `${a.value} ${a.selectionStart}-${a.selectionEnd}`);
+  setInput(a, "renamed.txt");
+  press(a, "Enter");
+  await waitFor("바뀐 이름", () => !input() && rowNames().includes("renamed.txt") && !rowNames().includes("a.txt"), 3000).then(
+    () => check("이름 바꾸기: Enter로 바뀌고 트리에 반영", true),
+    (e) => check("이름 바꾸기: Enter로 바뀌고 트리에 반영", false, String(e)),
+  );
+  check("이름 바꾸기: 디스크에서 바뀜", (await onDisk(`${root}/renamed.txt`)).includes(`${root}/renamed.txt`) && (await onDisk(`${root}/a.txt`)).includes("none"));
+
+  const z = await startRename("z.txt");
+  setInput(z, "renamed.txt");
+  press(z, "Enter");
+  await waitFor("이미 있음 오류", error).then(
+    () => check("이름 바꾸기: 이미 있는 이름은 오류, 입력란 유지", error() === "“renamed.txt” already exists here." && input() === z),
+    (e) => check("이름 바꾸기: 이미 있는 이름은 오류, 입력란 유지", false, String(e)),
+  );
+  // 입력하는 중에 트리가 다시 읽혀도 선택·커서가 그대로여야 한다 (리뷰 지적 6)
+  setInput(z, "new-name.txt");
+  z.setSelectionRange(12, 12);
+  await run(term, `touch "${root}/reload_probe"`);
+  await waitFor("트리 다시 읽기", () => rowNames().includes("reload_probe"), 3000);
+  await sleep(100);
+  check("이름 바꾸기: 트리가 다시 읽혀도 입력·커서 유지", input() === z && z.value === "new-name.txt" && z.selectionStart === 12 && z.selectionEnd === 12, `${z.value} ${z.selectionStart}-${z.selectionEnd}`);
+  await run(term, `rm "${root}/reload_probe"`);
+  press(z, "Escape");
+  await waitFor("Esc로 취소", () => !input());
+  check("이름 바꾸기: Esc로 취소, 원래 이름 그대로", rowNames().includes("z.txt") && rowNames().includes("renamed.txt"));
+
+  const r = await startRename("renamed.txt");
+  setInput(r, "Renamed.txt");
+  press(r, "Enter");
+  await waitFor("대소문자만", () => !input() && rowNames().includes("Renamed.txt"), 3000).then(
+    () => check("이름 바꾸기: 대소문자만 바꾸기", !rowNames().includes("renamed.txt"), error()),
+    () => check("이름 바꾸기: 대소문자만 바꾸기", false, `${error()} ${rowNames().join(",")}`),
+  );
+
+  const dir = await startRename("b_dir");
+  check("이름 바꾸기: 폴더는 이름 전체 선택", dir.selectionStart === 0 && dir.selectionEnd === 5, `${dir.selectionStart}-${dir.selectionEnd}`);
+  dir.click();
+  check("이름 바꾸기: 입력란을 눌러도 폴더가 펼쳐지지 않음", dir.closest(".tree-row")?.querySelector(".tree-twisty")?.textContent === "▸");
+  setInput(dir, "b_dir2");
+  press(dir, "Enter");
+  await waitFor("폴더 이름", () => !input() && rowNames().includes("b_dir2"), 3000).then(
+    () => check("이름 바꾸기: 폴더", !rowNames().includes("b_dir")),
+    (e) => check("이름 바꾸기: 폴더", false, String(e)),
+  );
+
+  const blurred = await startRename("z.txt");
+  setInput(blurred, "never.txt");
+  blurred.blur();
+  await waitFor("다른 곳을 누르면 취소", () => !input());
+  check("이름 바꾸기: 다른 곳을 누르면 바꾸지 않고 취소", rowNames().includes("z.txt") && !rowNames().includes("never.txt"));
+
+  // 뒤의 시나리오를 위해 되돌린다
+  await run(term, `mv "${root}/Renamed.txt" "${root}/a.txt" && mv "${root}/b_dir2" "${root}/b_dir"`);
+  await waitFor("되돌리기", () => rowNames().includes("a.txt") && rowNames().includes("b_dir"), 3000);
+}
+
 async function testLastExit(first: Terminal) {
   first.input("exit\r");
   await waitFor("빈 화면", () => document.querySelector(".workspace-empty"), 10000);
@@ -842,6 +1143,38 @@ async function testLastExit(first: Terminal) {
   check("닫기: 빈 화면에서 새 터미널", tabCount() === 1);
 }
 
+// 프로젝트를 열면 기본 작업그룹(scripts/selftest.sh의 "trio")의 세션들이 첫 탭에 나란히 뜬다.
+async function testGroupStart(root: string) {
+  const panes = await waitFor("세 세션", () => visiblePanes().length === 3 && visiblePanes());
+  const body = document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab-body:not([style*='none'])")!.getBoundingClientRect();
+  check(
+    "작업그룹: 세션 셋이 같은 폭으로 나란히",
+    panes.every((p) => near(p.rect.width / body.width, 1 / 3) && near(p.rect.height / body.height, 1)),
+    panes.map((p) => Math.round(p.rect.width)).join(","),
+  );
+  check("작업그룹: 탭이 하나이고 제목은 그룹 이름", tabCount() === 1 && document.querySelector(".tab-title")?.textContent === "Trio");
+  const labels = panes.map((p) => p.el.querySelector(".pane-label")?.textContent);
+  check("작업그룹: 창마다 역할 이름, 읽기 전용 표시", labels.join(",") === "alpha,betaRead-only,gamma", labels.join(","));
+
+  const [alpha, beta, gamma] = panes.map((p) => p.term);
+  const shows = (term: Terminal, text: string) => waitFor(text, () => screen(term).some((l) => l.includes(text)), 10000).then(() => true, () => false);
+  check("작업그룹: 인자가 그대로 전달됨 (작은따옴표)", await shows(alpha, "ALPHA it's quoted|"), screen(alpha).filter(Boolean).join("|"));
+  check("작업그룹: 인자가 그대로 전달됨 (공백)", await shows(beta, "BETA x  y"), screen(beta).filter(Boolean).join("|"));
+  check("작업그룹: 없는 명령은 오류를 보여 줌", await shows(gamma, "ddak-no-such-cli"), screen(gamma).filter(Boolean).join("|"));
+  // 명령이 끝나면 그 자리에 셸이 남는다 (창이 닫히지 않음)
+  // 명령 출력이 보인 직후에는 셸(exec $SHELL -l)이 아직 뜨는 중일 수 있다. 그때 보낸 입력을 셸이 버리는지
+  // 한 번 시간 초과가 났다 (2026-10-23, 원인 미확인). 다시 나면 화면을 기록하고 한 번 더 보낸다.
+  for (const [name, term] of [["alpha", alpha], ["beta", beta], ["gamma", gamma]] as const) {
+    await ready(term);
+    const pwd = await run(term, "pwd", 5000).catch(() => {
+      log.push(`INFO  ${name}: 첫 pwd 시간 초과, 다시 보냄. 화면 끝: ${screen(term).filter(Boolean).slice(-4).join(" | ")}`);
+      return run(term, "pwd");
+    });
+    check(`작업그룹: ${name} 명령이 끝난 뒤 그 프로젝트 폴더의 셸`, pwd.some((l) => l.trim() === root), pwd.join("|"));
+  }
+  check("작업그룹: 세 창 모두 그대로", visiblePanes().length === 3);
+}
+
 // 앱을 다시 켠 상황: scripts/selftest.sh가 목록 파일에 [proj, gone(없는 폴더)]을 넣고 gone을 활성으로 저장해 둔다.
 async function testRestart(root: string) {
   const gone = root.replace(/\/proj$/, "/gone");
@@ -849,10 +1182,7 @@ async function testRestart(root: string) {
   check("다시 켜기: 저장된 목록을 불러옴", projectRows().map((el) => el.dataset.project).join(",") === `${root},${gone}`);
   check("다시 켜기: 없는 폴더는 취소선 표시", row.classList.contains("missing") && row.title === `Folder not found: ${gone}`, row.title);
   check("다시 켜기: 없는 폴더가 활성이었으면 다른 프로젝트로", projectRow(root)!.classList.contains("active") && !row.classList.contains("active"));
-  const term = await waitFor("터미널", () => visiblePanes()[0]?.term);
-  await ready(term);
-  const pwd = await run(term, "pwd");
-  check("다시 켜기: 터미널이 그 프로젝트에서 시작", pwd.some((l) => l.trim() === root), pwd.join("|"));
+  await testGroupStart(root);
   row.click();
   await sleep(300);
   check("다시 켜기: 없는 폴더는 눌러도 열리지 않음", projectRow(root)!.classList.contains("active") && !document.querySelector(`.project-workspace[data-project="${CSS.escape(gone)}"]`));
@@ -875,6 +1205,17 @@ async function testCorrupt(root: string) {
   check("깨진 목록: 오류가 지워지지 않음", (document.querySelector(".empty-box .sidebar-error")?.textContent ?? "") === err);
   const still = await loadStore().then(() => "읽힘", (e) => String(e));
   check("깨진 목록: 파일을 덮어쓰지 않음", still !== "읽힘", still);
+
+  // 이 시나리오는 groups.json 없이 시작한다 → 기본 설정이 만들어진다 (프로젝트가 없어서 CLI는 뜨지 않는다).
+  const g = await waitFor("작업그룹 기본 설정", () => devHooks.groups);
+  check("작업그룹: 파일이 없으면 기본 설정을 만듦", g.default === "dev-review" && g.groups.map((x) => x.id).join(",") === "dev-review,shell");
+  const [dev, reviewer] = g.groups[0].sessions;
+  check(
+    "작업그룹: 기본은 claude 개발 + 읽기 전용 codex 리뷰어",
+    dev.command === "claude" && reviewer.command === "codex" && reviewer.readOnly && reviewer.args.includes("read-only") && !dev.readOnly,
+    JSON.stringify(g.groups[0].sessions.map((x) => [x.name, x.command, x.readOnly])),
+  );
+  check("작업그룹: 명령 없는 세션(셸)", g.groups[1].sessions[0].command === "" && g.groups[1].sessions[0].args.length === 0);
 }
 
 export async function runSelftest(root: string, scenario: string) {
@@ -892,6 +1233,9 @@ export async function runSelftest(root: string, scenario: string) {
     await testWatch(root, first);
     await testRepos(root, first);
     await testCreate(root, first);
+    await testRename(root, first);
+    await testImeUnit();
+    await testGroups(first);
     await testPrefs();
     await testZoom(first);
     await testClaude(first);

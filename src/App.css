@@ -250,6 +250,30 @@ button:hover {
 .terminal {
   height: 100%;
 }
+/* 작업그룹 세션 창: 위에 역할 이름 줄. 이름 줄은 띄워 두고 창의 위 여백만 늘려서, 터미널 쪽 구조는
+   일반 창과 똑같이 둔다 (터미널을 flex·calc 높이로 줄였을 때 xterm 요소가 이름 줄만큼 덜 차서 아래가 비었다). */
+.pane.session {
+  padding-top: 22px;
+}
+.pane-label {
+  position: absolute;
+  top: 3px;
+  left: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  user-select: none;
+}
+.pane-badge {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+}
 /* xterm.css의 background-color: #000을 덮는다 (불러오는 순서와 무관하게 이기도록 선택자를 더 구체적으로) */
 .terminal .xterm .xterm-viewport {
   background-color: var(--terminal-bg);
@@ -429,4 +453,23 @@ button.secondary {
 }
 .tree-input.invalid {
   border-color: var(--error);
+}
+.tree-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.tree-input-error {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 8px;
+  z-index: 5;
+  padding: 2px 6px;
+  line-height: 1.4;
+  white-space: normal;
+  color: var(--error);
+  background: var(--widget-bg);
+  border: 1px solid var(--error);
 }

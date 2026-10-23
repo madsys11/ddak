@@ -1,19 +1,22 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import type { MenuItem } from "./ContextMenu";
 import { codeError } from "./errors";
 import { RepoIcon, WorktreeIcon } from "./icons";
 import { useT } from "./prefs";
+import { watchDir } from "./watchDir";
 
 type Entry = { name: string; path: string; is_dir: boolean; git: "repo" | "worktree" | null; link: string | null };
 type Kind = "file" | "dir";
 
-// 트리 전체가 함께 쓰는 상태: 새 항목 입력란이 열린 폴더, 오른쪽 클릭 메뉴 (Sidebar가 제공)
+// 트리 전체가 함께 쓰는 상태: 새 항목 입력란이 열린 폴더, 이름을 바꾸는 항목, 오른쪽 클릭 메뉴 (Sidebar가 제공)
 type Tree = {
   creating: { dir: string; kind: Kind } | null;
   startCreate: (dir: string, kind: Kind) => void;
   endCreate: () => void;
+  renaming: string | null;
+  startRename: (path: string) => void;
+  endRename: () => void;
   openMenu: (e: React.MouseEvent, items: MenuItem[]) => void;
 };
 export const TreeContext = createContext<Tree | null>(null);
@@ -37,36 +40,22 @@ export function useOpenWhenCreating(dir: string, setOpen: (open: boolean) => voi
   }, [creating, dir, setOpen]);
 }
 
-// 펼쳐져 있는 동안 폴더를 감시하고 바뀌면 다시 읽는다 (src-tauri/src/watch.rs).
-// npm install처럼 한꺼번에 많이 바뀌면 이벤트가 몰려 오므로 잠깐 모았다가 한 번 읽는다.
+// 펼쳐져 있는 동안 폴더를 감시하고 바뀌면 다시 읽는다.
 function useEntries(path: string) {
   const [entries, setEntries] = useState<Entry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const load = () =>
       invoke<Entry[]>("list_dir", { path }).then(
         (e) => alive && (setEntries(e), setError(null)),
         (e) => alive && setError(String(e)),
       );
     load();
-    // invoke는 호출마다 따로 fetch로 가서 도착 순서가 보장되지 않는다 (tauri scripts/ipc-protocol.js).
-    // 해제가 등록보다 먼저 처리되면 감시가 남으므로, 등록이 끝난 뒤에만 해제를 보낸다.
-    const watched = invoke("fs_watch", { path }).then(
-      () => true,
-      (e) => (console.error("폴더 감시 실패", path, e), false),
-    );
-    const unlisten = listen<string>("fs-changed", ({ payload }) => {
-      if (payload !== path) return;
-      clearTimeout(timer);
-      timer = setTimeout(load, 100);
-    });
+    const unwatch = watchDir(path, load);
     return () => {
       alive = false;
-      clearTimeout(timer);
-      unlisten.then((f) => f());
-      watched.then((ok) => ok && invoke("fs_unwatch", { path }));
+      unwatch();
     };
   }, [path]);
   return { entries, error };
@@ -88,56 +77,86 @@ export function Children({ path, depth }: { path: string; depth: number }) {
   );
 }
 
-// 새 파일·폴더 이름 입력란. Enter로 만들고 Esc나 다른 곳을 누르면 취소.
-function NewEntry({ dir, kind, depth }: { dir: string; kind: Kind; depth: number }) {
+// 트리 안의 이름 입력란 (새 파일·폴더, 이름 바꾸기). Enter로 확정, Esc나 다른 곳을 누르면 취소.
+// 확정이 실패하면 입력란을 그대로 두고 오류를 보여 준다. 변경된 목록은 폴더 감시로 들어온다.
+function useNameInput(initial: string, save: (name: string) => Promise<unknown>, close: () => void) {
   const t = useT();
-  const { endCreate } = useTree();
-  const [name, setName] = useState("");
+  const [name, setName] = useState(initial);
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
-    if (!name.trim()) return endCreate();
+    if (!name.trim()) return close();
     try {
-      await invoke("fs_create", { dir, name, kind });
-      endCreate(); // 새 항목은 폴더 감시로 목록에 들어온다
+      await save(name);
+      close();
     } catch (raw) {
       const { code, detail } = codeError(raw);
       setError(code === "exists" ? t("tree.error.exists", { name: detail }) : code === "badName" ? t("tree.error.badName") : detail);
     }
   }
 
+  const inputProps = {
+    className: `tree-input${error ? " invalid" : ""}`,
+    autoFocus: true,
+    spellCheck: false,
+    value: name,
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => {
+      setName(e.target.value);
+      setError(null);
+    },
+    onKeyDown: (e: React.KeyboardEvent) => {
+      // 한글 조합을 확정하는 Enter는 확정이 아니다. WebKit은 조합 중 키에 keyCode 229를 준다.
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit();
+      } else if (e.key === "Escape") close();
+    },
+    onBlur: close,
+    onClick: (e: React.MouseEvent) => e.stopPropagation(), // 행을 누른 것으로 치지 않게 (폴더 접고 펴기)
+  };
+  return { inputProps, error };
+}
+
+const nameError = (error: string | null, depth: number) =>
+  error && (
+    <div className="tree-error" style={{ paddingLeft: indent(depth) + 14 }}>
+      {error}
+    </div>
+  );
+
+function NewEntry({ dir, kind, depth }: { dir: string; kind: Kind; depth: number }) {
+  const t = useT();
+  const { endCreate } = useTree();
+  const { inputProps, error } = useNameInput("", (name) => invoke("fs_create", { dir, name, kind }), endCreate);
   return (
     <>
       <div className="tree-row tree-input-row" style={{ paddingLeft: indent(depth) }}>
         <span className="tree-twisty">{kind === "dir" ? "▸" : ""}</span>
-        <input
-          className={`tree-input${error ? " invalid" : ""}`}
-          data-kind={kind}
-          autoFocus
-          spellCheck={false}
-          value={name}
-          placeholder={t(kind === "dir" ? "tree.newFolder" : "tree.newFile")}
-          onChange={(e) => {
-            setName(e.target.value);
-            setError(null);
-          }}
-          onKeyDown={(e) => {
-            // 한글 조합을 확정하는 Enter는 만들기가 아니다. WebKit은 조합 중 키에 keyCode 229를 준다.
-            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-            if (e.key === "Enter") {
-              e.preventDefault();
-              submit();
-            } else if (e.key === "Escape") endCreate();
-          }}
-          onBlur={endCreate}
-        />
+        <input {...inputProps} data-kind={kind} placeholder={t(kind === "dir" ? "tree.newFolder" : "tree.newFile")} />
       </div>
-      {error && (
-        <div className="tree-error" style={{ paddingLeft: indent(depth) + 14 }}>
-          {error}
-        </div>
-      )}
+      {nameError(error, depth)}
     </>
+  );
+}
+
+// 이름 바꾸기 입력란 (행 안의 이름 자리). 파일은 확장자 앞까지만 선택해 둔다 (VS Code와 같음).
+// 오류는 입력란 바로 아래에 띄운다.
+function RenameInput({ entry }: { entry: Entry }) {
+  const { endRename } = useTree();
+  const ref = useRef<HTMLInputElement>(null);
+  const { inputProps, error } = useNameInput(entry.name, (name) => invoke("fs_rename", { path: entry.path, name }), endRename);
+  // 처음 열 때 한 번만 선택한다. entry는 목록을 다시 읽을 때마다 새 객체라서 의존성으로 두면
+  // 입력하던 중에 선택이 초기화된다 (리뷰 지적 6).
+  useEffect(() => {
+    const dot = entry.is_dir ? -1 : entry.name.lastIndexOf(".");
+    ref.current?.setSelectionRange(0, dot > 0 ? dot : entry.name.length);
+  }, []);
+  return (
+    <span className="tree-input-wrap">
+      <input {...inputProps} ref={ref} data-rename={entry.path} />
+      {error && <span className="tree-input-error">{error}</span>}
+    </span>
   );
 }
 
@@ -153,7 +172,9 @@ function Node({ entry, dir, depth }: { entry: Entry; dir: string; depth: number 
         className="tree-row"
         style={{ paddingLeft: indent(depth) }}
         onClick={() => entry.is_dir && setOpen(!open)}
-        onContextMenu={(e) => tree.openMenu(e, folderMenu(entry.is_dir ? entry.path : dir))}
+        onContextMenu={(e) =>
+          tree.openMenu(e, [...folderMenu(entry.is_dir ? entry.path : dir), "separator", { label: t("tree.rename"), action: () => tree.startRename(entry.path) }])
+        }
         title={entry.link ? t("tree.link", { path: entry.path, target: entry.link }) : entry.path}
         data-git={entry.git ?? undefined}
         data-link={entry.link ?? undefined}
@@ -161,7 +182,7 @@ function Node({ entry, dir, depth }: { entry: Entry; dir: string; depth: number 
         <span className="tree-twisty">{entry.is_dir ? (open ? "▾" : "▸") : ""}</span>
         {entry.git === "repo" && <RepoIcon title={t("tree.repo")} />}
         {entry.git === "worktree" && <WorktreeIcon title={t("tree.worktree")} />}
-        <span className="tree-name">{entry.name}</span>
+        {tree.renaming === entry.path ? <RenameInput entry={entry} /> : <span className="tree-name">{entry.name}</span>}
         {entry.link && <span className="tree-link">↗</span>}
       </div>
       {/* 펼칠 때 처음으로 읽는다. 큰 폴더(node_modules 등)를 미리 읽지 않기 위해서다. */}
