@@ -1079,13 +1079,17 @@ async function testCreate(root: string, term: Terminal) {
   await waitFor("정리", () => !rowNames().includes("made_dir"), 3000);
 }
 
+// scripts/selftest.sh가 main에 넣은 테스트 설정 (설정을 바꾸는 검사가 끝나면 되돌린다)
+const TEST_GROUPS = `{"default":"test","groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\\u001b\\r"}]}]}`;
+const groupsFile = async () => `${await invoke<string>("groups_dir")}/groups.json`;
+
 // 작업그룹 설정 파일: 고치면 다시 읽기, 잘못되면 오류 표시 + 마지막 올바른 설정 유지.
 // 시작 설정은 scripts/selftest.sh가 넣은 테스트용 그룹 "test" (셸 하나). 기본 설정 생성은 corrupt 시나리오가 본다.
 async function testGroups(term: Terminal) {
   const file = `${await invoke<string>("groups_dir")}/groups.json`;
   const sidebarErrors = () => [...document.querySelectorAll(".sidebar .sidebar-error")].map((el) => el.textContent ?? "");
   const write = (json: string) => run(term, `printf '%s' '${json}' > "${file}"`);
-  const testConfig = `{"default":"test","groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\\u001b\\r"}]}]}`;
+  const testConfig = TEST_GROUPS;
 
   const g = await waitFor("작업그룹 설정", () => devHooks.groups);
   check("작업그룹: 설정 파일을 읽음", g.default === "test" && sidebarErrors().length === 0, sidebarErrors().join("|"));
@@ -1628,6 +1632,81 @@ async function testGroupEnd(root: string, first: Terminal) {
   );
 }
 
+// 세션 추가 (Terminal 메뉴, 탭 오른쪽 클릭): 작업그룹 설정의 세션을 골라 지금 탭에 분할 창으로 띄운다. 쓰기 가능한 세션이
+// 이미 있는 탭에 쓰기 가능한 세션을 또 더하면 경고하고 (취소 / 새 작업그룹 / 그래도 추가), 읽기 전용은 경고하지 않는다.
+async function testAddSession(first: Terminal) {
+  const file = await groupsFile();
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true}`;
+  await run(first, `printf '%s' '${TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","sessions":[${pick}]}]}`)}' > "${file}"`);
+  await waitFor("세션 고르기 설정", () => devHooks.groups?.groups.some((g) => g.id === "pick"), 3000);
+  const before = tabCount();
+  await menu("new_tab");
+  await waitFor("셸 탭", () => tabCount() === before + 1 && visiblePanes().length === 1);
+  const dialog = () => document.querySelector<HTMLElement>(".add-session-dialog");
+  const choices = () => [...(dialog()?.querySelectorAll<HTMLElement>("[data-session]") ?? [])];
+  const open = async (how: "menu" | "tab") => {
+    if (how === "menu") await clickMenu("Terminal", "Add Session…");
+    else {
+      rightClick(activeTabEl()!);
+      await waitFor("탭 메뉴", contextMenu);
+      await pickMenu("Add Session…");
+    }
+    await waitFor("세션 추가 창", () => choices().length);
+  };
+  const choose = (id: string) => choices().find((el) => el.dataset.session === id)!.click();
+  const labels = () => paneEls().map((el) => el.querySelector(".pane-label")?.firstChild?.textContent ?? "-").join(",");
+  const warning = () => dialog()?.querySelector("[data-warning]")?.textContent ?? "";
+
+  await open("menu");
+  const listed = choices().map((el) => el.dataset.session).join(",");
+  choose("pick/writer");
+  await waitFor("쓰는 세션 추가", () => !dialog() && paneEls().length === 2, 5000);
+  const writer = visiblePanes()[1];
+  await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
+  check(
+    "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
+    listed === "test/shell,pick/writer,pick/reviewer" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    `${listed} | ${labels()}`,
+  );
+
+  await open("tab");
+  choose("pick/reviewer");
+  await waitFor("읽기 전용 추가", () => !dialog() && paneEls().length === 3, 5000);
+  check("세션 추가: 탭 메뉴에서, 읽기 전용은 경고 없이 추가", labels() === "-,writer,reviewer", labels());
+
+  await open("menu");
+  choose("pick/writer");
+  await waitFor("경고", warning, 3000);
+  const warned = warning();
+  dialog()!.querySelector<HTMLElement>("button.secondary")!.click();
+  await waitFor("취소", () => !dialog(), 3000);
+  check("세션 추가: 쓰는 세션이 있으면 또 더할 때 경고, 취소하면 그대로", warned.includes(": writer.") && warned.includes("“writer”") && paneEls().length === 3, warned);
+
+  await open("menu");
+  choose("pick/writer");
+  await waitFor("경고", warning, 3000);
+  dialog()!.querySelector<HTMLElement>("[data-action=add-anyway]")!.click();
+  await waitFor("그래도 추가", () => !dialog() && paneEls().length === 4, 5000);
+  // 포커스는 마지막에 더한 reviewer라 그 오른쪽에 붙는다
+  check("세션 추가: 그래도 추가 (포커스된 창 오른쪽)", labels() === "-,writer,reviewer,writer", labels());
+
+  // 경고에서 새 작업그룹을 고르면 별도 worktree의 작업그룹을 연다 (기본 그룹)
+  await open("menu");
+  choose("pick/writer");
+  await waitFor("경고", warning, 3000);
+  dialog()!.querySelector<HTMLElement>("[data-action=new-group]")!.click();
+  await waitFor("새 작업그룹", () => tabCount() === before + 2, 60000);
+  const made = activeTabEl()!;
+  check("세션 추가: 경고에서 새 작업그룹을 열 수 있음", !dialog() && !!made.querySelector(".tab-title")?.getAttribute("title")?.includes("/worktrees/"), made.textContent ?? "");
+
+  for (const tab of [made, document.querySelectorAll<HTMLElement>(".project-workspace:not([style*='none']) .tab")[before]]) {
+    tab.querySelector<HTMLElement>("[title='Close Tab']")!.click();
+  }
+  await waitFor("탭 정리", () => tabCount() === before, 5000);
+  await run(first, `printf '%s' '${TEST_GROUPS}' > "${file}"`);
+  await waitFor("테스트 설정 복귀", () => devHooks.groups?.groups.length === 1, 3000);
+}
+
 // 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
 async function testTabRename() {
   const tab = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active")!;
@@ -1658,7 +1737,7 @@ async function testTabRename() {
 
   rightClick(tab());
   await waitFor("탭 메뉴", contextMenu);
-  check("탭 이름: 오른쪽 클릭 메뉴에 항목", menuLabels().join(",") === "Rename Tab…", menuLabels().join(","));
+  check("탭 이름: 오른쪽 클릭 메뉴에 항목", menuLabels().join(",") === "Rename Tab…,Add Session…", menuLabels().join(","));
   await pickMenu("Rename Tab…");
   const b = await waitFor("탭 이름 입력란", input, 3000);
   setInput(b, "never");
@@ -2027,6 +2106,7 @@ export async function runSelftest(root: string, scenario: string) {
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다
     await testGroupClone(root, first);
     await testGroupEnd(root, first);
+    await testAddSession(first);
     await testTabMove();
     await testTabScroll();
     await testManyTerminals(20);

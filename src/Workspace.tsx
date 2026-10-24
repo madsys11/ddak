@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { AddSessionDialog, isWriter } from "./AddSessionDialog";
 import { ContextMenu, type MenuState } from "./ContextMenu";
 import { EndGroupDialog } from "./EndGroupDialog";
 import { devHooks } from "./devHooks";
@@ -9,7 +10,7 @@ import { SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { Terminal } from "./Terminal";
 import { useT } from "./prefs";
-import type { Group } from "./useGroups";
+import type { Group, Session } from "./useGroups";
 import { type PaneSession, type Setup, type State, type Tab, commandOf, fromSaved, toSaved } from "./workspaceState";
 
 // 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 준비 창에서 돌릴 명령 (복제 + 준비 스크립트)
@@ -33,7 +34,8 @@ type Action =
   | { type: "setupExit"; tab: number; run: number; code: number | null; spawnFailed?: boolean }
   | { type: "setupRetry"; tab: number }
   | { type: "setupStart"; tab: number }
-  | { type: "resumeTabs"; ids: number[] };
+  | { type: "resumeTabs"; ids: number[] }
+  | { type: "addSession"; tab: number; session: Session };
 
 // 작업그룹 탭을 하나 더한다: 그룹의 세션들을 나란히 띄운다. 그룹이 없으면 (설정을 못 읽음) 셸 하나.
 // 새 worktree에 준비 스크립트가 있으면 세션 아래에 setup 창을 하나 더 두고 거기서 돌린다.
@@ -138,6 +140,18 @@ function step(s: State, a: Action): State {
       }
       return update(owner.id, (t) => ({ ...t, layout, focus, setup }));
     }
+    // 세션 추가: 그 탭의 포커스된 창 오른쪽에 새 창을 두고 그 세션을 띄운다 (창마다 새 세션 ID)
+    case "addSession": {
+      const owner = s.tabs.find((t) => t.id === a.tab);
+      if (!owner) return s;
+      const pane = s.nextId;
+      return {
+        ...update(owner.id, (t) => ({ ...t, layout: split(t.layout, t.focus, "row", pane), focus: pane })),
+        active: owner.id,
+        sessions: { ...s.sessions, [pane]: { ...a.session, sid: crypto.randomUUID() } },
+        nextId: s.nextId + 1,
+      };
+    }
     // 작업그룹을 끝내다가 멈춰 그 탭들의 세션을 다시 띄운다: 이어서 하기(resume)로. 준비를 기다리던 세션은 뜬 적이 없다.
     case "resumeTabs": {
       const sessions = { ...s.sessions };
@@ -229,13 +243,15 @@ type Props = {
   visible: boolean;
   // 기본 작업그룹. 처음 열 때와 새 작업그룹을 만들 때 쓴다. 이미 뜬 세션은 설정이 바뀌어도 그대로 둔다.
   group: Group | null;
+  // 작업그룹 설정 전체 (세션 추가에서 고른다). 못 읽었으면 null.
+  groups: Group[] | null;
   // 보고 있는 탭의 폴더가 바뀌면 알린다 (파일 트리가 그 폴더를 보여 준다). worktree: 작업그룹 이름 또는 null(원본)
   onTreeRoot: (cwd: string, worktree: string | null) => void;
   onError: (message: string) => void;
 };
 
 // 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
-export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
+export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
@@ -250,6 +266,10 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
   const [menu, setMenu] = useState<MenuState | null>(null);
   // 끝내기 창을 연 작업그룹 탭
   const [ending, setEnding] = useState<Tab | null>(null);
+  // 세션 추가 창을 연 탭
+  const [adding, setAdding] = useState<number | null>(null);
+  const activeRef = useRef(s.active);
+  activeRef.current = s.tabs.some((tab) => tab.id === s.active) ? s.active : -1;
   // 탭마다 터미널을 다시 띄운 횟수. 터미널 key에 넣어서, 늘면 그 탭의 터미널을 새로 띄운다.
   const [runs, setRuns] = useState<Record<number, number>>({});
   // 작업그룹을 끝내느라 세션을 끝내는(끝낸) 터미널 ("탭:횟수"). 그 터미널은 끝나도 창을 닫지 않는다.
@@ -335,6 +355,7 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
     const unlisten = listen<string>("menu", (e) => {
       if (!visibleRef.current) return;
       if (e.payload === "new_group") createGroupRef.current();
+      else if (e.payload === "add_session") activeRef.current >= 0 && setAdding(activeRef.current);
       else if (MENU[e.payload]) dispatch(MENU[e.payload]);
     });
     return () => {
@@ -492,7 +513,10 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
               onDoubleClick={() => setRenaming(tab.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                const items = [{ label: t("workspace.renameTab"), action: () => setRenaming(tab.id) }];
+                const items = [
+                  { label: t("workspace.renameTab"), action: () => setRenaming(tab.id) },
+                  { label: t("addSession.menu"), action: () => setAdding(tab.id) },
+                ];
                 // 새 worktree로 만든 작업그룹이면 끝내기 (원본 그룹·셸 탭은 지울 것이 없다)
                 if (tab.worktree) items.push({ label: t("endGroup.menu"), action: () => setEnding(tab) });
                 setMenu({ x: e.clientX, y: e.clientY, items });
@@ -669,6 +693,15 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
         );
       })}
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
+      {adding !== null && s.tabs.some((tab) => tab.id === adding) && (
+        <AddSessionDialog
+          groups={groups}
+          writers={paneIds(s.tabs.find((tab) => tab.id === adding)!.layout).flatMap((p) => (s.sessions[p] && isWriter(s.sessions[p]) ? [s.sessions[p].name] : []))}
+          onAdd={(session) => dispatch({ type: "addSession", tab: adding, session })}
+          onNewGroup={() => createGroupRef.current()}
+          onClose={() => setAdding(null)}
+        />
+      )}
       {ending?.worktree && (
         <EndGroupDialog
           project={s.root}

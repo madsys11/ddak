@@ -9,13 +9,15 @@ use std::collections::HashMap;
 use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-const TERMINAL_ITEMS: &[(&str, &str)] = &[
-    ("new_tab", "CmdOrCtrl+T"),
+const TERMINAL_ITEMS: &[(&str, Option<&str>)] = &[
+    ("new_tab", Some("CmdOrCtrl+T")),
     // 새 작업그룹 (worktree 세트 + 기본 그룹 세션). ⌘T는 셸 탭으로 둔다.
-    ("new_group", "CmdOrCtrl+Shift+T"),
-    ("split_right", "CmdOrCtrl+D"),
-    ("split_down", "CmdOrCtrl+Shift+D"),
-    ("close_pane", "CmdOrCtrl+W"),
+    ("new_group", Some("CmdOrCtrl+Shift+T")),
+    // 지금 탭에 작업그룹 설정의 세션 하나를 더한다 (src/AddSessionDialog.tsx). 단축키는 없다.
+    ("add_session", None),
+    ("split_right", Some("CmdOrCtrl+D")),
+    ("split_down", Some("CmdOrCtrl+Shift+D")),
+    ("close_pane", Some("CmdOrCtrl+W")),
 ];
 
 // 화면 배율 (프론트 src/prefs.tsx). ⌘+는 Shift+=라 ⌘=로 건다 (Safari·VS Code와 같은 키).
@@ -73,7 +75,11 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         .build()?;
     let mut terminal = SubmenuBuilder::new(app, l("terminal"));
     for (id, accel) in TERMINAL_ITEMS {
-        terminal = terminal.item(&MenuItemBuilder::with_id(*id, l(id)).accelerator(*accel).build(app)?);
+        let mut item = MenuItemBuilder::with_id(*id, l(id));
+        if let Some(accel) = accel {
+            item = item.accelerator(*accel);
+        }
+        terminal = terminal.item(&item.build(app)?);
     }
     let choices = |title: String, prefix: &str, list: &[Choice]| {
         let mut sub = SubmenuBuilder::new(app, title);
@@ -131,7 +137,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.close();
             }
-        } else if TERMINAL_ITEMS.iter().chain(ZOOM_ITEMS).any(|(item, _)| *item == id)
+        } else if TERMINAL_ITEMS.iter().map(|(item, _)| *item).chain(ZOOM_ITEMS.iter().map(|(item, _)| *item)).any(|item| item == id)
             || id.starts_with(THEME_PREFIX)
             || id.starts_with(LOCALE_PREFIX)
         {

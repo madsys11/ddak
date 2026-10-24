@@ -104,6 +104,7 @@ function App() {
                 cwd={path}
                 visible={path === active}
                 group={defaultGroup}
+                groups={groups?.groups ?? null}
                 onTreeRoot={(cwd, worktree) =>
                   setTreeRoots((r) => (r[path]?.cwd === cwd && r[path]?.worktree === worktree ? r : { ...r, [path]: { cwd, worktree } }))
                 }
