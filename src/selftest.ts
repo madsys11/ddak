@@ -1326,19 +1326,23 @@ async function testGroupWorktree(root: string, first: Terminal) {
 // 이때 작업그룹 폴더는 test-1~3이 있고 준비 스크립트는 testGroupWorktree가 넣은 것 (SETUP_OK로 끝남).
 // 터미널을 넷 더 만들므로 WebGL 검사 뒤에 둔다 (컨텍스트가 많으면 가장 오래된 첫 터미널의 것을 잃는다).
 async function testGroupClone(root: string, first: Terminal) {
-  const sh = async (cmd: string) => (await run(first, cmd)).map((l) => l.trim()).filter(Boolean);
-  // 원본 server: package.json·lockfile을 커밋하고 무시되는 node_modules를 만든다. 안쪽 상대 링크, 절대 링크, FIFO,
-  // 오래된 수정 시각을 둔다.
+  const sh = async (cmd: string, ms?: number) => (await run(first, cmd, ms)).map((l) => l.trim()).filter(Boolean);
+  // 원본 server: package.json·lockfile(의존성 없는 npm 형식, npm ci가 내려받지 않고 끝난다)·requirements.txt를 커밋하고,
+  // 무시되는 node_modules·.venv·.env를 만든다. node_modules에는 안쪽 상대 링크, 절대 링크, FIFO, 오래된 수정 시각을 둔다.
   const nm = `${root}/server/node_modules`;
+  const lock = '{"name":"s","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"s","version":"1.0.0"}}}';
   await sh(
     [
       `cd "${root}/server"`,
-      `printf '{}' > package.json && printf 'lock1' > package-lock.json && printf 'node_modules/\\n' > .gitignore`,
+      `printf '{"name":"s","version":"1.0.0"}' > package.json && printf '%s' '${lock}' > package-lock.json && : > requirements.txt`,
+      `printf 'node_modules/\\n.venv/\\n.env\\n' > .gitignore`,
       `git add -A && git -c user.name=t -c user.email=t@example.com commit -qm deps`,
       `mkdir -p node_modules/pkg node_modules/.bin && printf 'mod' > node_modules/pkg/index.js && touch -t 200101010000 node_modules/pkg/index.js`,
       `ln -s ../pkg/index.js node_modules/.bin/run && ln -s /etc/hosts node_modules/abs && mkfifo node_modules/pipe`,
+      `printf 'TOKEN=secret' > .env && python3 -m venv --without-pip .venv`,
       `cd - > /dev/null`,
     ].join(" && "),
+    30000,
   );
   // 개발 모드는 효과를 두 번 돌린다. 첫 번째 읽기의 응답을 늦춰서, 고른 뒤에 와도 고른 것을 되돌리지 않는지 본다.
   let loads = 0;
@@ -1347,31 +1351,61 @@ async function testGroupClone(root: string, first: Terminal) {
   await waitFor("오른쪽 클릭 메뉴", contextMenu);
   [...document.querySelectorAll<HTMLElement>(".context-item")].find((el) => el.textContent === "Work Group Setup…")!.click();
   const row = await waitFor("복제 후보", () => document.querySelector<HTMLElement>(".setup-dialog [data-clone='server/node_modules']"), 10000);
+  const dialogRow = (attr: string, value: string) => document.querySelector<HTMLElement>(`.setup-dialog [data-${attr}='${value}']`)!;
   const rowsShown = [...document.querySelectorAll<HTMLElement>(".setup-dialog [data-clone]")].map((el) => el.dataset.clone);
-  check("작업그룹 준비 창: 원본의 node_modules가 후보 (조건 안내)", rowsShown.join(",") === "server/node_modules" && row.textContent?.includes("only when package.json and the lockfile match") === true, rowsShown.join(","));
+  check("작업그룹 준비 창: 원본의 node_modules가 후보 (조건 안내)", row.textContent?.includes("only when package.json and the lockfile match") === true);
+  check(
+    "작업그룹 준비 창: .env(비밀 파일)·.venv(새로 만듦)도 후보, 아무것도 기본으로 고르지 않음",
+    rowsShown.join(",") === "server/.env,server/.venv,server/node_modules" &&
+      dialogRow("clone", "server/.env").textContent?.includes("may contain secrets") === true &&
+      dialogRow("clone", "server/.venv").textContent?.includes("recreated with the same Python") === true &&
+      [...document.querySelectorAll<HTMLInputElement>(".setup-dialog input[type=checkbox]")].every((c) => !c.checked),
+    rowsShown.join(","),
+  );
+  const installsShown = [...document.querySelectorAll<HTMLElement>(".setup-dialog [data-install]")].map((el) => el.dataset.install);
+  check(
+    "작업그룹 준비 창: 커밋된 lockfile에서 설치 제안 (requirements.txt는 가상 환경의 pip)",
+    installsShown.join(",") === "server: npm ci,server: .venv/bin/pip install -r requirements.txt" &&
+      dialogRow("install", "server: npm ci").textContent?.includes("only when node_modules is missing") === true,
+    installsShown.join(","),
+  );
   check("작업그룹 준비 창: 커밋 전 변경 미포함 안내", document.querySelector(".setup-dialog")?.textContent?.includes("Uncommitted changes are not included") === true);
   row.querySelector<HTMLInputElement>("input")!.click();
+  dialogRow("clone", "server/.env").querySelector("input")!.click();
+  dialogRow("clone", "server/.venv").querySelector("input")!.click();
+  dialogRow("install", "server: npm ci").querySelector("input")!.click();
   await sleep(2000);
   devHooks.setupLoadDelay = undefined;
   check("작업그룹 준비 창: 늦게 온 첫 읽기가 고른 것을 되돌리지 않음", loads === 2 && row.querySelector<HTMLInputElement>("input")!.checked, `${loads}`);
   document.querySelector<HTMLElement>(".setup-dialog button[type=submit]")!.click();
   await waitFor("창 닫힘", () => !document.querySelector(".setup-dialog"), 5000);
   const saved = (await sh(`cat "${root.replace(/\/proj$/, "")}"/data-main/setup/proj-*.json | tr -d ' \\n'; echo`)).find((l) => l.startsWith("{")) ?? "";
-  check("작업그룹 준비 창: 고른 항목을 프로젝트 설정에 저장", saved === '{"clone":["server/node_modules"]}', saved);
+  check(
+    "작업그룹 준비 창: 고른 항목과 설치 명령을 프로젝트 설정에 저장",
+    saved === '{"clone":["server/.env","server/.venv","server/node_modules"],"install":[{"dir":"server","command":"npmci"}]}',
+    saved,
+  );
 
   // 새 작업그룹: setup 창에서 복제 → 준비 스크립트 → 세션
   const groups = `${(await sh("echo $DDAK_HOME")).at(-1)}/worktrees/${(await sh(`ls "$DDAK_HOME/worktrees"`)).at(-1)}/`;
   const before = tabCount();
   await clickMenu("Terminal", "New Work Group");
   await waitFor("네 번째 작업그룹", () => tabCount() === before + 1, 15000);
-  const [, setup] = await waitFor("복제 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 15000);
+  const [, setup] = await waitFor("복제 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 40000);
   const out = screen(setup.term).join("\n");
   check(
     "작업그룹 복제: setup 창에 복제 결과와 뺀 항목 (밖을 가리키는 링크, FIFO), 그 뒤 준비 스크립트",
     out.includes("[ddak] cloned server/node_modules: 1 file (") && out.includes("left out abs: link pointing outside") && out.includes("left out pipe: socket") && out.includes("SETUP_OK"),
     out.slice(-400),
   );
+  check(
+    "작업그룹 준비: .env 복사, .venv는 같은 Python으로 새로 만듦, node_modules를 복제했으면 npm ci는 건너뜀",
+    out.includes("[ddak] copied server/.env") && out.includes("[ddak] creating server/.venv with the same Python") && out.includes("[ddak] skipped server: npm ci: node_modules is already there"),
+    out.slice(-600),
+  );
   const g4 = `${groups}test-4/server/node_modules`;
+  const env = await sh(`cat "${groups}test-4/server/.env"; echo; grep '^home' "${groups}test-4/server/.venv/pyvenv.cfg"; grep '^home' "${root}/server/.venv/pyvenv.cfg"; test -x "${groups}test-4/server/.venv/bin/python" && echo py-ok`);
+  check("작업그룹 준비: 새 작업그룹의 .env 내용, .venv의 Python이 원본과 같음", env[0] === "TOKEN=secret" && env[1] === env[2] && env[1]?.startsWith("home") === true && env[3] === "py-ok", env.join("|"));
   const facts = await sh(`cat "${g4}/pkg/index.js"; echo; readlink "${g4}/.bin/run"; test -e "${g4}/abs" -o -L "${g4}/abs" && echo abs-there; test -e "${g4}/pipe" && echo pipe-there; [ "$(stat -f %m "${g4}/pkg/index.js")" = "$(stat -f %m "${nm}/pkg/index.js")" ] && echo same-mtime; ls -a "${groups}test-4/server" "${groups}" | grep -c ddak-clone`);
   check(
     "작업그룹 복제: 내용, 안쪽 링크, 수정 시각이 그대로이고 뺀 항목·임시 폴더는 없음",
@@ -1383,7 +1417,7 @@ async function testGroupClone(root: string, first: Terminal) {
   await sh(`printf 'lock2' > "${root}/server/package-lock.json"`);
   await clickMenu("Terminal", "New Work Group");
   await waitFor("다섯 번째 작업그룹", () => tabCount() === before + 2, 15000);
-  const [, setup5] = await waitFor("건너뛴 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 15000);
+  const [, setup5] = await waitFor("건너뛴 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 40000);
   const out5 = screen(setup5.term).join("\n");
   const left = await sh(`test -e "${groups}test-5/server/node_modules" && echo there || echo none`);
   check(
@@ -1391,7 +1425,8 @@ async function testGroupClone(root: string, first: Terminal) {
     out5.includes("skipped server/node_modules: server/package-lock.json differs") && left.includes("none"),
     `${out5.slice(-300)} ${left.join("|")}`,
   );
-  await sh(`cd "${root}/server" && git checkout -q package-lock.json && rm -rf node_modules && cd - > /dev/null`);
+  check("작업그룹 준비: 복제를 건너뛰었으면 npm ci를 돌림", out5.includes("[ddak] running server: npm ci") && out5.includes("up to date"), out5.slice(-300));
+  await sh(`cd "${root}/server" && git checkout -q package-lock.json && rm -rf node_modules .venv .env && cd - > /dev/null`);
   for (let i = 0; i < 4; i++) await menu("close_pane"); // test-5, test-4 (세션 + setup)
   await waitFor("복제 작업그룹 탭 닫기", () => tabCount() === before, 5000);
 }

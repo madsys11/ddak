@@ -4,12 +4,11 @@
 // 프로젝트마다 앱 데이터 폴더의 setup/<프로젝트 이름>-<경로 해시>.sh (스크립트)와 .json (복제할 항목) 하나씩
 // (프로젝트 폴더에는 쓰지 않는다). 스크립트는 기본 텍스트 편집기로 연다 (작업그룹 설정과 같은 방식).
 //
-// 돌리기: 준비 창에서 이 앱 실행 파일을 도우미로 띄운다 (`ddak --ddak-setup …`, main.rs). 도우미가 복제하고
-// 끝나면 스크립트로 exec한다. 진행·건너뛴 이유가 그 창에 보이고, 종료 코드·끝내기·다시 준비는 준비 창 그대로 쓴다.
+// 돌리기: 준비 창에서 이 앱 실행 파일을 도우미로 띄운다 (prepare.rs).
 
-use crate::clone::{clean_stale, clone_tree, Job, Outcome};
-use crate::fs::{code_err, git_kind, CodeError};
+use crate::fs::{code_err, CodeError};
 use crate::projects::data_dir;
+use crate::prepare::HELPER;
 use crate::worktrees::{git, project_repos, project_slug};
 use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Runtime};
@@ -38,63 +37,175 @@ pub fn script_path<R: Runtime>(app: &AppHandle<R>, project: &Path) -> Result<Pat
     setup_file(app, project, "sh")
 }
 
-// 복제할 항목: 프로젝트 폴더 기준 상대 경로 (예: web/node_modules). 새 작업그룹 폴더는 프로젝트와 같은 모양이라
-// 같은 상대 경로가 그 worktree 안의 자리다.
-#[derive(Default, serde::Serialize, serde::Deserialize)]
+// 새 작업그룹에서 할 일 (설정 파일 내용이자 도우미에 넘기는 것).
+// clone: 가져올 항목, 프로젝트 폴더 기준 상대 경로 (예: web/node_modules). 새 작업그룹 폴더는 프로젝트와 같은 모양이라
+// 같은 상대 경로가 그 worktree 안의 자리다. install: 고른 설치 명령 (가져온 뒤 그 폴더에서 돈다).
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+pub struct Spec {
     #[serde(default)]
     pub clone: Vec<String>,
+    #[serde(default)]
+    pub install: Vec<Install>,
 }
 
-fn load_config(path: &Path) -> Result<Config, CodeError> {
+// 설치 명령 하나. dir: 프로젝트 폴더 기준 (프로젝트 자체가 저장소면 맨 위는 "")
+#[derive(Clone, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Install {
+    pub dir: String,
+    pub command: String,
+}
+
+fn load_config(path: &Path) -> Result<Spec, CodeError> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| code_err("setupConfig", format!("{}: {e}", path.display()))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Spec::default()),
         Err(e) => Err(code_err("setupConfig", format!("{}: {e}", path.display()))),
     }
 }
 
 // 프로젝트 안의 상대 경로만 (빈 경로, 절대 경로, ., .. 거부)
-fn safe_rel(rel: &str) -> bool {
+pub fn safe_rel(rel: &str) -> bool {
     let p = Path::new(rel);
     !rel.is_empty() && p.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+// 설치 명령의 폴더: 프로젝트 안의 상대 경로, 또는 맨 위("")
+pub fn safe_dir(dir: &str) -> bool {
+    dir.is_empty() || safe_rel(dir)
 }
 
 #[derive(serde::Serialize, PartialEq, Debug)]
 pub struct Candidate {
     path: String,
-    // "node": node_modules (manifest·lockfile이 같을 때만 복제), "cargo": cargo target (빌드 캐시)
+    // "node": node_modules (manifest·lockfile이 같을 때만 복제), "cargo": cargo target (빌드 캐시),
+    // "venv": 파이썬 가상 환경 (같은 Python으로 새로 만듦), "secret": .env 같은 파일 (그대로 복사, 기본은 고르지 않음)
     kind: &'static str,
 }
 
-// 원본에서 복제할 만한 무시된 폴더. 저장소마다 git이 무시하는 항목(접힌 폴더 단위)에서 고른다.
+// 비밀 값이 들어 있을 만한 무시된 파일. 예시 파일(.env.example 등)은 보통 커밋하므로 뺀다.
+fn secret_file(name: &str) -> bool {
+    let examples = [".env.example", ".env.sample", ".env.template"];
+    (name == ".env" || name.starts_with(".env.")) && !examples.contains(&name)
+        || [".npmrc", ".pypirc", "credentials.json", "secrets.json"].contains(&name)
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+}
+
+// 원본에서 가져올 만한 무시된 항목. 저장소마다 git이 무시하는 항목(접힌 폴더 단위)에서 고른다.
 // dist·알 수 없는 캐시·DB·로그는 후보로 내지 않는다 (사양).
-fn candidates(root: &Path) -> Result<Vec<Candidate>, CodeError> {
-    let (repos, _) = project_repos(root)?;
+fn candidates(repos: &[crate::worktrees::Repo]) -> Vec<Candidate> {
     let mut out = Vec::new();
     for repo in repos {
         let Ok(list) = git(&repo.path, &["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]) else {
             continue;
         };
-        for entry in list.split('\0').filter_map(|e| e.strip_suffix('/')) {
-            let dir = repo.path.join(entry);
-            let kind = match dir.file_name().and_then(|n| n.to_str()) {
-                Some("node_modules") if dir.with_file_name("package.json").is_file() => "node",
-                Some("target") if dir.join("CACHEDIR.TAG").is_file() => "cargo",
-                _ => continue,
+        for entry in list.split('\0').filter(|e| !e.is_empty()) {
+            let (rel, is_dir) = match entry.strip_suffix('/') {
+                Some(dir) => (dir, true),
+                None => (entry, false),
             };
-            let path = repo.name.as_ref().map_or(entry.to_string(), |n| format!("{n}/{entry}"));
-            out.push(Candidate { path, kind });
+            let path = repo.path.join(rel);
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let kind = if is_dir {
+                match name {
+                    "node_modules" if path.with_file_name("package.json").is_file() => "node",
+                    "target" if path.join("CACHEDIR.TAG").is_file() => "cargo",
+                    _ if path.join("pyvenv.cfg").is_file() => "venv",
+                    _ => continue,
+                }
+            } else if secret_file(name) {
+                "secret"
+            } else {
+                continue;
+            };
+            out.push(Candidate { path: project_path(repo, rel), kind });
         }
     }
-    Ok(out)
+    out
+}
+
+// 저장소 안의 상대 경로 → 프로젝트 폴더 기준
+fn project_path(repo: &crate::worktrees::Repo, rel: &str) -> String {
+    match (&repo.name, rel) {
+        (Some(n), "") => n.clone(),
+        (Some(n), r) => format!("{n}/{r}"),
+        (None, r) => r.to_string(),
+    }
+}
+
+// 셸 명령에 넣을 한 단어. 안전한 글자뿐이면 그대로, 아니면 작은따옴표로 감싼다 (리뷰 P2: 가상 환경 이름
+// "env$(touch x)"가 명령 치환으로 실행됐다)
+fn shell_word(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "._-/+@%".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+#[derive(serde::Serialize, PartialEq, Debug)]
+pub struct Suggestion {
+    dir: String,
+    command: String,
+}
+
+// 설치 명령 제안: 저장소에 커밋된 lockfile에서 (새 worktree에는 커밋된 파일만 있다). venvs: 가상 환경 후보
+// (requirements.txt는 같은 폴더에 가상 환경이 있을 때만 그 pip로 제안한다. 아니면 시스템 Python에 깔린다).
+fn suggestions(repos: &[crate::worktrees::Repo], venvs: &[&str]) -> Vec<Suggestion> {
+    const LOCKS: &[&str] = &[
+        "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb",
+        "uv.lock", "poetry.lock", "Pipfile.lock", "requirements.txt", "Gemfile.lock", "go.sum",
+    ];
+    let mut out: Vec<Suggestion> = Vec::new();
+    for repo in repos {
+        let mut args = vec!["ls-files", "-z", "--"];
+        let patterns: Vec<String> = LOCKS.iter().flat_map(|f| [f.to_string(), format!("*/{f}")]).collect();
+        args.extend(patterns.iter().map(String::as_str));
+        let Ok(list) = git(&repo.path, &args) else { continue };
+        let mut files: Vec<&str> = list.split('\0').filter(|e| !e.is_empty() && !e.split('/').any(|c| c == "node_modules")).collect();
+        files.sort();
+        for file in files {
+            let (dir, name) = file.rsplit_once('/').unwrap_or(("", file));
+            let dir_path = repo.path.join(dir);
+            let command = match name {
+                "package-lock.json" | "npm-shrinkwrap.json" => "npm ci".to_string(),
+                // Yarn 2 이상(Berry)은 .yarnrc.yml을 두고 --immutable을 쓴다
+                "yarn.lock" if dir_path.join(".yarnrc.yml").is_file() => "yarn install --immutable".into(),
+                "yarn.lock" => "yarn install --frozen-lockfile".into(),
+                "pnpm-lock.yaml" => "pnpm install --frozen-lockfile".into(),
+                "bun.lock" | "bun.lockb" => "bun install --frozen-lockfile".into(),
+                "uv.lock" => "uv sync --frozen".into(),
+                "poetry.lock" => "poetry install".into(),
+                "Pipfile.lock" => "pipenv sync".into(),
+                "requirements.txt" => {
+                    let here = project_path(repo, dir);
+                    let venv = venvs.iter().find(|v| Path::new(v).parent().map(|p| p.to_string_lossy()) == Some(here.as_str().into()));
+                    match venv.and_then(|v| Path::new(v).file_name()) {
+                        Some(name) => format!("{}/bin/pip install -r requirements.txt", shell_word(&name.to_string_lossy())),
+                        None => continue,
+                    }
+                }
+                "Gemfile.lock" => "bundle install".into(),
+                "go.sum" => "go mod download".into(),
+                _ => continue,
+            };
+            let suggestion = Suggestion { dir: project_path(repo, dir), command };
+            if !out.contains(&suggestion) {
+                out.push(suggestion);
+            }
+        }
+    }
+    out
 }
 
 #[derive(serde::Serialize)]
 pub struct SetupInfo {
     candidates: Vec<Candidate>,
+    suggestions: Vec<Suggestion>,
     clone: Vec<String>,
+    install: Vec<Install>,
 }
 
 // "작업그룹 준비…" 창이 연다. git이 걸릴 수 있어 별도 스레드에서.
@@ -102,136 +213,53 @@ pub struct SetupInfo {
 pub async fn setup_load(app: AppHandle, project: String) -> Result<SetupInfo, CodeError> {
     let config = load_config(&setup_file(&app, Path::new(&project), "json")?)?;
     let root = std::fs::canonicalize(&project).map_err(|e| code_err("io", e))?;
-    let candidates = tauri::async_runtime::spawn_blocking(move || candidates(&root)).await.map_err(|e| code_err("io", e))??;
-    Ok(SetupInfo { candidates, clone: config.clone })
+    let (candidates, suggestions) = tauri::async_runtime::spawn_blocking(move || {
+        let (repos, _) = project_repos(&root)?;
+        let candidates = candidates(&repos);
+        let venvs: Vec<&str> = candidates.iter().filter(|c| c.kind == "venv").map(|c| c.path.as_str()).collect();
+        let suggestions = suggestions(&repos, &venvs);
+        Ok::<_, CodeError>((candidates, suggestions))
+    })
+    .await
+    .map_err(|e| code_err("io", e))??;
+    Ok(SetupInfo { candidates, suggestions, clone: config.clone, install: config.install })
 }
 
 #[tauri::command]
-pub fn setup_save(app: AppHandle, project: String, clone: Vec<String>) -> Result<(), CodeError> {
+pub fn setup_save(app: AppHandle, project: String, clone: Vec<String>, install: Vec<Install>) -> Result<(), CodeError> {
     if let Some(bad) = clone.iter().find(|r| !safe_rel(r)) {
         return Err(code_err("io", format!("{bad}: not a path inside the project")));
     }
+    if let Some(bad) = install.iter().find(|i| !safe_dir(&i.dir) || i.command.trim().is_empty()) {
+        return Err(code_err("io", format!("{}: not a folder inside the project or an empty command", bad.dir)));
+    }
     let path = setup_file(&app, Path::new(&project), "json")?;
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| code_err("io", e))?;
-    let json = serde_json::to_string_pretty(&Config { clone }).map_err(|e| code_err("io", e))?;
+    let json = serde_json::to_string_pretty(&Spec { clone, install }).map_err(|e| code_err("io", e))?;
     // 쓰다 끊겨도 반쯤 쓴 파일이 남지 않게 옆에 쓰고 옮긴다
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| code_err("io", e))?;
     std::fs::rename(&tmp, &path).map_err(|e| code_err("io", e))
 }
 
-// 새 작업그룹에서 할 준비. 스크립트도 복제할 항목도 없으면 None.
+// 새 작업그룹에서 할 준비. 스크립트도 할 일도 없으면 None.
 pub struct Plan {
     script: Option<String>,
-    clone: Vec<String>,
+    spec: Spec,
 }
 
 pub fn plan<R: Runtime>(app: &AppHandle<R>, project: &Path) -> Result<Option<Plan>, CodeError> {
     let script = script_to_run(app, project)?;
-    let clone = load_config(&setup_file(app, project, "json")?)?.clone;
-    Ok((script.is_some() || !clone.is_empty()).then_some(Plan { script, clone }))
+    let spec = load_config(&setup_file(app, project, "json")?)?;
+    Ok((script.is_some() || !spec.clone.is_empty() || !spec.install.is_empty()).then_some(Plan { script, spec }))
 }
 
-// 준비 창에서 돌릴 명령: 이 실행 파일의 도우미 모드 (setup_helper)
+// 준비 창에서 돌릴 명령: 이 실행 파일의 도우미 모드 (prepare.rs)
 pub fn command(plan: &Plan, origin: &str, group: &str, name: &str) -> Result<Vec<String>, CodeError> {
     let exe = std::env::current_exe().map_err(|e| code_err("io", e))?;
-    let mut argv = vec![exe.to_string_lossy().into_owned(), HELPER.into(), origin.into(), group.into(), name.into()];
-    argv.push(plan.script.clone().unwrap_or_default());
-    argv.extend(plan.clone.iter().cloned());
-    Ok(argv)
-}
-
-pub const HELPER: &str = "--ddak-setup";
-
-// node_modules는 설치를 정한 파일이 원본과 새 작업그룹에서 같을 때만 복제한다 (원본에서 package.json을 고치고
-// 설치했다면 새 작업그룹의 커밋된 package.json과 맞지 않는다). workspace의 하위 패키지는 위쪽(설치 루트)의
-// lockfile을 쓰므로 node_modules가 든 폴더부터 저장소 맨 위까지 모든 폴더를 본다 (리뷰 P2). 다르면 그 파일 경로.
-// inner: 저장소 기준 node_modules가 든 폴더.
-const NODE_MANIFESTS: &[&str] =
-    &["package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "pnpm-workspace.yaml", "bun.lock", "bun.lockb"];
-fn manifest_differs(origin_repo: &Path, group_repo: &Path, inner: &Path) -> Option<PathBuf> {
-    inner.ancestors().find_map(|dir| {
-        let differs = |f: &&&str| std::fs::read(origin_repo.join(dir).join(f)).ok() != std::fs::read(group_repo.join(dir).join(f)).ok();
-        NODE_MANIFESTS.iter().find(differs).map(|f| dir.join(f))
-    })
-}
-
-// 도우미: args = [원본 폴더, 작업그룹 폴더, 작업그룹 이름, 스크립트 (없으면 ""), 복제할 항목…].
-// 복제를 하나라도 못 하면 스크립트를 돌리지 않고 1로 끝난다 (준비 실패: 다시 준비 / 그래도 시작).
-// 출력은 영어 (터미널에 찍는 진단 문구, 준비 스크립트 안내와 같음).
-pub fn run_helper(args: &[String]) -> i32 {
-    let [origin, group, name, script, clone @ ..] = args else {
-        eprintln!("[ddak] usage: {HELPER} <origin> <group> <name> <script> [paths…]");
-        return 2;
-    };
-    let (origin, group) = (Path::new(origin), Path::new(group));
-    let origin_is_repo = git_kind(origin).is_some();
-    // 임시 폴더는 작업그룹 폴더들이 든 ddak 폴더에 둔다 (worktrees.rs: ~/.ddak/worktrees/<프로젝트>/)
-    let Some(temp_root) = group.parent() else {
-        eprintln!("[ddak] {}: no parent folder", group.display());
-        return 2;
-    };
-    clean_stale(temp_root);
-    let mut failed = false;
-    for rel in clone {
-        let (src, dst) = (origin.join(rel), group.join(rel));
-        if !safe_rel(rel) {
-            eprintln!("[ddak] {rel}: not a path inside the project");
-            failed = true;
-            continue;
-        }
-        if !src.is_dir() {
-            println!("[ddak] skipped {rel}: not in the original folder");
-            continue;
-        }
-        if !dst.parent().is_some_and(|p| p.is_dir()) {
-            eprintln!("[ddak] {rel}: its folder is not in the work group");
-            failed = true;
-            continue;
-        }
-        // 그 항목이 든 저장소: 원본과 새 작업그룹에서 (링크가 가리켜도 되는 범위, lockfile을 볼 범위)
-        let mut parts = Path::new(rel).components();
-        let repo_rel = if origin_is_repo { PathBuf::new() } else { parts.next().map(|c| PathBuf::from(c.as_os_str())).unwrap_or_default() };
-        let (src_repo, dst_repo) = (origin.join(&repo_rel), group.join(&repo_rel));
-        if dst.file_name().is_some_and(|n| n == "node_modules") {
-            let inner = Path::new(rel).strip_prefix(&repo_rel).unwrap_or(Path::new(rel)).parent().unwrap_or(Path::new(""));
-            if let Some(file) = manifest_differs(&src_repo, &dst_repo, inner) {
-                let file = repo_rel.join(file);
-                println!("[ddak] skipped {rel}: {} differs from the work group (install there instead)", file.display());
-                continue;
-            }
-        }
-        let started = std::time::Instant::now();
-        match clone_tree(&Job { src: &src, dst: &dst, src_bound: &src_repo, dst_bound: &dst_repo, temp_root }) {
-            Ok(Outcome::Exists) => println!("[ddak] kept {rel}: already exists"),
-            Ok(Outcome::Cloned(report)) => {
-                let files = if report.files == 1 { "1 file".to_string() } else { format!("{} files", report.files) };
-                println!("[ddak] cloned {rel}: {files} ({:.1}s)", started.elapsed().as_secs_f32());
-                for (path, why) in report.skipped.iter().take(10) {
-                    let why = if *why == "link" { "link pointing outside the repository" } else { "socket, FIFO or device" };
-                    println!("[ddak]   left out {}: {why}", path.display());
-                }
-                if report.skipped.len() > 10 {
-                    println!("[ddak]   left out {} more", report.skipped.len() - 10);
-                }
-            }
-            Err(e) => {
-                eprintln!("[ddak] could not clone {rel}: {e}");
-                failed = true;
-            }
-        }
-    }
-    if failed {
-        eprintln!("[ddak] setup stopped");
-        return 1;
-    }
-    if script.is_empty() {
-        return 0;
-    }
-    use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new("/bin/sh").arg(script).env("DDAK_ORIGIN", origin).env("DDAK_GROUP", name).exec();
-    eprintln!("[ddak] could not run {script}: {err}");
-    127
+    let spec = serde_json::to_string(&plan.spec).map_err(|e| code_err("io", e))?;
+    let script = plan.script.clone().unwrap_or_default();
+    Ok(vec![exe.to_string_lossy().into_owned(), HELPER.into(), origin.into(), group.into(), name.into(), script, spec])
 }
 
 // 주석과 빈 줄 말고 명령이 있는지
@@ -309,66 +337,99 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // 제안한 명령에 넣은 이름은 셸이 한 단어로 읽고 아무것도 실행하지 않는다
     #[test]
-    fn paths_and_manifests() {
-        assert!(safe_rel("web/node_modules") && safe_rel("node_modules"));
-        assert!(!safe_rel("") && !safe_rel("/abs") && !safe_rel("../x") && !safe_rel("a/../b") && !safe_rel("./a"));
-        let dir = std::env::temp_dir().join(format!("ddak-setup-man-{}", std::process::id()));
-        let (a, b) = (dir.join("a"), dir.join("b"));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        for d in [&a, &b] {
-            std::fs::write(d.join("package.json"), "{}").unwrap();
-            std::fs::write(d.join("package-lock.json"), "1").unwrap();
+    fn shell_words_are_inert() {
+        assert_eq!(shell_word(".venv"), ".venv");
+        let dir = std::env::temp_dir().join(format!("ddak-setup-word-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["my env", "env$(touch injected)", "it's", "a;touch injected", "`touch injected`"] {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf '%s' {}", shell_word(name)))
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out.stdout), name);
         }
-        let here = Path::new("");
-        assert_eq!(manifest_differs(&a, &b, here), None);
-        std::fs::write(a.join("package-lock.json"), "2").unwrap();
-        assert_eq!(manifest_differs(&a, &b, here), Some(PathBuf::from("package-lock.json")));
-        std::fs::write(a.join("package-lock.json"), "1").unwrap();
-        std::fs::write(b.join("yarn.lock"), "y").unwrap(); // 한쪽에만 있는 lockfile도 다름
-        assert_eq!(manifest_differs(&a, &b, here), Some(PathBuf::from("yarn.lock")));
-        std::fs::remove_file(b.join("yarn.lock")).unwrap();
-        // workspace 하위 패키지: 자기 package.json은 같아도 저장소 맨 위 lockfile이 다르면 다름 (리뷰 P2)
-        for d in [&a, &b] {
-            std::fs::create_dir_all(d.join("packages/x")).unwrap();
-            std::fs::write(d.join("packages/x/package.json"), "{}").unwrap();
-        }
-        let pkg = Path::new("packages/x");
-        assert_eq!(manifest_differs(&a, &b, pkg), None);
-        std::fs::write(a.join("package-lock.json"), "root changed").unwrap();
-        assert_eq!(manifest_differs(&a, &b, pkg), Some(PathBuf::from("package-lock.json")));
+        assert!(!dir.join("injected").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // 저장소마다 무시된 폴더 중 node_modules(옆에 package.json)와 cargo target(CACHEDIR.TAG)만 후보
     #[test]
-    fn finds_candidates() {
+    fn paths() {
+        assert!(safe_rel("web/node_modules") && safe_rel("node_modules"));
+        assert!(!safe_rel("") && !safe_rel("/abs") && !safe_rel("../x") && !safe_rel("a/../b") && !safe_rel("./a"));
+        assert!(safe_dir("") && safe_dir("web") && !safe_dir("..") && !safe_dir("/x"));
+    }
+
+    // 무시된 항목 중: node_modules(옆에 package.json), cargo target(CACHEDIR.TAG), 가상 환경(pyvenv.cfg), 비밀 파일.
+    // 설치 제안은 커밋된 lockfile에서 (requirements.txt는 같은 폴더에 가상 환경이 있을 때만).
+    #[test]
+    fn finds_candidates_and_suggestions() {
         let root = std::env::temp_dir().join(format!("ddak-setup-cand-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let web = root.join("web");
-        std::fs::create_dir_all(web.join("node_modules/x")).unwrap();
-        std::fs::create_dir_all(web.join("packages/a/node_modules/y")).unwrap();
-        std::fs::create_dir_all(web.join("target/debug")).unwrap();
-        std::fs::create_dir_all(web.join("dist")).unwrap();
-        std::fs::create_dir_all(web.join("orphan/node_modules/z")).unwrap(); // 옆에 package.json 없음
-        std::fs::write(web.join("package.json"), "{}").unwrap();
-        std::fs::write(web.join("packages/a/package.json"), "{}").unwrap();
-        std::fs::write(web.join("target/CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55").unwrap();
-        std::fs::write(web.join("dist/app.js"), "").unwrap();
-        std::fs::write(web.join("orphan/node_modules/z/f"), "").unwrap();
-        std::fs::write(web.join("node_modules/x/f"), "").unwrap();
-        std::fs::write(web.join("packages/a/node_modules/y/f"), "").unwrap();
-        std::fs::write(web.join("target/debug/f"), "").unwrap();
-        std::fs::write(web.join(".gitignore"), "node_modules/\ntarget/\ndist/\n").unwrap();
-        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(&web).status().unwrap().success();
-        assert!(ok);
+        for (f, body) in [
+            ("package.json", "{}"),
+            ("package-lock.json", "{}"),
+            ("packages/a/package.json", "{}"),
+            ("target/CACHEDIR.TAG", "Signature: 8a477f597d28d172789f06886806bc55"),
+            ("target/debug/f", ""),
+            ("dist/app.js", ""),
+            ("orphan/node_modules/z/f", ""), // 옆에 package.json 없음
+            ("node_modules/x/f", ""),
+            ("packages/a/node_modules/y/f", ""),
+            (".venv/pyvenv.cfg", "home = /usr/bin"),
+            ("api/env/pyvenv.cfg", "home = /usr/bin"),
+            (".env", "TOKEN=1"),
+            (".env.local", "TOKEN=2"),
+            (".env.example", "TOKEN="), // 무시돼도 예시 파일은 후보가 아님
+            ("api/server.pem", ""),
+            ("requirements.txt", "requests\n"),
+            ("api/requirements.txt", "flask\n"),
+            ("tool/uv.lock", ""),
+            ("plain/requirements.txt", "x\n"), // 가상 환경이 없으면 제안하지 않음
+            (".gitignore", "node_modules/\ntarget/\ndist/\n.venv/\nenv/\n.env*\n*.pem\n"),
+        ] {
+            std::fs::create_dir_all(web.join(f).parent().unwrap()).unwrap();
+            std::fs::write(web.join(f), body).unwrap();
+        }
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&web).status().unwrap().success());
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init"]);
         std::fs::write(root.join("notes.md"), "").unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
-        let mut got = candidates(&root).unwrap();
+        let (repos, _) = project_repos(&root).unwrap();
+        let mut got = candidates(&repos);
         got.sort_by(|a, b| a.path.cmp(&b.path));
-        let want = [("web/node_modules", "node"), ("web/packages/a/node_modules", "node"), ("web/target", "cargo")];
+        let want = [
+            ("web/.env", "secret"),
+            ("web/.env.local", "secret"),
+            ("web/.venv", "venv"),
+            ("web/api/env", "venv"),
+            ("web/api/server.pem", "secret"),
+            ("web/node_modules", "node"),
+            ("web/packages/a/node_modules", "node"),
+            ("web/target", "cargo"),
+        ];
         assert_eq!(got, want.map(|(path, kind)| Candidate { path: path.into(), kind }));
+        let venvs: Vec<&str> = got.iter().filter(|c| c.kind == "venv").map(|c| c.path.as_str()).collect();
+        let key = |s: &Suggestion| (s.dir.clone(), s.command.clone());
+        let mut got = suggestions(&repos, &venvs);
+        got.sort_by_key(key);
+        let mut want: Vec<Suggestion> = [
+            ("web", "npm ci"),
+            ("web", ".venv/bin/pip install -r requirements.txt"),
+            ("web/api", "env/bin/pip install -r requirements.txt"),
+            ("web/tool", "uv sync --frozen"),
+        ]
+        .into_iter()
+        .map(|(dir, command)| Suggestion { dir: dir.into(), command: command.into() })
+        .collect();
+        want.sort_by_key(key);
+        assert_eq!(got, want);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

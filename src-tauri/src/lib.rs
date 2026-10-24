@@ -2,6 +2,7 @@ mod clone;
 mod fs;
 mod groups;
 mod menu;
+mod prepare;
 mod projects;
 mod pty;
 mod repos;
@@ -14,7 +15,7 @@ mod worktrees;
 // 준비 창의 도우미 모드면 그 종료 코드 (main.rs가 창을 열기 전에 본다)
 pub fn setup_helper() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    (args.first().map(String::as_str) == Some(setup::HELPER)).then(|| setup::run_helper(&args[1..]))
+    (args.first().map(String::as_str) == Some(prepare::HELPER)).then(|| prepare::run_helper(&args[1..]))
 }
 
 pub fn run() {

@@ -481,6 +481,14 @@ button.secondary {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.check-dir {
+  margin-right: 6px;
+  color: var(--fg-dim);
+}
+.check-name code {
+  font-family: Menlo, monospace;
+  font-size: 12px;
+}
 .check-hint {
   flex-shrink: 0;
   font-size: 12px;

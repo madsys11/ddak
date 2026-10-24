@@ -56,8 +56,12 @@ fn cstr(p: &Path) -> std::io::Result<CString> {
     Ok(CString::new(p.as_os_str().as_bytes())?)
 }
 
-// 지울 수 있게 안쪽까지 주인 권한을 준 뒤 지운다 (권한을 되돌린 0555 폴더가 들어 있을 수 있다)
-fn remove_tree(dir: &Path) {
+// 지울 수 있게 안쪽까지 주인 권한을 준 뒤 지운다 (권한을 되돌린 0555 폴더가 들어 있을 수 있다). 파일이면 그 파일만.
+pub fn remove_tree(dir: &Path) {
+    if dir.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+        let _ = std::fs::remove_file(dir);
+        return;
+    }
     fn unlock(dir: &Path) {
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -90,15 +94,80 @@ pub fn clean_stale(temp_root: &Path) {
 
 // 이 실행만의 임시 폴더 (이미 있으면 다음 번호)
 fn make_temp(temp_root: &Path) -> Result<PathBuf, String> {
+    make_temp_with(temp_root, |p| std::fs::create_dir(p))
+}
+
+fn make_temp_with(temp_root: &Path, create: impl Fn(&Path) -> std::io::Result<()>) -> Result<PathBuf, String> {
     for k in 0.. {
-        let dir = temp_root.join(format!("{TEMP_PREFIX}{}-{k}", std::process::id()));
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
+        let path = temp_root.join(format!("{TEMP_PREFIX}{}-{k}", std::process::id()));
+        match create(&path) {
+            Ok(()) => return Ok(path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("{}: {e}", dir.display())),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
     unreachable!()
+}
+
+// 테스트에서만: 파일 복사가 이만큼 쓴 뒤 실패한 것처럼 한다 (디스크 가득·크기 제한 등)
+#[cfg(test)]
+thread_local! {
+    pub static FAIL_COPY_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+fn copy_fails_at(total: usize) -> bool {
+    FAIL_COPY_AFTER.with(|f| f.get()).is_some_and(|limit| total > limit)
+}
+#[cfg(not(test))]
+fn copy_fails_at(_: usize) -> bool {
+    false
+}
+
+// 파일 하나를 dst에 그대로 복사한다 (.env 같은 비밀 파일). ddak 폴더에 주인만 읽을 수 있는(0600) 임시 파일을 만들어
+// 다 쓴 뒤 원본 권한·수정 시각으로 하고 renamex_np(RENAME_EXCL)로 옮긴다. 중간에 실패해도 반쯤 쓴 파일이나 넓은 권한이
+// 제자리에 남지 않는다 (리뷰 P1: 제자리에 기본 권한으로 만들고 쓰다 실패해 0644·반쪽 파일이 남았고, 다시 하면
+// "있음"으로 넘어갔다). 이미 있으면 덮어쓰지 않고 false. 링크는 가리키는 곳을 알 수 없어 복사하지 않는다.
+pub fn copy_file_into(src: &Path, dst: &Path, temp_root: &Path) -> Result<bool, String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+    let meta = src.symlink_metadata().map_err(|e| e.to_string())?;
+    if meta.file_type().is_symlink() {
+        return Err("is a link (copy it in the setup script instead)".into());
+    }
+    if dst.symlink_metadata().is_ok() {
+        return Ok(false);
+    }
+    let mut input = std::fs::File::open(src).map_err(|e| e.to_string())?;
+    let tmp = make_temp_with(temp_root, |p| std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(p).map(|_| ()))?;
+    let result = (|| {
+        let mut out = std::fs::OpenOptions::new().write(true).open(&tmp).map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 64 * 1024];
+        let mut written = 0;
+        loop {
+            let n = input.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            if copy_fails_at(written + n) {
+                return Err("File too large (test)".to_string());
+            }
+            out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            written += n;
+        }
+        out.sync_all().map_err(|e| e.to_string())?;
+        out.set_times(std::fs::FileTimes::new().set_modified(meta.modified().map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+        out.set_permissions(std::fs::Permissions::from_mode(meta.permissions().mode())).map_err(|e| e.to_string())?;
+        let (from, to) = (cstr(&tmp).map_err(|e| e.to_string())?, cstr(dst).map_err(|e| e.to_string())?);
+        if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return if e.kind() == std::io::ErrorKind::AlreadyExists { Ok(false) } else { Err(format!("{}: {e}", dst.display())) };
+        }
+        Ok(true)
+    })();
+    if result != Ok(true) {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 // 테스트에서만: 제자리로 옮긴 직후 끊긴 것처럼 거기서 돌아온다 (그때 남는 상태를 보기 위해)
@@ -119,6 +188,11 @@ pub fn clone_tree(job: &Job) -> Result<Outcome, String> {
         // 따라간 경로와 비교하려면 제자리도 실제 경로로 (예: /var → /private/var)
         place: canon(parent)?.join(job.dst.file_name().ok_or("no folder name")?),
     };
+    // 놓일 자리의 부모를 실제로 따라간 곳이 그 worktree 밖이면 (새 worktree의 부모 폴더가 밖을 가리키는 링크 등)
+    // 만들지 않는다 (리뷰 P1)
+    if !bounds.place.starts_with(&bounds.dst) {
+        return Err(format!("{}: its folder leads outside the work group", job.dst.display()));
+    }
     let tmp = make_temp(job.temp_root)?;
     let mut made = Made::default();
     let result = canon(&tmp).and_then(|real_tmp| {
@@ -477,6 +551,32 @@ mod tests {
         }
         // 맨 위에서 ..는 맨 위 (realpath와 같음)
         assert_eq!(resolve_at(Path::new("/../tmp/.."), none, none), std::fs::canonicalize("/../tmp/..").ok());
+    }
+
+    // 파일 복사: 권한째, 있는 것은 덮어쓰지 않고, 링크는 복사하지 않는다. 쓰다 실패하면 제자리에도 ddak 폴더에도
+    // 아무것도 남지 않는다 (리뷰 P1: 0644·반쪽 파일이 남았다).
+    #[test]
+    fn file_copy_is_all_or_nothing() {
+        let f = Fixture::new("filecopy");
+        let src = f.repo.join(".env");
+        std::fs::write(&src, "x".repeat(8205)).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let dst = f.group.join(".env");
+        FAIL_COPY_AFTER.with(|c| c.set(Some(4096)));
+        let r = copy_file_into(&src, &dst, &f.ddak);
+        FAIL_COPY_AFTER.with(|c| c.set(None));
+        assert!(r.is_err());
+        assert!(dst.symlink_metadata().is_err(), "반쪽 파일이 남음");
+        assert_eq!(std::fs::read_dir(&f.ddak).unwrap().count(), 0);
+        assert_eq!(copy_file_into(&src, &dst, &f.ddak), Ok(true));
+        assert_eq!(std::fs::read(&dst).unwrap().len(), 8205);
+        assert_eq!(std::fs::metadata(&dst).unwrap().mode() & 0o777, 0o600);
+        std::fs::write(f.group.join("mine"), "mine").unwrap();
+        assert_eq!(copy_file_into(&src, &f.group.join("mine"), &f.ddak), Ok(false));
+        assert_eq!(std::fs::read_to_string(f.group.join("mine")).unwrap(), "mine");
+        std::os::unix::fs::symlink(".env", f.repo.join("link")).unwrap();
+        assert!(copy_file_into(&f.repo.join("link"), &f.group.join("link"), &f.ddak).is_err());
+        assert_eq!(std::fs::read_dir(&f.ddak).unwrap().count(), 0);
     }
 
     // 폴더의 권한·수정 시각도 원본대로 (리뷰 P2). 맨 위 폴더와 안쪽 폴더 모두.
