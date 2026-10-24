@@ -918,7 +918,7 @@ async function testCreate(root: string, term: Terminal) {
   await waitFor("Esc로 메뉴 닫기", () => !contextMenu());
   rightClick(projectRow(root)!);
   await waitFor("오른쪽 클릭 메뉴", contextMenu);
-  check("만들기: 프로젝트 오른쪽 클릭 메뉴", menuLabels().join(",") === "New File…,New Folder…,-,Add Repository…,-,Edit Work Group Setup…,-,Remove from List", menuLabels().join(","));
+  check("만들기: 프로젝트 오른쪽 클릭 메뉴", menuLabels().join(",") === "New File…,New Folder…,-,Add Repository…,-,Work Group Setup…,-,Remove from List", menuLabels().join(","));
   document.querySelector<HTMLElement>(".panel")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
   await waitFor("바깥 클릭으로 메뉴 닫기", () => !contextMenu());
   check("만들기: 바깥을 누르면 메뉴 닫힘", true);
@@ -1322,6 +1322,80 @@ async function testGroupWorktree(root: string, first: Terminal) {
   await waitFor("작업그룹 탭 닫기", () => tabCount() === before, 5000);
 }
 
+// 작업그룹 준비…: 원본의 커밋 안 된 node_modules를 골라 두면 새 작업그룹에 복제한다 (src-tauri/src/clone.rs).
+// 이때 작업그룹 폴더는 test-1~3이 있고 준비 스크립트는 testGroupWorktree가 넣은 것 (SETUP_OK로 끝남).
+// 터미널을 넷 더 만들므로 WebGL 검사 뒤에 둔다 (컨텍스트가 많으면 가장 오래된 첫 터미널의 것을 잃는다).
+async function testGroupClone(root: string, first: Terminal) {
+  const sh = async (cmd: string) => (await run(first, cmd)).map((l) => l.trim()).filter(Boolean);
+  // 원본 server: package.json·lockfile을 커밋하고 무시되는 node_modules를 만든다. 안쪽 상대 링크, 절대 링크, FIFO,
+  // 오래된 수정 시각을 둔다.
+  const nm = `${root}/server/node_modules`;
+  await sh(
+    [
+      `cd "${root}/server"`,
+      `printf '{}' > package.json && printf 'lock1' > package-lock.json && printf 'node_modules/\\n' > .gitignore`,
+      `git add -A && git -c user.name=t -c user.email=t@example.com commit -qm deps`,
+      `mkdir -p node_modules/pkg node_modules/.bin && printf 'mod' > node_modules/pkg/index.js && touch -t 200101010000 node_modules/pkg/index.js`,
+      `ln -s ../pkg/index.js node_modules/.bin/run && ln -s /etc/hosts node_modules/abs && mkfifo node_modules/pipe`,
+      `cd - > /dev/null`,
+    ].join(" && "),
+  );
+  // 개발 모드는 효과를 두 번 돌린다. 첫 번째 읽기의 응답을 늦춰서, 고른 뒤에 와도 고른 것을 되돌리지 않는지 본다.
+  let loads = 0;
+  devHooks.setupLoadDelay = () => (loads++ === 0 ? 1500 : 0);
+  rightClick(projectRow(root)!);
+  await waitFor("오른쪽 클릭 메뉴", contextMenu);
+  [...document.querySelectorAll<HTMLElement>(".context-item")].find((el) => el.textContent === "Work Group Setup…")!.click();
+  const row = await waitFor("복제 후보", () => document.querySelector<HTMLElement>(".setup-dialog [data-clone='server/node_modules']"), 10000);
+  const rowsShown = [...document.querySelectorAll<HTMLElement>(".setup-dialog [data-clone]")].map((el) => el.dataset.clone);
+  check("작업그룹 준비 창: 원본의 node_modules가 후보 (조건 안내)", rowsShown.join(",") === "server/node_modules" && row.textContent?.includes("only when package.json and the lockfile match") === true, rowsShown.join(","));
+  check("작업그룹 준비 창: 커밋 전 변경 미포함 안내", document.querySelector(".setup-dialog")?.textContent?.includes("Uncommitted changes are not included") === true);
+  row.querySelector<HTMLInputElement>("input")!.click();
+  await sleep(2000);
+  devHooks.setupLoadDelay = undefined;
+  check("작업그룹 준비 창: 늦게 온 첫 읽기가 고른 것을 되돌리지 않음", loads === 2 && row.querySelector<HTMLInputElement>("input")!.checked, `${loads}`);
+  document.querySelector<HTMLElement>(".setup-dialog button[type=submit]")!.click();
+  await waitFor("창 닫힘", () => !document.querySelector(".setup-dialog"), 5000);
+  const saved = (await sh(`cat "${root.replace(/\/proj$/, "")}"/data-main/setup/proj-*.json | tr -d ' \\n'; echo`)).find((l) => l.startsWith("{")) ?? "";
+  check("작업그룹 준비 창: 고른 항목을 프로젝트 설정에 저장", saved === '{"clone":["server/node_modules"]}', saved);
+
+  // 새 작업그룹: setup 창에서 복제 → 준비 스크립트 → 세션
+  const groups = `${(await sh("echo $DDAK_HOME")).at(-1)}/worktrees/${(await sh(`ls "$DDAK_HOME/worktrees"`)).at(-1)}/`;
+  const before = tabCount();
+  await clickMenu("Terminal", "New Work Group");
+  await waitFor("네 번째 작업그룹", () => tabCount() === before + 1, 15000);
+  const [, setup] = await waitFor("복제 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 15000);
+  const out = screen(setup.term).join("\n");
+  check(
+    "작업그룹 복제: setup 창에 복제 결과와 뺀 항목 (밖을 가리키는 링크, FIFO), 그 뒤 준비 스크립트",
+    out.includes("[ddak] cloned server/node_modules: 1 file (") && out.includes("left out abs: link pointing outside") && out.includes("left out pipe: socket") && out.includes("SETUP_OK"),
+    out.slice(-400),
+  );
+  const g4 = `${groups}test-4/server/node_modules`;
+  const facts = await sh(`cat "${g4}/pkg/index.js"; echo; readlink "${g4}/.bin/run"; test -e "${g4}/abs" -o -L "${g4}/abs" && echo abs-there; test -e "${g4}/pipe" && echo pipe-there; [ "$(stat -f %m "${g4}/pkg/index.js")" = "$(stat -f %m "${nm}/pkg/index.js")" ] && echo same-mtime; ls -a "${groups}test-4/server" "${groups}" | grep -c ddak-clone`);
+  check(
+    "작업그룹 복제: 내용, 안쪽 링크, 수정 시각이 그대로이고 뺀 항목·임시 폴더는 없음",
+    facts.includes("mod") && facts.includes("../pkg/index.js") && facts.includes("same-mtime") && !facts.includes("abs-there") && !facts.includes("pipe-there") && facts.at(-1) === "0",
+    facts.join("|"),
+  );
+
+  // 원본의 lockfile이 커밋과 다르면 (커밋 안 한 설치) 복제하지 않고 알린다. 실패가 아니라 세션은 뜬다.
+  await sh(`printf 'lock2' > "${root}/server/package-lock.json"`);
+  await clickMenu("Terminal", "New Work Group");
+  await waitFor("다섯 번째 작업그룹", () => tabCount() === before + 2, 15000);
+  const [, setup5] = await waitFor("건너뛴 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 15000);
+  const out5 = screen(setup5.term).join("\n");
+  const left = await sh(`test -e "${groups}test-5/server/node_modules" && echo there || echo none`);
+  check(
+    "작업그룹 복제: lockfile이 다르면 건너뛰고 알림, 세션은 뜸",
+    out5.includes("skipped server/node_modules: server/package-lock.json differs") && left.includes("none"),
+    `${out5.slice(-300)} ${left.join("|")}`,
+  );
+  await sh(`cd "${root}/server" && git checkout -q package-lock.json && rm -rf node_modules && cd - > /dev/null`);
+  for (let i = 0; i < 4; i++) await menu("close_pane"); // test-5, test-4 (세션 + setup)
+  await waitFor("복제 작업그룹 탭 닫기", () => tabCount() === before, 5000);
+}
+
 // 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
 async function testTabRename() {
   const tab = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active")!;
@@ -1619,6 +1693,7 @@ export async function runSelftest(root: string, scenario: string) {
     await testTabsAndSplits(root, first);
     await testWebglLoss(first);
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다
+    await testGroupClone(root, first);
     await testTabMove();
     await testTabScroll();
     await testManyTerminals(20);

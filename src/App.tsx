@@ -94,7 +94,7 @@ function App() {
 
   return (
     <main className="layout">
-      <Sidebar projects={projects} active={active} treeRoots={treeRoots} errors={[shownError, groupsMessage]} onAdd={pickProject} onActivate={activate} onRemove={removeProject} onError={setError} />
+      <Sidebar projects={projects} active={active} treeRoots={treeRoots} errors={[shownError, groupsMessage]} onAdd={pickProject} onActivate={activate} onRemove={removeProject} />
       <section className="panel">
         {/* 작업그룹 설정을 읽은 뒤에 연다 (처음 띄울 세션을 알아야 해서). 못 읽었으면 셸 하나로 */}
         {groupsReady &&

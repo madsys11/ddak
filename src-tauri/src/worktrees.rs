@@ -60,7 +60,7 @@ fn git_command() -> Command {
     Command::new("git")
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = git_command()
         .arg("-C")
         .arg(dir)
@@ -76,18 +76,43 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-struct Repo {
+pub struct Repo {
     // 그룹 폴더 안의 이름 (프로젝트 자체가 저장소면 None = 그룹 폴더 자체)
-    name: Option<String>,
-    path: PathBuf,
+    pub name: Option<String>,
+    pub path: PathBuf,
+}
+
+// 프로젝트의 저장소와 그 밖의 항목 이름. root는 실제 경로(canonicalize). 프로젝트 폴더 자체가 저장소면 그것 하나.
+pub fn project_repos(root: &Path) -> Result<(Vec<Repo>, Vec<String>), CodeError> {
+    let mut repos = Vec::new();
+    let mut others = Vec::new();
+    if git_kind(root).is_some() {
+        repos.push(Repo { name: None, path: root.to_path_buf() });
+        return Ok((repos, others));
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(root).map_err(|e| code_err("io", e))?.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == ".DS_Store" {
+            continue;
+        }
+        let path = e.path();
+        if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) && git_kind(&path).is_some() {
+            repos.push(Repo { name: Some(name), path });
+        } else {
+            others.push(name);
+        }
+    }
+    Ok((repos, others))
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct Created {
     name: String,
     path: String,
-    // 돌릴 준비 스크립트 (setup.rs). 없으면 None
-    setup: Option<String>,
+    // 준비 창에서 돌릴 명령 (setup.rs: 복제 + 준비 스크립트). 할 준비가 없으면 None
+    setup: Option<Vec<String>>,
 }
 
 // 저장소 하나에 만들 것: 원본 저장소, worktree 폴더, 브랜치
@@ -148,27 +173,7 @@ fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError
     let root = std::fs::canonicalize(project).map_err(|e| code_err("io", e))?;
     let base = home.join("worktrees").join(project_slug(&root));
 
-    // 저장소와 그 밖의 항목
-    let mut repos = Vec::new();
-    let mut others = Vec::new();
-    if git_kind(&root).is_some() {
-        repos.push(Repo { name: None, path: root.clone() });
-    } else {
-        let mut entries: Vec<_> = std::fs::read_dir(&root).map_err(|e| code_err("io", e))?.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name == ".DS_Store" {
-                continue;
-            }
-            let path = e.path();
-            if std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) && git_kind(&path).is_some() {
-                repos.push(Repo { name: Some(name), path });
-            } else {
-                others.push(name);
-            }
-        }
-    }
+    let (repos, others) = project_repos(&root)?;
     if repos.is_empty() {
         return Err(code_err("noRepos", root.to_string_lossy()));
     }
@@ -220,12 +225,18 @@ fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError
 }
 
 // git 명령이 몇 초 걸릴 수 있어 별도 스레드에서 돈다.
-// 프로젝트에 준비 스크립트가 있으면 그 경로를 함께 돌려준다 (프론트가 setup 창에서 돌린다).
+// 할 준비가 있으면 준비 창에서 돌릴 명령을 함께 돌려준다. 준비 설정은 만들기 전에 읽는다 (잘못됐으면 아무것도
+// 만들지 않고 실패).
 #[tauri::command]
 pub async fn group_create(app: AppHandle, project: String, prefix: String) -> Result<Created, CodeError> {
     let home = ddak_home()?;
-    let setup = crate::setup::script_to_run(&app, Path::new(&project))?;
+    let plan = crate::setup::plan(&app, Path::new(&project))?;
+    let origin = project.clone();
     let made = tauri::async_runtime::spawn_blocking(move || create(&home, &project, &prefix)).await.map_err(|e| code_err("io", e))??;
+    let setup = match plan {
+        Some(plan) => Some(crate::setup::command(&plan, &origin, &made.path, &made.name)?),
+        None => None,
+    };
     Ok(Created { setup, ..made })
 }
 

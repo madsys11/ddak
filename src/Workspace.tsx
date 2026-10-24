@@ -31,8 +31,8 @@ type Setup = {
 };
 // root: 프로젝트 폴더. sessions: 작업그룹 세션으로 띄운 터미널 → 그 세션. 없으면 그냥 셸.
 type State = { root: string; tabs: Tab[]; active: number; titles: Record<number, string>; sessions: Record<number, PaneSession>; nextId: number };
-// 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 돌릴 준비 스크립트 경로
-type Created = { name: string; path: string; setup: string | null };
+// 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 준비 창에서 돌릴 명령 (복제 + 준비 스크립트)
+type Created = { name: string; path: string; setup: string[] | null };
 
 type Action =
   | { type: "newTab" }
@@ -66,8 +66,8 @@ function addGroupTab(s: State, group: Group | null, cwd: string, made?: Created)
   if (made?.setup) {
     const setupPane = nextId++;
     layout = withSetupPane(layout, setupPane);
-    const env = [`DDAK_ORIGIN=${s.root}`, `DDAK_GROUP=${made.name}`];
-    const session: PaneSession = { name: "setup", command: "env", args: [...env, "/bin/sh", made.setup], readOnly: false, shiftEnter: null, setup: true };
+    const [command, ...args] = made.setup;
+    const session: PaneSession = { name: "setup", command, args, readOnly: false, shiftEnter: null, setup: true };
     added.push([setupPane, session]);
     setup = { pane: setupPane, run: 0, status: "running", code: null, started: false, session };
   }

@@ -460,6 +460,32 @@ button.secondary {
   justify-content: flex-end;
   gap: 8px;
 }
+.setup-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.setup-label {
+  font-weight: 600;
+}
+/* .modal label의 세로 배치를 덮는다 */
+.modal label.check-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.check-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.check-hint {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
 .field-row {
   display: flex;
   gap: 6px;

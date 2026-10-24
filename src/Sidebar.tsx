@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { AddRepoDialog } from "./AddRepoDialog";
+import { SetupDialog } from "./SetupDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
-import { codeError } from "./errors";
 import { Children, TreeContext, Twisty, indent, useFolderMenu, useOpenWhenCreating, useTree } from "./FileTree";
 import { ProjectIcon } from "./icons";
 import { useT } from "./prefs";
@@ -18,13 +17,14 @@ type Props = {
   onAdd: () => void;
   onActivate: (path: string) => void;
   onRemove: (path: string) => void;
-  onError: (message: string) => void;
 };
 
 // 프로젝트 목록. 프로젝트를 펼치면 그 폴더의 파일 트리가 보인다.
-export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate, onRemove, onError }: Props) {
+export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate, onRemove }: Props) {
   const t = useT();
   const [addingTo, setAddingTo] = useState<string | null>(null);
+  // 작업그룹 준비 창을 연 프로젝트
+  const [settingUp, setSettingUp] = useState<string | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [creating, setCreating] = useState<{ dir: string; kind: "file" | "dir" } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -79,13 +79,14 @@ export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate
               onActivate={() => onActivate(p.path)}
               onRemove={() => onRemove(p.path)}
               onAddRepo={() => setAddingTo(p.path)}
-              onError={onError}
+              onSetup={() => setSettingUp(p.path)}
             />
           ))}
         </div>
       </TreeContext.Provider>
       {menu && <ContextMenu menu={menu} onClose={closeMenu} />}
       {addingTo && <AddRepoDialog project={addingTo} onClose={() => setAddingTo(null)} />}
+      {settingUp && <SetupDialog project={settingUp} onClose={() => setSettingUp(null)} />}
     </aside>
   );
 }
@@ -97,10 +98,10 @@ type NodeProps = {
   onActivate: () => void;
   onRemove: () => void;
   onAddRepo: () => void;
-  onError: (message: string) => void;
+  onSetup: () => void;
 };
 
-function ProjectNode({ project, active, treeRoot, onActivate, onRemove, onAddRepo, onError }: NodeProps) {
+function ProjectNode({ project, active, treeRoot, onActivate, onRemove, onAddRepo, onSetup }: NodeProps) {
   const t = useT();
   const tree = useTree();
   const folderMenu = useFolderMenu();
@@ -127,11 +128,8 @@ function ProjectNode({ project, active, treeRoot, onActivate, onRemove, onAddRep
     },
   ];
   const removeItem: MenuItem = { label: t("sidebar.removeProject"), action: onRemove };
-  // 새 작업그룹을 만든 뒤 돌릴 준비 스크립트 (src-tauri/src/setup.rs). 앱 데이터에 있고 텍스트 편집기로 연다.
-  const setupItem: MenuItem = {
-    label: t("sidebar.editSetup"),
-    action: () => invoke("setup_script_edit", { project: path }).catch((e) => onError(t("sidebar.editSetupFailed", { detail: codeError(e).detail }))),
-  };
+  // 새 작업그룹에 복제할 항목과 준비 스크립트 (SetupDialog, src-tauri/src/setup.rs)
+  const setupItem: MenuItem = { label: t("sidebar.setup"), action: onSetup };
 
   return (
     <>

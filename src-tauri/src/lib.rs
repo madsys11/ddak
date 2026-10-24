@@ -1,3 +1,4 @@
+mod clone;
 mod fs;
 mod groups;
 mod menu;
@@ -10,6 +11,12 @@ mod watch;
 mod worktrees;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// 준비 창의 도우미 모드면 그 종료 코드 (main.rs가 창을 열기 전에 본다)
+pub fn setup_helper() -> Option<i32> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    (args.first().map(String::as_str) == Some(setup::HELPER)).then(|| setup::run_helper(&args[1..]))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -32,6 +39,8 @@ pub fn run() {
             repos::repo_clone,
             worktrees::group_create,
             setup::setup_script_edit,
+            setup::setup_load,
+            setup::setup_save,
             projects::projects_load,
             projects::projects_save,
             menu::set_menu,

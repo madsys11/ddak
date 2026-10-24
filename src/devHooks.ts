@@ -15,6 +15,8 @@ export const devHooks: {
   groups?: Groups | null;
   // 터미널이 PTY 생성 응답을 이만큼(ms) 늦게 받은 것처럼 한다 (자체 테스트)
   spawnDelay?: number;
+  // 작업그룹 준비 창이 설정을 읽을 때마다 불러서, 그 응답을 돌려준 값(ms)만큼 늦게 받은 것처럼 한다 (자체 테스트)
+  setupLoadDelay?: () => number;
 } = {
   confirm: (message, labels) => ask(message, { kind: "warning", ...labels }),
 };
