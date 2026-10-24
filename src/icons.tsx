@@ -57,6 +57,13 @@ export const SplitIcon = ({ dir }: { dir: "row" | "col" }) => (
   </Svg>
 );
 
+// 탭 바 버튼: 채팅방 (말풍선)
+export const ChatIcon = () => (
+  <Svg className="icon-tool">
+    <path d="M2.75 3.75a1 1 0 0 1 1-1h8.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7l-3 2.5v-2.5h-.25a1 1 0 0 1-1-1v-6Z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+  </Svg>
+);
+
 // 파일 트리 펼치기/접기: 오른쪽 꺾쇠. 펼치면 CSS(.tree-twisty.open)가 90° 돌린다 (2026-10-23 시안 C).
 export const ChevronIcon = () => (
   <Svg className="icon-chevron">

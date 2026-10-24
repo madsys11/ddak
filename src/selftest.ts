@@ -717,10 +717,21 @@ async function testProjects(root: string, first: Terminal) {
   // 저장한 상태를 읽는 동안에는 새 작업그룹을 만들지 않는다 (만들어도 결과를 읽은 상태가 덮는다. 리뷰 P2).
   // other에는 저장소가 없어서 만들기를 부르면 "저장소 없음" 오류가 난다.
   devHooks.workspaceLoad = () => new Promise((r) => setTimeout(() => r(null), 1500));
+  // 채팅 패널은 이벤트를 등록한 뒤 처음 상태를 읽는다 (리뷰 P2: 그 사이 온 메시지를 놓쳤다). 등록을 늦추고 그 사이 보낸다.
+  devHooks.chatListenDelay = 1500;
   await devHooks.addProject!(other);
+  const otherChat = () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(other)}"] .chat-panel`);
   const otherBtn = await waitFor("두 번째 프로젝트 탭 바", () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(other)}"] [data-action=new-group]`));
   otherBtn.click();
   devHooks.workspaceLoad = undefined;
+  // 패널이 뜬 뒤 등록하기 전 (1.5초 안)에 보낸다
+  await waitFor("두 번째 프로젝트 채팅 패널", otherChat, 1000);
+  await invoke("chat_post", { project: other, text: "early message" });
+  devHooks.chatListenDelay = undefined;
+  await waitFor("처음 읽기 전에 온 메시지", () => [...otherChat()!.querySelectorAll(".chat-text")].some((el) => el.textContent === "early message"), 4000).then(
+    () => check("채팅 패널: 이벤트를 등록하기 전에 온 메시지도 보임", true),
+    () => check("채팅 패널: 이벤트를 등록하기 전에 온 메시지도 보임", false, otherChat()!.textContent ?? ""),
+  );
   await waitFor("읽기 끝", () => tabsIn(other) === 1, 5000);
   await sleep(500);
   const noRepos = [...document.querySelectorAll(".sidebar-error")].some((e) => e.textContent?.includes("no git repository"));
@@ -858,6 +869,26 @@ async function testProjects(root: string, first: Terminal) {
   await sleep(1000);
   check("프로젝트: 저장한 상태를 읽지 못하면 알리고, 그 상태를 덮어쓰지 않음", !!failed && before !== "none" && (await hash()) === before, `${before} ${failed?.textContent}`);
   await removeOther();
+
+  // 채팅 이벤트 등록이 하나만 실패해도 (chat-members) 처음 읽기는 하고 오류를 보이며, 성공한 등록(chat)은 풀어서 패널이
+  // 사라진 뒤 남지 않는다 (리뷰 후속 P2)
+  devHooks.chatListenFail = "chat-members";
+  await devHooks.addProject!(other);
+  const otherPanel = () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(other)}"] .chat-panel`);
+  const shownError = await waitFor("등록 실패 알림", () => otherPanel()?.querySelector("[data-listen-error]"), 5000).catch(() => null);
+  const firstRead = await waitFor("처음 읽기", () => [...(otherPanel()?.querySelectorAll(".chat-text") ?? [])].some((el) => el.textContent === "early message"), 3000).catch(() => false);
+  devHooks.chatListenFail = undefined;
+  await removeOther();
+  await sleep(300);
+  const reads = () => devHooks.chatLoads?.[other] ?? 0;
+  const readsBefore = reads();
+  await invoke("chat_post", { project: other, text: "after removal" });
+  await sleep(500);
+  check(
+    "채팅 패널: 이벤트 등록이 일부 실패하면 알리고 처음 읽기는 하고, 사라진 뒤 남은 리스너가 없음",
+    !!shownError && !!firstRead && readsBefore > 0 && reads() === readsBefore,
+    `${shownError?.textContent} ${firstRead} ${readsBefore}→${reads()}`,
+  );
   await waitFor("남은 프로젝트로", () => visiblePanes()[0]?.term === first);
 }
 
@@ -1347,7 +1378,7 @@ async function testGroupWorktree(root: string, first: Terminal) {
     const [br, ir] = [btn.getBoundingClientRect(), btn.querySelector("svg")?.getBoundingClientRect()];
     return ir ? ir.top + ir.height / 2 - (br.top + br.height / 2) : NaN;
   });
-  check("작업그룹 추가: 탭 바 버튼 아이콘 넷이 세로 가운데", offs.length === 4 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
+  check("작업그룹 추가: 탭 바 버튼 아이콘 다섯(채팅 포함)이 세로 가운데", offs.length === 5 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
   // 준비 스크립트에 명령을 넣으면 다음 작업그룹부터 세션 아래 setup 창에서 돌고, 세션은 준비가 성공한 뒤에 뜬다.
   // 플래그 파일로 멈춰 두거나(hold) 실패하게(fail) 한다.
   const flags = setupPath.replace(/\/[^/]+$/, "");
@@ -1623,11 +1654,17 @@ async function testGroupEnd(root: string, first: Terminal) {
   dialog()!.querySelector<HTMLElement>("button.secondary")!.click();
   await waitFor("창 닫기", () => !dialog());
 
-  // 끝내면 SIGHUP을 무시하는 백그라운드 작업(대화형 셸은 그룹을 따로 만든다)까지 끝낸 뒤 지운다. 남았다면 나중에 표시를 남긴다.
+  // 끝내면 SIGHUP을 무시하는 백그라운드 작업(대화형 셸은 그룹을 따로 만든다)까지 끝낸 뒤 지운다. 남았다면 8초 뒤에 표시를
+  // 남긴다. 끝내기를 누르기 전에 표시가 이미 있으면 (창을 여는 데 8초 넘게 걸림) 이 검사는 무효다 (전에 3초로 두었다가
+  // 느린 실행에서 끝내기 전에 표시가 생겨 실패했다).
   const marker = `${root}/../late-marker-${name}`;
+  const LATE = 8;
   await sh(`rm "${path}/server/late.txt"`);
-  await run(shellTerm()!, `(trap '' HUP; sleep 3; echo late > "${marker}") &`);
+  await run(shellTerm()!, `(trap '' HUP; sleep ${LATE}; echo late > "${marker}") &`);
+  const started = Date.now();
   await openDialog();
+  const early = (await sh(`test -e "${marker}" && echo late-early`)).includes("late-early");
+  check("작업그룹 끝내기: (검사 준비) 끝내기 전에 백그라운드 작업이 아직 돌고 있음", !early, `${Date.now() - started}ms`);
   endButton()!.click();
   await waitFor("끝냄", () => tabCount() === before && dialog()?.querySelector(".end-row code"), 20000);
   const kept = [...dialog()!.querySelectorAll(".end-row")].map((el) => el.textContent);
@@ -1635,7 +1672,7 @@ async function testGroupEnd(root: string, first: Terminal) {
   dialog()!.querySelector<HTMLElement>("button")!.click();
   await waitFor("창 닫기", () => !dialog());
 
-  await sleep(3500);
+  await sleep(Math.max(0, started + LATE * 1000 + 500 - Date.now()));
   const facts = await sh(
     `test -e "${marker}" && echo late-there; test -e "${path}" && echo dir-there; for r in server cloned linked; do printf '%s=' $r; git -C "${root}/$r" branch --list "ddak/${name}*" | tr -d ' *\\n'; echo; done; ` +
       `ls -a "${path.replace(/\/[^/]+$/, "")}" | grep -c "ddak-group-${name}"; git -C "${root}/server" worktree list | grep -c "/${name}/"`,
@@ -1723,6 +1760,8 @@ async function testAddSession(root: string, first: Terminal) {
     `${JSON.stringify(posted)} | ${members.join(",")}`,
   );
 
+  await testChatPanel(root, open, choose);
+
   // 경고에서 새 작업그룹을 고르면 별도 worktree의 작업그룹을 연다 (기본 그룹)
   await open("menu");
   choose("pick/writer");
@@ -1743,6 +1782,105 @@ async function testAddSession(root: string, first: Terminal) {
   check("채팅방: 터미널을 닫으면 참여자에서 빠짐", left?.join(",") === "user", String(left));
   await run(first, `printf '%s' '${TEST_GROUPS}' > "${file}"`);
   await waitFor("테스트 설정 복귀", () => devHooks.groups?.groups.length === 1, 3000);
+}
+
+// 채팅 패널 (src/ChatPanel.tsx): 탭 바 버튼으로 연다. 세션이 보낸 메시지와 참여자를 보이고, 참여자를 누르면 멘션을
+// 넣고, Enter로 사용자(user)로 보낸다 (한글 조합 Enter는 아님). 닫혀 있는 동안 나에게 온 메시지는 버튼에 점으로 알린다.
+// 이때 지금 탭에는 poster(MCP로 "@user hello from poster"를 보냄)가 떠 있다.
+async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Promise<void>, choose: (id: string) => void) {
+  const ws = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const panel = () => ws().querySelector<HTMLElement>(".chat-panel");
+  const toggle = () => ws().querySelector<HTMLElement>("[data-action=chat]")!;
+  const shown = () => !!panel() && panel()!.style.display !== "none";
+  const input = () => panel()!.querySelector<HTMLTextAreaElement>(".chat-input")!;
+  const type = (text: string) => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input(), text);
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const enter = (keyCode: number) => {
+    const ev = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "keyCode", { get: () => keyCode });
+    input().dispatchEvent(ev);
+  };
+  const stored = () => invoke<{ from: string; text: string; to: string[] }[]>("chat_messages", { project: root });
+
+  toggle().click();
+  await waitFor("채팅 패널", () => shown() && panel()!.querySelector(".chat-msg"), 5000);
+  const first = panel()!.querySelector<HTMLElement>(".chat-msg")!;
+  const chips = [...panel()!.querySelectorAll<HTMLElement>(".chat-member")].map((el) => el.dataset.member).join(",");
+  check(
+    "채팅 패널: 탭 바 버튼으로 열고, 세션이 보낸 메시지(나에게)와 참여자를 보임, 입력란에 포커스",
+    first.querySelector(".chat-from")?.textContent === "origin/poster" && /^\d\d:\d\d( [AP]M)?$/.test(first.querySelector("time")?.textContent ?? "") && first.classList.contains("to-me") && first.querySelector(".chat-text")?.textContent === "@user hello from poster" &&
+      chips === "origin/poster,origin/reviewer,origin/writer,origin/writer-2" && document.activeElement === input(),
+    `${first.textContent} | ${chips}`,
+  );
+
+  panel()!.querySelector<HTMLElement>("[data-member='origin/poster']")!.click();
+  await waitFor("멘션 넣기", () => input().value === "@origin/poster ", 2000);
+  type(`${input().value}hi poster`);
+  const before = (await stored()).length;
+  enter(229);
+  await sleep(300);
+  const notYet = (await stored()).length === before;
+  enter(13);
+  const sent = await waitAsync("보낸 메시지", async () => (await stored()).find((m) => m.text === "@origin/poster hi poster"), 5000).catch(() => null);
+  await waitFor("패널에 보임", () => panel()!.querySelectorAll(".chat-msg.mine").length === 1, 3000).catch(() => null);
+  check(
+    "채팅 패널: 참여자를 누르면 멘션, Enter로 사용자로 보냄 (한글 조합 Enter는 아님), 입력란 비움",
+    notYet && sent?.from === "user" && sent.to.join(",") === "origin/poster" && input().value === "" && panel()!.querySelectorAll(".chat-msg.mine").length === 1,
+    `${notYet} ${JSON.stringify(sent)} "${input().value}"`,
+  );
+
+  // 보내는 동안 새로 쓴 초안은 응답이 와도 남는다 (리뷰 P2)
+  devHooks.chatPostDelay = 1000;
+  type("slow one");
+  enter(13);
+  await sleep(100);
+  type("next draft");
+  await waitAsync("늦게 보낸 메시지", async () => (await stored()).some((m) => m.text === "slow one"), 5000).catch(() => null);
+  await sleep(200);
+  devHooks.chatPostDelay = undefined;
+  check("채팅 패널: 보내는 동안 새로 쓴 초안은 남음", input().value === "next draft", input().value);
+  type("");
+
+  // 닫으면 선택된 터미널로 포커스가 돌아간다 (리뷰 P2: 숨은 입력란에 남았다)
+  const terminalFocused = () => !!document.activeElement?.classList.contains("xterm-helper-textarea") && !!ws().querySelector(".tab-body:not([style*='none'])")?.contains(document.activeElement);
+  input().focus();
+  panel()!.querySelector<HTMLElement>(".chat-close")!.click();
+  await waitFor("채팅 닫기", () => !shown(), 2000);
+  await waitFor("터미널 포커스", terminalFocused, 2000).catch(() => null);
+  check("채팅 패널: × 로 닫으면 터미널로 포커스", terminalFocused(), document.activeElement?.className ?? "");
+
+  // 닫아 두고 새 poster를 더하면 그 poster가 "@user ..."를 보낸다 → 버튼에 점, 열면 사라짐
+  await openAdd("menu");
+  choose("pick/poster");
+  await waitFor("나에게 온 메시지 표시", () => toggle().classList.contains("unread"), 10000).then(
+    () => check("채팅 패널: 닫혀 있는 동안 나에게 온 메시지는 버튼에 점", true),
+    () => check("채팅 패널: 닫혀 있는 동안 나에게 온 메시지는 버튼에 점", false, toggle().className),
+  );
+  toggle().click();
+  await waitFor("다시 열기", shown, 2000);
+  check("채팅 패널: 열면 점이 사라짐", !toggle().classList.contains("unread"), toggle().className);
+
+  // 늦게 온 이전 참여자 응답이 최신 목록을 되돌리지 않는다 (리뷰 P2): 들어올 때의 첫 읽기를 늦추고 바로 닫는다
+  let calls = 0;
+  devHooks.chatMembersDelay = () => (calls++ === 0 ? 1500 : 0);
+  const panes = paneEls().length;
+  await openAdd("menu");
+  choose("pick/reviewer");
+  await waitFor("잠깐 더한 창", () => paneEls().length === panes + 1, 5000);
+  await menu("close_pane");
+  await waitFor("잠깐 더한 창 닫기", () => paneEls().length === panes, 5000);
+  await sleep(2500);
+  devHooks.chatMembersDelay = undefined;
+  const after = [...panel()!.querySelectorAll<HTMLElement>(".chat-member")].map((el) => el.dataset.member);
+  check("채팅 패널: 늦게 온 이전 참여자 응답이 최신 목록을 되돌리지 않음", calls >= 2 && !after.includes("origin/reviewer-2"), `${calls} ${after.join(",")}`);
+
+  input().focus();
+  toggle().click();
+  await waitFor("닫기", () => !shown(), 2000);
+  await waitFor("터미널 포커스", terminalFocused, 2000).catch(() => null);
+  check("채팅 패널: 버튼으로 닫아도 터미널로 포커스", terminalFocused(), document.activeElement?.className ?? "");
 }
 
 // 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
@@ -1933,7 +2071,7 @@ async function testLastExit(first: Terminal) {
     buttons.join("|"),
   );
   const btns = [...ws.querySelectorAll<HTMLButtonElement>(".tabbar-btn")];
-  check("닫기: 빈 화면에도 탭 바 (분할 버튼만 비활성)", btns.length === 4 && btns.map((b) => b.disabled).join() === "false,false,true,true", btns.map((b) => b.disabled).join());
+  check("닫기: 빈 화면에도 탭 바 (분할 버튼만 비활성)", btns.length === 5 && btns.map((b) => b.disabled).join() === "false,false,true,true,false", btns.map((b) => b.disabled).join());
   ws.querySelector<HTMLElement>("[data-action=origin-group]")!.click();
   const term = await waitFor("다시 열기", () => visiblePanes()[0]?.term);
   await ready(term);

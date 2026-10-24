@@ -654,3 +654,132 @@ button.secondary {
   font-size: 12px;
   opacity: 0.8;
 }
+
+/* 채팅방 오른쪽 패널 (src/ChatPanel.tsx) */
+.chat-panel {
+  width: 340px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--sidebar-bg);
+}
+.chat-head {
+  display: flex;
+  align-items: center;
+  height: 35px;
+  padding-left: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.chat-title {
+  flex: 1;
+  font-weight: 600;
+}
+.chat-close {
+  height: 100%;
+  padding: 0 12px;
+  font-size: 16px;
+  color: var(--fg-dim);
+  background: none;
+  border: none;
+  border-radius: 0;
+}
+.chat-close:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.chat-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.chat-member {
+  padding: 1px 6px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 10px;
+}
+.chat-none {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.chat-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+}
+.chat-msg {
+  padding: 4px 8px;
+  border-left: 2px solid transparent;
+}
+.chat-msg.to-me {
+  border-left-color: var(--accent);
+}
+.chat-msg.mine {
+  background: var(--row-active);
+  border-radius: 4px;
+}
+.chat-meta {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.chat-from {
+  font-weight: 600;
+  color: var(--fg);
+}
+.chat-meta time {
+  margin-left: auto;
+}
+.chat-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-error {
+  padding: 4px 10px;
+  color: var(--error);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-input {
+  margin: 8px;
+  resize: none;
+  font: inherit;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  padding: 6px;
+  outline: none;
+}
+.chat-input:focus {
+  border-color: var(--focus-border);
+}
+/* 닫혀 있는 동안 나에게 온 메시지 */
+.tabbar-btn.unread {
+  position: relative;
+  color: var(--fg);
+}
+.tabbar-btn.unread::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.tabbar-btn.active {
+  color: var(--fg);
+}

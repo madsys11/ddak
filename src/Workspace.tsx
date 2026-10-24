@@ -6,7 +6,7 @@ import { ContextMenu, type MenuState } from "./ContextMenu";
 import { EndGroupDialog } from "./EndGroupDialog";
 import { devHooks } from "./devHooks";
 import { codeError } from "./errors";
-import { SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
+import { ChatIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { Terminal } from "./Terminal";
 import { useT } from "./prefs";
@@ -248,10 +248,14 @@ type Props = {
   // 보고 있는 탭의 폴더가 바뀌면 알린다 (파일 트리가 그 폴더를 보여 준다). worktree: 작업그룹 이름 또는 null(원본)
   onTreeRoot: (cwd: string, worktree: string | null) => void;
   onError: (message: string) => void;
+  // 채팅 패널 (src/ChatPanel.tsx, App이 둔다): 열렸는지, 닫혀 있는 동안 나에게 온 메시지가 있는지, 여닫기
+  chatOpen: boolean;
+  chatUnread: boolean;
+  onToggleChat: () => void;
 };
 
 // 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
-export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError }: Props) {
+export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, chatOpen, chatUnread, onToggleChat }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
@@ -362,6 +366,16 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError }: 
       unlisten.then((f) => f());
     };
   }, []);
+
+  // 채팅 패널을 닫으면 (× 또는 버튼) 선택된 터미널로 포커스를 돌린다. 터미널의 focused 값은 그대로라 터미널이 스스로
+  // 돌아오지 않는다 (리뷰 P2: 숨은 채팅 입력란에 남았다).
+  const chatWasOpen = useRef(chatOpen);
+  useEffect(() => {
+    const tab = s.tabs.find((x) => x.id === s.active);
+    if (chatWasOpen.current && !chatOpen && visibleRef.current && tab) focusPane(tab.focus);
+    chatWasOpen.current = chatOpen;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatOpen]);
 
   // 보고 있는 탭의 폴더를 알린다 (탭이 없으면 원본)
   const activeTab = s.tabs.find((tab) => tab.id === s.active);
@@ -565,6 +579,14 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError }: 
         </button>
         <button className="tabbar-btn" disabled={!activeTab} title={t("workspace.splitDown")} onClick={() => dispatch({ type: "split", dir: "col" })}>
           <SplitIcon dir="col" />
+        </button>
+        <button
+          className={`tabbar-btn${chatOpen ? " active" : ""}${chatUnread && !chatOpen ? " unread" : ""}`}
+          data-action="chat"
+          title={chatUnread && !chatOpen ? t("chat.unread") : t("chat.toggle")}
+          onClick={onToggleChat}
+        >
+          <ChatIcon />
         </button>
       </div>
       {/* 탭이 하나도 없으면: 탭 바는 그대로 두고, 열 수 있는 것을 모두 보여 준다 */}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { ChatPanel } from "./ChatPanel";
 import { Sidebar } from "./Sidebar";
 import { Workspace } from "./Workspace";
 import { StoreBroken, baseName, useProjects } from "./useProjects";
@@ -39,6 +40,9 @@ function App() {
   const [opened, setOpened] = useState<string[]>([]);
   // 프로젝트마다 지금 보고 있는 탭의 폴더 (파일 트리가 보여 줄 폴더). 작업그룹 탭이면 worktree 폴더
   const [treeRoots, setTreeRoots] = useState<Record<string, { cwd: string; worktree: string | null }>>({});
+  // 프로젝트 → 채팅 패널을 열었는지, 닫혀 있는 동안 나에게 온 메시지가 있는지
+  const [chatOpen, setChatOpen] = useState<Record<string, boolean>>({});
+  const [chatUnread, setChatUnread] = useState<Record<string, boolean>>({});
   useEffect(() => {
     if (active) setOpened((o) => (o.includes(active) ? o : [...o, active]));
   }, [active]);
@@ -109,6 +113,15 @@ function App() {
                   setTreeRoots((r) => (r[path]?.cwd === cwd && r[path]?.worktree === worktree ? r : { ...r, [path]: { cwd, worktree } }))
                 }
                 onError={setError}
+                chatOpen={!!chatOpen[path]}
+                chatUnread={!!chatUnread[path]}
+                onToggleChat={() => setChatOpen((o) => ({ ...o, [path]: !o[path] }))}
+              />
+              <ChatPanel
+                project={path}
+                open={!!chatOpen[path]}
+                onClose={() => setChatOpen((o) => ({ ...o, [path]: false }))}
+                onUnread={(u) => setChatUnread((r) => (!!r[path] === u ? r : { ...r, [path]: u }))}
               />
             </div>
           ))}

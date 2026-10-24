@@ -21,6 +21,14 @@ export const devHooks: {
   // 때마다 불러서 그만큼(ms) 늦게 보낸다 (저장 순서)
   workspaceLoad?: (project: string) => Promise<string | null>;
   workspaceSaveDelay?: () => number;
+  // 채팅 패널 (자체 테스트): 보내기를 이만큼(ms) 늦게 보낸다 / 참여자 응답을 부를 때마다 돌려준 값만큼 늦게 받는다 /
+  // 이벤트 등록을 이만큼 늦춘다
+  chatPostDelay?: number;
+  chatMembersDelay?: () => number;
+  chatListenDelay?: number;
+  // 이 이름의 채팅 이벤트 등록을 실패시킨다 / 프로젝트마다 채팅 메시지를 읽은 횟수 (남은 리스너를 보려고)
+  chatListenFail?: string;
+  chatLoads?: Record<string, number>;
 } = {
   confirm: (message, labels) => ask(message, { kind: "warning", ...labels }),
 };

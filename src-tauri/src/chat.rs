@@ -59,14 +59,20 @@ struct Inner {
 // 앱 상태 (서버를 띄우지 못했으면 None: 세션은 채팅 없이 뜬다)
 pub struct ChatsState(pub Option<Arc<Chats>>);
 
-type OnMessage = Box<dyn Fn(&Path, &Message) + Send + Sync>;
+// 방에 생긴 일: 새 메시지, 참여자가 바뀜 (들어옴·나감)
+pub enum Change<'a> {
+    Message(&'a Message),
+    Members,
+}
+
+type OnMessage = Box<dyn Fn(&Path, Change) + Send + Sync>;
 
 pub struct Chats {
     inner: Mutex<Inner>,
     // 메시지 파일을 두는 폴더 (앱 데이터 chats)
     dir: PathBuf,
     port: u16,
-    // 새 메시지마다 (프론트에 알림, 깨우기)
+    // 새 메시지·참여자 변화마다 (프론트에 알림, 깨우기). 잠금을 놓은 뒤에 부른다.
     on_message: OnMessage,
 }
 
@@ -205,11 +211,16 @@ impl Chats {
             }
         };
         inner.members.insert(t.clone(), Member { project: project.to_path_buf(), name: assigned.clone(), key, last_read: None });
+        drop(inner);
+        (self.on_message)(project, Change::Members);
         (t.clone(), format!("http://127.0.0.1:{}/mcp/{t}", self.port), assigned)
     }
 
     pub fn leave(&self, token: &str) {
-        self.inner.lock().unwrap().members.remove(token);
+        let left = self.inner.lock().unwrap().members.remove(token);
+        if let Some(m) = left {
+            (self.on_message)(&m.project, Change::Members);
+        }
     }
 
     pub fn members(&self, project: &Path) -> Vec<String> {
@@ -252,7 +263,7 @@ impl Chats {
             room.push(message.clone());
             message
         };
-        (self.on_message)(project, &message);
+        (self.on_message)(project, Change::Message(&message));
         Ok(message)
     }
 
@@ -380,7 +391,8 @@ impl Chats {
     }
 }
 
-// 앱이 뜰 때: 앱 데이터 chats 폴더로 서버를 띄우고, 새 메시지는 프론트에 "chat" 이벤트로 알린다 ({ project, message }).
+// 앱이 뜰 때: 앱 데이터 chats 폴더로 서버를 띄우고, 새 메시지는 프론트에 "chat" 이벤트로 ({ project, message }),
+// 참여자 변화는 "chat-members" 이벤트로 ({ project }) 알린다.
 pub fn install(app: &tauri::AppHandle) -> ChatsState {
     use tauri::Emitter;
     let dir = match crate::projects::data_dir(app) {
@@ -391,8 +403,11 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
         }
     };
     let emitter = app.clone();
-    let on_message: OnMessage = Box::new(move |project, message| {
-        let _ = emitter.emit("chat", json!({ "project": project, "message": message }));
+    let on_message: OnMessage = Box::new(move |project, change| {
+        let _ = match change {
+            Change::Message(message) => emitter.emit("chat", json!({ "project": project, "message": message })),
+            Change::Members => emitter.emit("chat-members", json!({ "project": project })),
+        };
     });
     match Chats::start(dir, on_message) {
         Ok(chats) => ChatsState(Some(chats)),
@@ -474,7 +489,11 @@ mod tests {
         let dir = temp("store");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
-        let chats = Chats::new(dir.clone(), Box::new(move |_, m| sink.lock().unwrap().push(m.id)), 0);
+        let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
+            if let Change::Message(m) = c {
+                sink.lock().unwrap().push(m.id)
+            }
+        }), 0);
         let (a, b) = (Path::new("/p/a"), Path::new("/p/b"));
         assert_eq!(chats.join(a, "origin/dev", "k1").2, "origin/dev");
         assert_eq!(chats.join(a, "origin/dev", "k2").2, "origin/dev-2");
@@ -491,6 +510,14 @@ mod tests {
         assert!(chats.messages(b).unwrap().is_empty());
         let again = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
         assert_eq!(again.messages(a).unwrap(), [m1, m2]);
+        // 참여자가 바뀌면 알린다 (들어옴·나감, 모르는 토큰은 알리지 않음)
+        let changes = Arc::new(Mutex::new(0));
+        let count = changes.clone();
+        let watched = Chats::new(dir.clone(), Box::new(move |_, c| if let Change::Members = c { *count.lock().unwrap() += 1 }), 0);
+        let (t, _, _) = watched.join(a, "origin/dev", "k1");
+        watched.leave(&t);
+        watched.leave(&t);
+        assert_eq!(*changes.lock().unwrap(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -654,7 +681,11 @@ mod tests {
     #[ignore]
     fn serve_for_experiment() {
         let dir = std::env::temp_dir().join("ddak-chat-experiment");
-        let chats = Chats::start(dir.clone(), Box::new(|_, m| println!("MESSAGE {}", serde_json::to_string(m).unwrap()))).unwrap();
+        let chats = Chats::start(dir.clone(), Box::new(|_, c| {
+            if let Change::Message(m) = c {
+                println!("MESSAGE {}", serde_json::to_string(m).unwrap())
+            }
+        })).unwrap();
         let project = Path::new("/tmp/ddak-chat-project");
         for name in ["origin/dev", "origin/reviewer"] {
             let (_, url, name) = chats.join(project, name, name);
