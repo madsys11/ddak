@@ -25,6 +25,8 @@ type Props = {
   cwd: string;
   // 작업그룹 세션의 명령과 인자. 없으면 그냥 셸. 처음 띄울 때만 쓴다.
   command?: string[];
+  // command가 실패하면 대신 띄울 명령 (복원한 세션: 이어서 하기가 안 되면 처음처럼)
+  fallback?: string[];
   // Shift+Enter로 보낼 입력 (세션 구성). 없으면 그냥 Enter.
   shiftEnter?: string | null;
   // false면 명령이 끝나도 셸을 띄우지 않는다 (작업그룹 준비: onExit가 그 명령의 종료 코드를 받는다)
@@ -38,13 +40,13 @@ type Props = {
   onSpawnError?: () => void;
 };
 
-export function Terminal({ cwd, command, shiftEnter, shellAfter, focused, onFocus, onTitle, onExit, onSpawnError }: Props) {
+export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, focused, onFocus, onTitle, onExit, onSpawnError }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, theme, t, command, shiftEnter, shellAfter });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, theme, t, command, shiftEnter, shellAfter };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter };
 
   useEffect(() => {
     const el = ref.current!;
@@ -96,8 +98,9 @@ export function Terminal({ cwd, command, shiftEnter, shellAfter, focused, onFocu
       else if (!disposed) latest.current.onExit(msg.exit);
     };
 
-    const { command, shellAfter } = latest.current;
-    invoke<number>("pty_spawn", { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, shellAfter: shellAfter ?? null }).then(
+    const { command, fallback, shellAfter } = latest.current;
+    const args = { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, fallback: fallback ?? null, shellAfter: shellAfter ?? null };
+    invoke<number>("pty_spawn", args).then(
       async (newId) => {
         // 자체 테스트: 생성 응답이 늦게 오는 순서를 만든다 (그 사이 끝난 명령의 종료를 잃지 않는지)
         if (import.meta.env.DEV && devHooks.spawnDelay) await new Promise((r) => setTimeout(r, devHooks.spawnDelay));

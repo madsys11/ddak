@@ -9,6 +9,7 @@ mod repos;
 mod selftest;
 mod setup;
 mod watch;
+mod workspace;
 mod worktrees;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -39,6 +40,9 @@ pub fn run() {
             repos::repo_link,
             repos::repo_clone,
             worktrees::group_create,
+            workspace::workspace_load,
+            workspace::workspace_save,
+            workspace::workspace_set_aside,
             setup::setup_script_edit,
             setup::setup_load,
             setup::setup_save,

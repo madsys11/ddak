@@ -7,6 +7,7 @@ import { devHooks, liveTerms } from "./devHooks";
 import { fixImeInput } from "./hangul";
 import { LOCALES } from "./i18n";
 import { en } from "./i18n/en";
+import { fromSaved } from "./workspaceState";
 import { screenPixelRatio } from "./zoom";
 
 const log: string[] = [];
@@ -111,6 +112,10 @@ async function testTree() {
 // 명령을 보내고 앞뒤에 찍은 표시 사이의 출력을 돌려준다.
 // 입력 줄에는 표시가 따옴표로 쪼개져 있어서 출력 줄과 구분된다.
 async function run(term: Terminal, cmd: string, ms = 10000) {
+  // 셸이 줄 편집기로 돌아오기 전에 친 입력은 tty가 줄 단위로 받는데, macOS는 한 줄에 MAX_CANON(1024) 바이트까지만
+  // 받고 나머지를 버린다 (앞 명령 직후에 보낸 긴 명령이 잘려 끝나지 않았다). 길면 바로 실패로 알린다.
+  const bytes = new TextEncoder().encode(cmd).length;
+  if (bytes > 900) throw new Error(`명령이 너무 김 (${bytes}바이트, tty 한 줄은 1024바이트까지): ${cmd.slice(0, 80)}…`);
   const tag = Math.random().toString(36).slice(2, 8);
   const [begin, end] = [`DDAKB${tag}`, `DDAKE${tag}`];
   const mark = (t: string) => `echo "${t.slice(0, 5)}""${t.slice(5)}"`;
@@ -118,7 +123,10 @@ async function run(term: Terminal, cmd: string, ms = 10000) {
   const lines = await waitFor(`명령 완료: ${cmd}`, () => {
     const s = screen(term);
     return s.some((l) => l.trim() === end) && s;
-  }, ms);
+  }, ms).catch((e) => {
+    // 시간 초과면 그때 화면 끝부분을 같이 남긴다 (무엇에 걸렸는지 보이게)
+    throw new Error(`${e} | 화면: ${screen(term).filter((l) => l.trim()).slice(-8).join(" ⏎ ")}`);
+  });
   return lines.slice(lines.findIndex((l) => l.trim() === begin) + 1, lines.findIndex((l) => l.trim() === end));
 }
 
@@ -691,7 +699,17 @@ async function testManyTerminals(count: number) {
 // 프로젝트 두 개 사이를 오간다. 각 프로젝트의 터미널은 따로 살아 있어야 한다.
 async function testProjects(root: string, first: Terminal) {
   const other = root.replace(/\/proj$/, "/other");
+  // 저장한 상태를 읽는 동안에는 새 작업그룹을 만들지 않는다 (만들어도 결과를 읽은 상태가 덮는다. 리뷰 P2).
+  // other에는 저장소가 없어서 만들기를 부르면 "저장소 없음" 오류가 난다.
+  devHooks.workspaceLoad = () => new Promise((r) => setTimeout(() => r(null), 1500));
   await devHooks.addProject!(other);
+  const otherBtn = await waitFor("두 번째 프로젝트 탭 바", () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(other)}"] [data-action=new-group]`));
+  otherBtn.click();
+  devHooks.workspaceLoad = undefined;
+  await waitFor("읽기 끝", () => tabsIn(other) === 1, 5000);
+  await sleep(500);
+  const noRepos = [...document.querySelectorAll(".sidebar-error")].some((e) => e.textContent?.includes("no git repository"));
+  check("프로젝트: 저장한 상태를 읽는 동안 새 작업그룹은 만들지 않음", !noRepos);
   await waitFor("두 번째 프로젝트 활성", () => projectRow(other)?.classList.contains("active"));
   check("프로젝트: 추가 순서대로 목록", projectRows().map((el) => el.dataset.project).join(",") === `${root},${other}`);
   check("프로젝트: 이전 프로젝트는 활성 해제", !projectRow(root)!.classList.contains("active"));
@@ -766,6 +784,66 @@ async function testProjects(root: string, first: Terminal) {
   );
   const after = await waitStore((s) => s.projects.length === 1);
   check("프로젝트: 제거도 저장", after.projects.map((p) => p.path).join(",") === root && after.active === root, JSON.stringify(after));
+
+  const data = root.replace(/\/proj$/, "/data-main");
+  const stateFile = `"${data}"/workspaces/other-*.json`;
+  const savedTabs = async () =>
+    (await run(first, `python3 -c 'import json,glob;print("SAVED", len(json.load(open(glob.glob("${data}/workspaces/other-*.json")[0]))["tabs"]))'`))
+      .map((l) => l.trim())
+      .find((l) => l.startsWith("SAVED ")) ?? "SAVED none";
+  const removeOther = async () => {
+    devHooks.confirm = async () => true;
+    projectRow(other)!.querySelector<HTMLElement>("[data-action=remove]")!.click();
+    await waitFor("빼기", () => !projectRow(other));
+    devHooks.confirm = realConfirm;
+  };
+
+  // 정리된 Workspace의 읽기는 파일을 치우지 않는다 (리뷰 후속 P2): 개발 모드는 효과를 두 번 돌린다. 첫 읽기를 늦추고
+  // 모양이 틀린 내용을 돌려주면, 남은 Workspace의 읽기만 파일을 한 번 치우고 새로 저장해야 한다 (파일이 남아 있음).
+  let loads = 0;
+  devHooks.workspaceLoad = () => (loads++ === 0 ? new Promise((r) => setTimeout(() => r('{"version":99}'), 1500)) : Promise.resolve('{"version":99}'));
+  await devHooks.addProject!(other);
+  await waitFor("다시 열림", () => tabsIn(other) === 1, 5000);
+  await sleep(2500);
+  devHooks.workspaceLoad = undefined;
+  const files = (await run(first, `ls "${data}/workspaces" | grep -c '^other-.*\\.json$'; ls "${data}/workspaces" | grep -c '^other-.*\\.json\\.bad$'`)).map((l) => l.trim()).filter((l) => /^\d+$/.test(l));
+  const loadError = [...document.querySelectorAll(".sidebar-error")].some((e) => e.textContent?.startsWith("Could not read the saved tabs"));
+  check("프로젝트: 정리된 Workspace의 늦은 읽기는 파일을 치우지 않음", files.join(",") === "1,1" && !loadError, `${files.join(",")} ${loadError}`);
+
+  // 이전 Workspace의 늦은 저장이 새 Workspace의 상태를 덮지 않는다 (리뷰 후속 P2): 첫 저장을 늦춘 채 탭을 둘 더 열고 바로
+  // 뺐다가 다시 넣는다. 새 Workspace는 이전 저장이 끝난 뒤에 읽으므로 탭 셋으로 열리고, 그 뒤 저장도 덮이지 않는다.
+  let saves = 0;
+  devHooks.workspaceSaveDelay = () => (saves++ === 0 ? 1500 : 0);
+  await menu("new_tab");
+  await waitFor("탭 둘", () => tabsIn(other) === 2);
+  await menu("new_tab");
+  await waitFor("탭 셋", () => tabsIn(other) === 3);
+  await removeOther();
+  await devHooks.addProject!(other);
+  await waitFor("이전 마지막 상태로", () => tabsIn(other) === 3, 5000).catch(() => {});
+  const reopened = tabsIn(other);
+  await menu("new_tab");
+  await waitFor("탭 넷", () => tabsIn(other) === reopened + 1);
+  await sleep(2500);
+  devHooks.workspaceSaveDelay = undefined;
+  const onDisk = await savedTabs();
+  check("프로젝트: 다시 연 Workspace는 이전 저장 뒤에 읽고, 그 뒤 저장이 덮이지 않음", reopened === 3 && onDisk === `SAVED ${tabsIn(other)}`, `${reopened} ${onDisk} ${tabsIn(other)}`);
+  await removeOther();
+
+  // 목록에서 빼도 상태는 남는다. 다시 넣을 때 읽기가 실패하면 기본으로 열되 저장하지 않는다 (리뷰 P1: 덮어썼다)
+  const hash = async () => (await run(first, `shasum ${stateFile} | cut -c1-12`)).map((l) => l.trim()).find((l) => /^[0-9a-f]{12}$/.test(l)) ?? "none";
+  const before = await hash();
+  devHooks.workspaceLoad = () => Promise.reject("injected read failure");
+  await devHooks.addProject!(other);
+  const failed = await waitFor("읽기 실패 알림", () => [...document.querySelectorAll(".sidebar-error")].find((e) => e.textContent?.startsWith("Could not read the saved tabs")), 5000).catch(() => null);
+  devHooks.workspaceLoad = undefined;
+  await waitFor("기본으로 열림", () => tabsIn(other) === 1, 5000);
+  await menu("new_tab");
+  await waitFor("탭 추가", () => tabsIn(other) === 2);
+  await sleep(1000);
+  check("프로젝트: 저장한 상태를 읽지 못하면 알리고, 그 상태를 덮어쓰지 않음", !!failed && before !== "none" && (await hash()) === before, `${before} ${failed?.textContent}`);
+  await removeOther();
+  await waitFor("남은 프로젝트로", () => visiblePanes()[0]?.term === first);
 }
 
 // 터미널에서 바꾼 폴더 내용이 펼쳐진 트리에 바로 반영되는지 본다.
@@ -1050,6 +1128,18 @@ async function testGroups(term: Terminal) {
 }
 
 // 한글 보정(src/hangul.ts)만 따로: 화면 밖 xterm에 붙여서 나가는 입력을 본다.
+// 저장한 작업 화면 읽기 (workspaceState.ts): 같은 창 번호가 두 번 나오면 (같은 탭 안이라도) 깨진 것으로 본다 (리뷰 P2)
+function testWorkspaceStateUnit() {
+  const session = { name: "s", command: "", args: [], resume: null, readOnly: false, shiftEnter: null };
+  const saved = (layout: unknown, tabs = 1) =>
+    JSON.stringify({ version: 1, active: 1, tabs: Array.from({ length: tabs }, (_, i) => ({ id: 1 + i * 10, layout, focus: 2, cwd: "/x" })), sessions: { 2: session } });
+  const split = (a: number, b: number) => ({ dir: "row", ratio: 0.5, a: { pane: a }, b: { pane: b } });
+  check("복원 상태: 올바른 상태는 읽음", fromSaved(saved(split(2, 3)), "/x")?.tabs.length === 1);
+  check("복원 상태: 같은 탭 안 중복 창 번호는 거부", fromSaved(saved(split(2, 2)), "/x") === null);
+  check("복원 상태: 다른 탭과 중복 창 번호는 거부", fromSaved(saved(split(2, 3), 2), "/x") === null);
+  check("복원 상태: 탭 번호와 창 번호 중복도 거부", fromSaved(saved(split(1, 2)), "/x") === null);
+}
+
 async function testImeUnit() {
   const box = document.createElement("div");
   box.style.cssText = "position:fixed; left:-2000px; top:0; width:400px; height:200px";
@@ -1370,6 +1460,12 @@ async function testGroupClone(root: string, first: Terminal) {
     installsShown.join(","),
   );
   check("작업그룹 준비 창: 커밋 전 변경 미포함 안내", document.querySelector(".setup-dialog")?.textContent?.includes("Uncommitted changes are not included") === true);
+  // 체크박스는 늘어나지 않고 바로 옆에 글자 (입력란 규칙 flex: 1이 걸려 체크박스가 남는 폭을 차지했었다)
+  const gaps = [...document.querySelectorAll<HTMLElement>(".setup-dialog .check-row")].map((rowEl) => {
+    const box = rowEl.querySelector("input")!.getBoundingClientRect();
+    return [Math.round(box.width), Math.round(rowEl.querySelector(".check-name")!.getBoundingClientRect().left - box.right)];
+  });
+  check("작업그룹 준비 창: 체크박스 바로 옆에 이름", gaps.length === 5 && gaps.every(([w, gap]) => w <= 20 && gap <= 8), JSON.stringify(gaps));
   row.querySelector<HTMLInputElement>("input")!.click();
   dialogRow("clone", "server/.env").querySelector("input")!.click();
   dialogRow("clone", "server/.venv").querySelector("input")!.click();
@@ -1406,7 +1502,10 @@ async function testGroupClone(root: string, first: Terminal) {
   const g4 = `${groups}test-4/server/node_modules`;
   const env = await sh(`cat "${groups}test-4/server/.env"; echo; grep '^home' "${groups}test-4/server/.venv/pyvenv.cfg"; grep '^home' "${root}/server/.venv/pyvenv.cfg"; test -x "${groups}test-4/server/.venv/bin/python" && echo py-ok`);
   check("작업그룹 준비: 새 작업그룹의 .env 내용, .venv의 Python이 원본과 같음", env[0] === "TOKEN=secret" && env[1] === env[2] && env[1]?.startsWith("home") === true && env[3] === "py-ok", env.join("|"));
-  const facts = await sh(`cat "${g4}/pkg/index.js"; echo; readlink "${g4}/.bin/run"; test -e "${g4}/abs" -o -L "${g4}/abs" && echo abs-there; test -e "${g4}/pipe" && echo pipe-there; [ "$(stat -f %m "${g4}/pkg/index.js")" = "$(stat -f %m "${nm}/pkg/index.js")" ] && echo same-mtime; ls -a "${groups}test-4/server" "${groups}" | grep -c ddak-clone`);
+  const facts = await sh(
+    `cd "${g4}" && cat pkg/index.js; echo; readlink .bin/run; test -e abs -o -L abs && echo abs-there; test -e pipe && echo pipe-there; ` +
+      `[ "$(stat -f %m pkg/index.js)" = "$(stat -f %m "${nm}/pkg/index.js")" ] && echo same-mtime; ls -a .. "${groups}" | grep -c ddak-clone; cd - > /dev/null`,
+  );
   check(
     "작업그룹 복제: 내용, 안쪽 링크, 수정 시각이 그대로이고 뺀 항목·임시 폴더는 없음",
     facts.includes("mod") && facts.includes("../pkg/index.js") && facts.includes("same-mtime") && !facts.includes("abs-there") && !facts.includes("pipe-there") && facts.at(-1) === "0",
@@ -1678,6 +1777,99 @@ async function testRestart(root: string) {
   check("다시 켜기: 없는 폴더를 목록에서 빼고 저장", store.projects[0]?.path === root && store.active === root, JSON.stringify(store));
 }
 
+// 복원 (두 시나리오가 같은 앱 데이터·DDAK_HOME을 쓴다, scripts/selftest.sh). 기본 그룹 "Duo":
+// keeps = 처음 "FIRST {session}", 복원하면 "RESUMED {session}" / fresh = 복원 인자가 실패해 처음 인자로 ("FRESH {session}")
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// 저장된 상태 파일에서 필요한 것만 한 줄씩 꺼낸다 (긴 JSON은 터미널에서 줄이 접혀서)
+const SAVED_FACTS = `python3 -c 'import json,glob,sys
+d=json.load(open(glob.glob(sys.argv[1]+"/workspaces/*.json")[0]))
+print("TABS", len(d["tabs"]), d["active"] == d["tabs"][0]["id"], d["tabs"][0].get("name"))
+for s in d["sessions"].values():
+  print("SID", s["name"], s.get("sid"))'`;
+const savedFacts = async (term: Terminal, root: string) =>
+  (await run(term, `${SAVED_FACTS} "${root.replace(/\/proj$/, "")}/data-resume"`)).map((l) => l.trim()).filter((l) => /^(TABS|SID) /.test(l));
+
+async function testResumeSave(root: string) {
+  const [keeps, fresh] = await waitFor("기본 작업그룹 세션", () => visiblePanes().length === 2 && visiblePanes(), 15000);
+  const first = await waitFor("처음 인자", () => screen(keeps.term).find((l) => l.startsWith("FIRST ")), 10000);
+  const fresh1 = await waitFor("처음 인자 (fresh)", () => screen(fresh.term).find((l) => l.startsWith("FRESH ")), 10000);
+  const [sidKeeps, sidFresh] = [first.split(" ")[1]?.trim(), fresh1.split(" ")[1]?.trim()];
+  check("복원 준비: 창마다 세션 ID(UUID)를 정해 {session}에 넣음", UUID.test(sidKeeps) && UUID.test(sidFresh) && sidKeeps !== sidFresh, `${sidKeeps} ${sidFresh}`);
+  // 분할(포커스는 keeps) → 셸 창, 탭 이름 바꾸기, 셸 탭, 준비 중인 작업그룹, 첫 탭으로
+  // 저장은 앞 저장이 끝난 뒤에 보낸다 (리뷰 P2): 첫 저장을 늦춰도 마지막 상태가 남아야 한다
+  let saves = 0;
+  devHooks.workspaceSaveDelay = () => (saves++ === 0 ? 1500 : 0);
+  await menu("new_tab");
+  await waitFor("잠깐 연 탭", () => tabCount() === 2);
+  await menu("close_pane");
+  await waitFor("잠깐 연 탭 닫기", () => tabCount() === 1);
+  await sleep(2500);
+  devHooks.workspaceSaveDelay = undefined;
+  const order = await savedFacts(keeps.term, root);
+  check("복원 준비: 늦게 끝난 앞 저장이 마지막 상태를 덮지 않음", saves >= 2 && order.some((l) => l.startsWith("TABS 1 ")), `${saves} ${order.join("|")}`);
+  await menu("split_right");
+  await waitFor("분할", () => visiblePanes().length === 3);
+  const tab = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active")!;
+  tab().querySelector(".tab-title")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  const input = await waitFor("탭 이름 입력란", () => tab().querySelector<HTMLInputElement>(".tab-input"), 3000);
+  setInput(input, "saved tab");
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await waitFor("탭 이름", () => tab().querySelector(".tab-title")?.textContent === "saved tab", 3000);
+  await menu("new_tab");
+  await waitFor("셸 탭", () => tabCount() === 2);
+  await ready(keeps.term);
+  const setupPath = await invoke<string>("setup_script_edit", { project: root });
+  await run(keeps.term, `printf 'sleep 600\\n' >> "${setupPath}"`);
+  await clickMenu("Terminal", "New Work Group");
+  await waitFor("준비 중인 작업그룹", () => tabCount() === 3 && document.querySelector(".project-workspace:not([style*='none']) .setup-wait"), 15000);
+  key("1", "Digit1");
+  await waitFor("첫 탭으로", () => activeTabIndex() === 0);
+  await sleep(1000); // 저장은 0.3초 모았다가
+  const facts = await savedFacts(keeps.term, root);
+  check(
+    "복원 준비: 탭·활성 탭·이름·세션 ID를 앱 데이터에 저장",
+    facts.includes("TABS 3 True saved tab") && facts.includes(`SID keeps ${sidKeeps}`) && facts.includes(`SID fresh ${sidFresh}`),
+    facts.join("|"),
+  );
+}
+
+async function testResumeCheck(root: string) {
+  const titles = () => [...document.querySelectorAll(".project-workspace:not([style*='none']) .tab .tab-title")].map((el) => el.textContent);
+  await waitFor("복원한 탭", () => tabCount() === 3, 15000);
+  check("복원: 탭 셋, 이름과 활성 탭", titles()[0] === "saved tab" && titles()[2] === "duo-1" && activeTabIndex() === 0, `${titles().join(",")} ${activeTabIndex()}`);
+  const panes = await waitFor("복원한 창", () => visiblePanes().length === 3 && visiblePanes(), 15000);
+  const [keeps, shell, fresh] = panes;
+  const label = (p: (typeof panes)[number]) => p.el.querySelector(".pane-label")?.textContent ?? "";
+  check("복원: 분할과 세션 자리 (keeps | 셸 | fresh)", label(keeps) === "keeps" && label(shell) === "" && label(fresh) === "fresh", panes.map(label).join(","));
+  await ready(shell.term);
+  const facts = await savedFacts(shell.term, root);
+  const sid = (name: string) => facts.find((l) => l.startsWith(`SID ${name} `))?.split(" ")[2] ?? "?";
+  await waitFor("이어서 하기", () => screen(keeps.term).some((l) => l.trim() === `RESUMED ${sid("keeps")}`), 10000).then(
+    () => check("복원: 세션을 이어서 하기 인자(같은 세션 ID)로 띄움", true),
+    () => check("복원: 세션을 이어서 하기 인자(같은 세션 ID)로 띄움", false, screen(keeps.term).join("|").slice(-200)),
+  );
+  // 이어서 하기가 실패하면 새로 시작할지 묻고, y일 때만 처음 인자로 (리뷰 P2: 쓰다가 끝난 것과 구분할 수 없어서)
+  const asked = await waitFor("새로 시작할지 묻기", () => screen(fresh.term).find((l) => l.includes("Start a new one? [y/N]")), 10000).catch(() => "");
+  check("복원: 이어서 하기가 실패하면 새로 시작할지 묻고 바로 시작하지 않음", asked.includes("(exit 1)") && !screen(fresh.term).some((l) => l.startsWith("FRESH ")), asked);
+  fresh.term.input("y\r");
+  await waitFor("처음처럼", () => screen(fresh.term).some((l) => l.trim() === `FRESH ${sid("fresh")}`), 10000).then(
+    () => check("복원: y면 처음 인자로 (같은 세션 ID)", true),
+    () => check("복원: y면 처음 인자로 (같은 세션 ID)", false, screen(fresh.term).join("|").slice(-200)),
+  );
+  const alive = await run(shell.term, "echo alive");
+  check("복원: 셸 창은 새 셸", alive.some((l) => l.trim() === "alive"));
+  // 준비를 마치기 전에 닫힌 작업그룹: 준비 창 없이 중단으로, 그래도 시작하면 세션은 처음처럼 (뜬 적이 없어서)
+  key("3", "Digit3");
+  const stopped = await waitFor("중단된 준비", () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .setup-wait-error"), 5000);
+  check("복원: 준비 중이던 작업그룹은 준비 창 없이 중단 표시", stopped.textContent === "Stopped" && visiblePanes().length === 0, stopped.textContent ?? "");
+  stopped.parentElement!.querySelector<HTMLElement>("[data-action=setup-start]")!.click();
+  const started = await waitFor("그래도 시작", () => visiblePanes().length === 2 && visiblePanes(), 5000);
+  await waitFor("처음 인자로", () => screen(started[0].term).some((l) => l.startsWith("FIRST ")), 10000).then(
+    () => check("복원: 뜬 적 없는 세션은 처음 인자로", true),
+    () => check("복원: 뜬 적 없는 세션은 처음 인자로", false, screen(started[0].term).join("|").slice(-200)),
+  );
+}
+
 // 목록 파일이 깨진 상황 (리뷰 지적 4): 오류를 계속 보여 주고, 목록을 바꾸지도 저장하지도 않는다.
 async function testCorrupt(root: string) {
   const err = await waitFor("오류 표시", () => document.querySelector(".empty-box .sidebar-error")?.textContent);
@@ -1703,9 +1895,15 @@ async function testCorrupt(root: string) {
 }
 
 export async function runSelftest(root: string, scenario: string) {
-  if (scenario === "restart" || scenario === "corrupt") {
+  const single: Record<string, (root: string) => Promise<void>> = {
+    restart: testRestart,
+    corrupt: testCorrupt,
+    "resume-save": testResumeSave,
+    "resume-check": testResumeCheck,
+  };
+  if (single[scenario]) {
     try {
-      await (scenario === "restart" ? testRestart(root) : testCorrupt(root));
+      await single[scenario](root);
     } catch (e) {
       check("예외", false, String(e));
     }
@@ -1719,6 +1917,7 @@ export async function runSelftest(root: string, scenario: string) {
     await testCreate(root, first);
     await testRename(root, first);
     await testImeUnit();
+    testWorkspaceStateUnit();
     await testGroups(first);
     await testGroupWorktree(root, first);
     await testTabRename();

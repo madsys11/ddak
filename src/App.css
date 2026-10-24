@@ -476,6 +476,12 @@ button.secondary {
   color: var(--fg);
   cursor: pointer;
 }
+/* .modal input(입력란)의 flex: 1·여백이 체크박스에 걸리면 체크박스가 남는 폭만큼 늘어난다 */
+.modal label.check-row input[type="checkbox"] {
+  flex: none;
+  margin: 0;
+  padding: 0;
+}
 .check-name {
   overflow: hidden;
   text-overflow: ellipsis;

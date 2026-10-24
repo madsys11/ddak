@@ -66,6 +66,7 @@ export const en = {
   "workspace.openGroup": "Open {name} in Project Folder",
   "workspace.splitRight": "Split Right (⌘D)",
   "workspace.splitDown": "Split Down (⇧⌘D)",
+  "workspace.loadFailed": "Could not read the saved tabs: {detail}. Tab changes in this project are not saved until the app restarts.",
 
   "session.readOnly": "Read-only",
   "session.setup": "setup",

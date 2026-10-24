@@ -26,17 +26,17 @@ git -C "$base/linked" -c user.name=t -c user.email=t@example.com commit -q --all
 port=1430
 config="{\"build\":{\"devUrl\":\"http://localhost:$port\",\"beforeDevCommand\":\"npm run dev -- --port $port\"}}"
 
-# 시나리오 하나 = 앱 한 번 실행. 앱 데이터 폴더를 시나리오마다 따로 둔다.
+# 시나리오 하나 = 앱 한 번 실행. 앱 데이터 폴더를 시나리오마다 따로 둔다 (둘째 인자: 같이 쓸 폴더 이름).
 run() {
-  local scenario=$1 data="$base/data-$1"
+  local scenario=$1 dirs=${2:-$1}
   echo "--- $scenario" >&2
-  DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_DATA_DIR="$data" DDAK_HOME="$base/home-$1" \
+  DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_DATA_DIR="$base/data-$dirs" DDAK_HOME="$base/home-$dirs" \
     npx tauri dev --no-watch --config "$config" 2>&1 \
     | sed -n '/=== DDAK SELFTEST BEGIN ===/,/=== DDAK SELFTEST \(PASS\|FAIL\) ===/p' \
     | tee /dev/stderr | grep -q "=== DDAK SELFTEST PASS ==="
 }
 
-mkdir -p "$base/data-main" "$base/data-restart" "$base/data-corrupt"
+mkdir -p "$base/data-main" "$base/data-restart" "$base/data-corrupt" "$base/data-resume"
 # 다시 켜기: 지난번 목록에 없어진 폴더(gone)가 있고, 그것이 활성이었다.
 printf '{"projects":[{"path":"%s"},{"path":"%s"}],"active":"%s"}' "$root" "$base/gone" "$base/gone" > "$base/data-restart/projects.json"
 # 깨진 목록 파일
@@ -54,9 +54,25 @@ cat > "$base/data-restart/groups.json" <<'JSON'
 ]}]}
 JSON
 
+printf '{"projects":[{"path":"%s"}],"active":"%s"}' "$root" "$root" > "$base/data-resume/projects.json"
+# resume: 두 번 켠다 (resume-save가 남긴 상태를 resume-check가 복원). keeps는 복원 인자로 이어 가고,
+# fresh는 복원 인자가 실패해 처음 인자로 돌아간다.
+cat > "$base/data-resume/groups.json" <<'JSON'
+{"default":"duo","groups":[{"id":"duo","name":"Duo","sessions":[
+  {"name":"keeps","command":"sh","args":["-c","echo \"FIRST {session}\""],"resume":["-c","echo \"RESUMED {session}\""]},
+  {"name":"fresh","command":"sh","args":["-c","echo \"FRESH {session}\""],"resume":["-c","exit 1"]}
+]}]}
+JSON
+
 # 하나가 실패해도 나머지를 다 돌리고, 끝에 하나라도 실패했으면 실패로 끝낸다.
 failed=0
+# SELFTEST_SCENARIOS로 일부만 돌릴 수 있다 (예: "main", "resume")
+only=${SELFTEST_SCENARIOS:-main restart corrupt resume}
 for scenario in main restart corrupt; do
-  run $scenario || failed=1
+  [[ " $only " == *" $scenario "* ]] && { run $scenario || failed=1; }
 done
+if [[ " $only " == *" resume "* ]]; then
+  run resume-save resume || failed=1
+  run resume-check resume || failed=1
+fi
 exit $failed

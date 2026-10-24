@@ -3,7 +3,8 @@
 // 파일이 없으면 기본 설정을 써 둔다. 고치면 프론트가 폴더 감시로 알아채 다시 읽는다.
 //
 // 세션 = 이름(역할) + 실행 명령 + 인자. ddak은 CLI를 해석하지 않는다. 역할·읽기 전용은 각 CLI의 인자로 준다.
-// 명령이 비어 있으면 그냥 셸이다.
+// 명령이 비어 있으면 그냥 셸이다. resume: 앱을 다시 켜서 복원할 때 args 대신 쓸 인자 (CLI의 이어서 하기).
+// 인자 안의 {session}은 ddak이 창마다 정한 UUID로 바뀐다 (처음과 복원 때 같은 값).
 
 use crate::fs::{code_err, CodeError};
 use crate::projects::data_dir;
@@ -19,6 +20,8 @@ pub struct Session {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    resume: Option<Vec<String>>,
     // 파일을 고치지 않는 세션. 같은 그룹에 쓰는 세션이 둘 이상이면 경고할 때 쓴다 (CLI 인자와 별개로 적는다).
     #[serde(default)]
     read_only: bool,
@@ -47,6 +50,10 @@ pub struct Groups {
 // 사용자가 처음 받는 설정. 기획/개발 claude + 읽기 전용 리뷰어 codex, 그리고 셸 하나짜리.
 // codex의 역할 지시는 config 키 developer_instructions (-c 값은 TOML이라 문자열을 따옴표로 감싼다).
 // shiftEnter "\u001b\r" (ESC CR = Option+Enter): claude의 /terminal-setup이 VS Code에 거는 값과 같다.
+// 복원: claude는 창마다 정한 세션 ID로 시작(--session-id)하고 그 ID로 이어 간다(--resume). codex는 시작할 때 세션
+// ID·이름을 정하는 방법이 없어서 (codex 0.164 --help·공식 문서) 그 폴더의 가장 최근 대화를 이어 간다 (resume --last,
+// 같은 옵션을 받는다). 같은 폴더에서 다른 codex를 쓰면 (같은 탭의 다른 창이든 ddak 밖에서 띄운 것이든) 그 대화를
+// 이어 갈 수 있다 (한계).
 pub const DEFAULT: &str = r#"{
   "default": "dev-review",
   "groups": [
@@ -57,13 +64,15 @@ pub const DEFAULT: &str = r#"{
         {
           "name": "dev",
           "command": "claude",
-          "args": ["--append-system-prompt", "You are the planner and developer in this work group. A read-only reviewer works in the same folder."],
+          "args": ["--session-id", "{session}", "--append-system-prompt", "You are the planner and developer in this work group. A read-only reviewer works in the same folder."],
+          "resume": ["--resume", "{session}", "--append-system-prompt", "You are the planner and developer in this work group. A read-only reviewer works in the same folder."],
           "shiftEnter": "\u001b\r"
         },
         {
           "name": "reviewer",
           "command": "codex",
           "args": ["-s", "read-only", "-c", "developer_instructions=\"You are the reviewer and QA in this work group. Do not modify files. When asked, review the changes in this folder and report problems with evidence.\""],
+          "resume": ["resume", "--last", "-s", "read-only", "-c", "developer_instructions=\"You are the reviewer and QA in this work group. Do not modify files. When asked, review the changes in this folder and report problems with evidence.\""],
           "readOnly": true,
           "shiftEnter": "\u001b\r"
         }

@@ -66,6 +66,7 @@ export const ko: Messages = {
   "workspace.openGroup": "프로젝트 폴더에서 {name} 열기",
   "workspace.splitRight": "오른쪽으로 분할 (⌘D)",
   "workspace.splitDown": "아래로 분할 (⇧⌘D)",
+  "workspace.loadFailed": "저장된 탭을 읽지 못했습니다: {detail}. 앱을 다시 켤 때까지 이 프로젝트의 탭 변경은 저장하지 않습니다.",
 
   "session.readOnly": "읽기 전용",
   "session.setup": "준비",

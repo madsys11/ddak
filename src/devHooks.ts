@@ -17,6 +17,10 @@ export const devHooks: {
   spawnDelay?: number;
   // 작업그룹 준비 창이 설정을 읽을 때마다 불러서, 그 응답을 돌려준 값(ms)만큼 늦게 받은 것처럼 한다 (자체 테스트)
   setupLoadDelay?: () => number;
+  // 작업 화면 상태 읽기·저장 (자체 테스트): load가 있으면 읽기를 이것으로 바꾼다 (실패·늦게 오기), saveDelay는 저장할
+  // 때마다 불러서 그만큼(ms) 늦게 보낸다 (저장 순서)
+  workspaceLoad?: (project: string) => Promise<string | null>;
+  workspaceSaveDelay?: () => number;
 } = {
   confirm: (message, labels) => ask(message, { kind: "warning", ...labels }),
 };

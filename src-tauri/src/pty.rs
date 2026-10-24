@@ -62,13 +62,21 @@ fn sh_quote(s: &str) -> String {
 // command가 있으면 (작업그룹 세션) 셸 안에서 그 명령을 실행하고, 끝나면 그 자리에 셸을 띄운다.
 // 셸을 거쳐야 .zshrc 등에서 잡는 PATH로 claude·codex를 찾는다. CLI를 끝내도 창이 닫히지 않고 셸이 남는다.
 // shell_after가 false면 (작업그룹 준비 스크립트) 셸을 띄우지 않아서 PTY의 종료 코드가 그 명령의 종료 코드다.
-fn shell_command(cwd: &str, command: Option<&[String]>, shell_after: bool) -> CommandBuilder {
+// fallback: command가 실패하면 새로 시작할지 물어보고 y면 돌릴 명령 (복원한 세션: 이어서 하기가 안 되면 처음처럼).
+// 묻는 이유: 시작하자마자 실패한 것(이어 갈 대화 없음)과 이어 받아 쓰다가 0이 아닌 코드로 끝난 것(Ctrl-C 130 등)을
+// 구분할 수 없어서, 자동으로 새로 시작하면 쓰던 세션을 끝낸 뒤 새 세션이 뜬다 (리뷰 P2).
+fn shell_command(cwd: &str, command: Option<&[String]>, fallback: Option<&[String]>, shell_after: bool) -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut cmd = CommandBuilder::new(&shell);
     // 로그인 셸로 띄워야 GUI 앱에서도 사용자의 PATH(.zprofile 등)가 잡힌다.
     cmd.arg("-l");
     if let Some(argv) = command.filter(|a| !a.is_empty()) {
-        let line = argv.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+        let quote = |argv: &[String]| argv.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
+        let mut line = quote(argv);
+        if let Some(other) = fallback.filter(|a| !a.is_empty()) {
+            let ask = "printf '\\n[ddak] Could not continue the previous session (exit %s). Start a new one? [y/N] ' \"$code\"";
+            line = format!("{line} || {{ code=$?; {ask}; read -r answer; case \"$answer\" in [yY]*) {};; esac; }}", quote(other));
+        }
         let script = if shell_after { format!("{line}; exec {} -l", sh_quote(&shell)) } else { line };
         cmd.args(["-i", "-c", &script]);
     }
@@ -102,6 +110,7 @@ fn wait_exit(pid: u32) -> Option<u32> {
 fn spawn(
     cwd: &str,
     command: Option<&[String]>,
+    fallback: Option<&[String]>,
     shell_after: bool,
     size: PtySize,
     mut output: impl FnMut(Vec<u8>) -> bool + Send + 'static,
@@ -114,7 +123,7 @@ fn spawn(
     }
     let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
     enable_utf8_erase(&*pair.master)?;
-    let child = pair.slave.spawn_command(shell_command(cwd, command, shell_after)).map_err(|e| e.to_string())?;
+    let child = pair.slave.spawn_command(shell_command(cwd, command, fallback, shell_after)).map_err(|e| e.to_string())?;
     drop(pair.slave);
     let pid = child.process_id();
     let proc = Arc::new(Mutex::new(Proc { child, reaped: false }));
@@ -184,12 +193,14 @@ pub fn pty_spawn(
     rows: u16,
     on_data: Channel<InvokeResponseBody>,
     command: Option<Vec<String>>,
+    fallback: Option<Vec<String>>,
     shell_after: Option<bool>,
 ) -> Result<u32, String> {
     let on_exit = on_data.clone();
     let session = spawn(
         &cwd,
         command.as_deref(),
+        fallback.as_deref(),
         shell_after.unwrap_or(true),
         PtySize { rows, cols, pixel_width: 0, pixel_height: 0 },
         move |bytes| on_data.send(InvokeResponseBody::Raw(bytes)).is_ok(),
@@ -274,6 +285,12 @@ mod tests {
 
     // spawn으로 띄우고 출력은 모아 두고 종료 코드는 채널로 받는다
     fn start(argv: &[&str]) -> (Session, Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<Option<u32>>) {
+        start_or(argv, &[])
+    }
+
+    // fallback: argv가 실패하면 돌릴 명령 (비면 없음)
+    fn start_or(argv: &[&str], fallback: &[&str]) -> (Session, Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<Option<u32>>) {
+        let fallback: Vec<String> = fallback.iter().map(|a| a.to_string()).collect();
         let argv: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
         let out = Arc::new(Mutex::new(Vec::new()));
         let sink = out.clone();
@@ -281,6 +298,7 @@ mod tests {
         let session = spawn(
             "/",
             Some(&argv),
+            Some(&fallback),
             false,
             SIZE,
             move |bytes| {
@@ -304,11 +322,36 @@ mod tests {
         assert_eq!(code, Ok(Some(3)), "명령이 끝난 뒤에도 프로세스가 끝나지 않음");
     }
 
+    // 복원한 세션: 이어서 하기 명령이 실패하면 물어보고, y일 때만 처음 명령을 돌린다 (리뷰 P2)
+    #[test]
+    fn fallback_asks_before_starting_fresh() {
+        let answer = |reply: &str| {
+            let (mut session, out, exited) = start_or(&["/bin/sh", "-c", "exit 130"], &["/bin/sh", "-c", "exit 5"]);
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !String::from_utf8_lossy(&out.lock().unwrap()).contains("[y/N]") {
+                assert!(std::time::Instant::now() < deadline, "묻지 않음");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            assert!(String::from_utf8_lossy(&out.lock().unwrap()).contains("(exit 130)"));
+            session.writer.write_all(reply.as_bytes()).unwrap();
+            let code = exited.recv_timeout(Duration::from_secs(20));
+            terminate(&session.proc);
+            code
+        };
+        assert_eq!(answer("y\n"), Ok(Some(5)), "y면 새로 시작");
+        assert_eq!(answer("\n"), Ok(Some(0)), "기본은 시작하지 않음");
+        // 이어서 하기가 되면 묻지 않는다
+        let (session, out, exited) = start_or(&["/bin/sh", "-c", "exit 0"], &["/bin/sh", "-c", "exit 5"]);
+        assert_eq!(exited.recv_timeout(Duration::from_secs(20)), Ok(Some(0)));
+        assert!(!String::from_utf8_lossy(&out.lock().unwrap()).contains("[y/N]"));
+        terminate(&session.proc);
+    }
+
     // 없는 작업 폴더에서는 띄우지 않는다 (portable-pty는 홈 폴더로 바꿔 띄운다)
     #[test]
     fn missing_cwd_fails() {
         let argv = ["/bin/pwd".to_string()];
-        let r = spawn("/no/such/ddak-dir", Some(&argv), false, SIZE, |_| true, |_| {});
+        let r = spawn("/no/such/ddak-dir", Some(&argv), None, false, SIZE, |_| true, |_| {});
         assert!(r.is_err());
     }
 

@@ -4,7 +4,8 @@ import { codeError, type CodeError } from "./errors";
 import { watchDir } from "./watchDir";
 
 // 작업그룹 설정 (src-tauri/src/groups.rs). 명령이 비어 있는 세션은 그냥 셸이다.
-export type Session = { name: string; command: string; args: string[]; readOnly: boolean; shiftEnter: string | null };
+// resume: 복원할 때 args 대신 쓸 인자 (CLI의 이어서 하기). 인자의 {session}은 창마다 정한 세션 ID.
+export type Session = { name: string; command: string; args: string[]; resume: string[] | null; readOnly: boolean; shiftEnter: string | null };
 export type Group = { id: string; name: string; sessions: Session[] };
 export type Groups = { default: string; groups: Group[] };
 

@@ -2,39 +2,20 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ContextMenu, type MenuState } from "./ContextMenu";
+import { devHooks } from "./devHooks";
 import { codeError } from "./errors";
 import { SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { Terminal } from "./Terminal";
 import { useT } from "./prefs";
-import type { Group, Session } from "./useGroups";
+import type { Group } from "./useGroups";
+import { type PaneSession, type Setup, type State, type Tab, commandOf, fromSaved, toSaved } from "./workspaceState";
 
-// cwd: 이 탭의 터미널들이 뜨는 폴더 (원본 프로젝트 폴더 또는 작업그룹의 worktree 폴더).
-// group: 작업그룹으로 연 탭이면 그 그룹 이름. worktree: 새 worktree로 만든 작업그룹이면 그 이름 (탭 제목).
-// 둘 다 없으면 터미널 제목을 쓴다. name: 사용자가 바꾼 탭 이름 (탭 제목만 바뀌고 worktree·브랜치 이름은 그대로).
-// setup: 작업그룹 준비 스크립트가 있는 탭이면 그 상태.
-type Tab = { id: number; layout: Layout; focus: number; cwd: string; group?: string; worktree?: string; name?: string; setup?: Setup };
-// 창에서 돌리는 세션. setup: 작업그룹 준비 스크립트를 돌리는 창 (이름표는 번역 문구).
-type PaneSession = Session & { setup?: boolean };
-// 작업그룹 준비. 세션(CLI)은 준비가 성공하거나 사용자가 "그래도 시작"을 누를 때까지(started) 띄우지 않는다.
-// pane: 준비 창 (닫았으면 null). run: 몇 번째 실행인지 (다시 준비하면 터미널을 새로 만들고, 이전 실행의 종료는
-// 무시한다). code: 실패한 종료 코드, null이면 중단 (창을 닫음·시그널). spawnFailed: 준비 창의 터미널을 만들지 못함
-// (작업 폴더가 없음 등). session: 다시 준비할 때 띄울 명령.
-type Setup = {
-  pane: number | null;
-  run: number;
-  status: "running" | "ok" | "failed";
-  code: number | null;
-  spawnFailed?: boolean;
-  started: boolean;
-  session: PaneSession;
-};
-// root: 프로젝트 폴더. sessions: 작업그룹 세션으로 띄운 터미널 → 그 세션. 없으면 그냥 셸.
-type State = { root: string; tabs: Tab[]; active: number; titles: Record<number, string>; sessions: Record<number, PaneSession>; nextId: number };
 // 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 준비 창에서 돌릴 명령 (복제 + 준비 스크립트)
 type Created = { name: string; path: string; setup: string[] | null };
 
 type Action =
+  | { type: "loaded"; saved: State | null; group: Group | null; blocked: boolean }
   | { type: "newTab" }
   | { type: "newGroupTab"; group: Group | null; cwd: string; made?: Created }
   | { type: "selectTab"; id: number }
@@ -60,14 +41,15 @@ function addGroupTab(s: State, group: Group | null, cwd: string, made?: Created)
   const sessions: PaneSession[] = group?.sessions ?? [];
   const panes = sessions.length ? sessions.map((_, i) => id + 1 + i) : [id + 1];
   let layout = row(panes);
-  const added: [number, PaneSession][] = sessions.map((x, i) => [panes[i], x]);
+  // 창마다 세션 ID를 정한다 (인자의 {session}, 복원할 때 같은 대화를 이어 가게)
+  const added: [number, PaneSession][] = sessions.map((x, i) => [panes[i], { ...x, sid: crypto.randomUUID() }]);
   let nextId = id + 1 + panes.length;
   let setup: Setup | undefined;
   if (made?.setup) {
     const setupPane = nextId++;
     layout = withSetupPane(layout, setupPane);
     const [command, ...args] = made.setup;
-    const session: PaneSession = { name: "setup", command, args, readOnly: false, shiftEnter: null, setup: true };
+    const session: PaneSession = { name: "setup", command, args, resume: null, readOnly: false, shiftEnter: null, setup: true };
     added.push([setupPane, session]);
     setup = { pane: setupPane, run: 0, status: "running", code: null, started: false, session };
   }
@@ -78,12 +60,18 @@ function addGroupTab(s: State, group: Group | null, cwd: string, made?: Created)
 // 준비 창은 탭 아래쪽에 둔다
 const withSetupPane = (layout: Layout, pane: number): Layout => ({ dir: "col", ratio: 0.7, a: layout, b: { pane } });
 
-// 첫 탭 = 원본 폴더에서 작업하는 작업그룹 (기본 그룹).
-function initial({ group, root }: { group: Group | null; root: string }): State {
-  return addGroupTab({ root, tabs: [], active: 0, titles: {}, sessions: {}, nextId: 1 }, group, root);
+// 프로젝트마다 상태 파일 읽기·치우기·저장을 한 줄로 세운다 (모듈 전역: Workspace 인스턴스와 상관없이). Workspace가
+// 사라졌다 다시 생겨도 (StrictMode, 프로젝트를 뺐다 다시 넣음) 이전 인스턴스의 남은 저장이 끝난 뒤에 읽고, 읽은 뒤의
+// 저장이 이전 인스턴스의 늦은 저장에 덮이지 않는다 (리뷰 P2: 컴포넌트마다 있던 줄이 언마운트 뒤에도 이어져 덮었다).
+const fileQueues = new Map<string, Promise<unknown>>();
+function inOrder<T>(project: string, task: () => Promise<T>): Promise<T> {
+  const run = (fileQueues.get(project) ?? Promise.resolve()).then(task);
+  fileQueues.set(project, run.catch(() => {}));
+  return run;
 }
 
-const commandOf = (s: Session | undefined) => (s?.command ? [s.command, ...s.args] : undefined);
+// 저장한 상태를 읽기 전. 읽으면 그것으로, 없으면 첫 탭 = 원본 폴더에서 작업하는 작업그룹 (기본 그룹).
+const initial = (root: string): State => ({ root, tabs: [], active: 0, titles: {}, sessions: {}, nextId: 1, loaded: false });
 
 function closeTab(s: State, id: number): State {
   const i = s.tabs.findIndex((t) => t.id === id);
@@ -93,11 +81,24 @@ function closeTab(s: State, id: number): State {
   return { ...s, tabs, active };
 }
 
+// 구분선 끌기처럼 잦은 변화는 모았다가 저장하고, 나머지(탭·분할·이름 등)는 바로 저장한다 (종료 직전 변화를 덜 잃게)
 function reducer(s: State, a: Action): State {
+  const next = step(s, a);
+  return next === s ? s : { ...next, slowSave: a.type === "ratio" };
+}
+
+function step(s: State, a: Action): State {
   const tab = s.tabs.find((t) => t.id === s.active);
   const update = (id: number, f: (t: Tab) => Tab) => ({ ...s, tabs: s.tabs.map((t) => (t.id === id ? f(t) : t)) });
 
+  // 저장한 상태를 읽기 전에 온 동작(단축키 등)은 무시한다 (읽은 상태로 바뀌며 사라진다)
+  if (!s.loaded && a.type !== "loaded") return s;
   switch (a.type) {
+    case "loaded": {
+      if (s.loaded) return s;
+      const opened = a.saved ?? addGroupTab({ ...s, loaded: true }, a.group, s.root);
+      return { ...opened, saveBlocked: a.blocked };
+    }
     case "newTab": {
       // 셸 탭은 원본 프로젝트 폴더에서 연다
       const pane = s.nextId + 1;
@@ -228,9 +229,9 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
-  const [s, dispatch] = useReducer(reducer, { group, root: cwd }, initial);
-  const latest = useRef({ group, onError, onTreeRoot, t });
-  latest.current = { group, onError, onTreeRoot, t };
+  const [s, dispatch] = useReducer(reducer, cwd, initial);
+  const latest = useRef({ group, onError, onTreeRoot, t, loaded: s.loaded });
+  latest.current = { group, onError, onTreeRoot, t, loaded: s.loaded };
   const creating = useRef(false);
   const bodies = useRef<Record<number, HTMLDivElement | null>>({});
   const root = useRef<HTMLDivElement>(null);
@@ -250,7 +251,8 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
   // 새 작업그룹: 저장소마다 worktree를 만들고 (src-tauri/src/worktrees.rs) 그 폴더에서 기본 그룹을 띄운다.
   // git이 몇 초 걸릴 수 있어 끝나면 탭을 연다. 만드는 중에 또 누르면 무시한다.
   async function createGroup() {
-    if (creating.current) return;
+    // 저장한 상태를 읽기 전에는 만들지 않는다: 만들어도 그 결과를 읽은 상태가 덮어 탭이 생기지 않는다 (리뷰 P2)
+    if (creating.current || !latest.current.loaded) return;
     creating.current = true;
     const { group, onError, t } = latest.current;
     try {
@@ -265,6 +267,49 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
   }
   const createGroupRef = useRef(createGroup);
   createGroupRef.current = createGroup;
+
+  // 마지막 상태 (src-tauri/src/workspace.rs). 없으면 처음처럼 기본 작업그룹으로 연다. 모양이 틀리면 옆으로 치운 뒤
+  // 기본으로 연다. 읽지 못하면 (또는 치우지 못하면) 기본으로 열되 저장하지 않는다: 그 상태를 덮어쓰지 않게 (리뷰 P1).
+  // 정리된 Workspace(alive가 아님)는 읽지도, 파일을 치우지도, 알리지도 않는다 (리뷰 P2: 취소된 읽기가 늦게 와서 새로
+  // 저장한 파일까지 치웠다).
+  useEffect(() => {
+    let alive = true;
+    const load = (import.meta.env.DEV && devHooks.workspaceLoad) || ((project: string) => invoke<string | null>("workspace_load", { project }));
+    inOrder(cwd, async () => {
+      if (!alive) return null;
+      try {
+        const text = await load(cwd);
+        if (!alive) return null;
+        const saved = text ? fromSaved(text, cwd) : null;
+        if (text && !saved) await invoke("workspace_set_aside", { project: cwd });
+        return { saved, blocked: false };
+      } catch (e) {
+        if (!alive) return null;
+        latest.current.onError(latest.current.t("workspace.loadFailed", { detail: codeError(e).detail }));
+        return { saved: null, blocked: true };
+      }
+    }).then((r) => r && alive && dispatch({ type: "loaded", saved: r.saved, blocked: r.blocked, group: latest.current.group }));
+    return () => {
+      alive = false;
+    };
+  }, [cwd]);
+
+  // 바뀌면 저장한다 (터미널 제목은 저장하지 않으므로 보지 않는다). 프로젝트의 줄(inOrder)에서 앞 저장이 끝난 뒤에
+  // 보낸다: 요청은 따로 가서 도착 순서가 보장되지 않아, 늦게 도착한 이전 상태가 새 상태를 덮을 수 있었다 (리뷰 P2).
+  useEffect(() => {
+    if (!s.loaded || s.saveBlocked) return;
+    const state = toSaved(s);
+    const save = () => {
+      const delay = import.meta.env.DEV ? (devHooks.workspaceSaveDelay?.() ?? 0) : 0;
+      inOrder(cwd, async () => {
+        if (delay) await new Promise((r) => setTimeout(r, delay));
+        await invoke("workspace_save", { project: cwd, state });
+      }).catch((e) => latest.current.onError(String(codeError(e).detail)));
+    };
+    if (!s.slowSave) return save();
+    const timer = setTimeout(save, 300);
+    return () => clearTimeout(timer);
+  }, [s.loaded, s.saveBlocked, s.tabs, s.active, s.sessions]);
 
   // 단축키 대부분은 네이티브 메뉴(src-tauri/src/menu.rs)가 받아서 "menu" 이벤트로 보낸다.
   useEffect(() => {
@@ -477,7 +522,7 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
         </button>
       </div>
       {/* 탭이 하나도 없으면: 탭 바는 그대로 두고, 열 수 있는 것을 모두 보여 준다 */}
-      {s.tabs.length === 0 && (
+      {s.loaded && s.tabs.length === 0 && (
         <div className="workspace-empty">
           <div className="workspace-empty-actions">
             {group && (
@@ -561,7 +606,7 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
                     // 다시 준비하면 새 터미널에서 다시 돌린다
                     key={session?.setup ? `setup-${setup?.run}` : "term"}
                     cwd={tab.cwd}
-                    command={commandOf(session)}
+                    {...commandOf(session)}
                     shiftEnter={session?.shiftEnter}
                     shellAfter={session?.setup ? false : undefined}
                     focused={visible && active && tab.focus === id}
