@@ -1,12 +1,11 @@
 import { useEffect, useRef } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
-import { liveTerms } from "./devHooks";
+import { devHooks, liveTerms } from "./devHooks";
 import { fixImeInput, passesImeKey } from "./hangul";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
@@ -28,19 +27,24 @@ type Props = {
   command?: string[];
   // Shift+Enter로 보낼 입력 (세션 구성). 없으면 그냥 Enter.
   shiftEnter?: string | null;
+  // false면 명령이 끝나도 셸을 띄우지 않는다 (작업그룹 준비: onExit가 그 명령의 종료 코드를 받는다)
+  shellAfter?: boolean;
   focused: boolean;
   onFocus: () => void;
   onTitle: (title: string) => void;
-  onExit: () => void;
+  // code: 종료 코드. 시그널로 끝났거나 알 수 없으면 null
+  onExit: (code: number | null) => void;
+  // PTY를 만들지 못함 (오류는 터미널에도 쓴다). 이때는 onExit이 오지 않는다.
+  onSpawnError?: () => void;
 };
 
-export function Terminal({ cwd, command, shiftEnter, focused, onFocus, onTitle, onExit }: Props) {
+export function Terminal({ cwd, command, shiftEnter, shellAfter, focused, onFocus, onTitle, onExit, onSpawnError }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, theme, t, command, shiftEnter });
-  latest.current = { onFocus, onTitle, onExit, theme, t, command, shiftEnter };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, theme, t, command, shiftEnter, shellAfter });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, theme, t, command, shiftEnter, shellAfter };
 
   useEffect(() => {
     const el = ref.current!;
@@ -84,11 +88,19 @@ export function Terminal({ cwd, command, shiftEnter, focused, onFocus, onTitle, 
 
     let id: number | undefined;
     let disposed = false;
-    const onData = new Channel<ArrayBuffer>();
-    onData.onmessage = (buf) => term.write(new Uint8Array(buf));
+    // 출력(바이트)과 마지막의 종료({exit})가 같은 채널로 순서대로 온다 (src-tauri/src/pty.rs pty_spawn).
+    // 채널은 spawn 전에 만들어서, 생성 응답보다 먼저 끝나도 종료를 잃지 않는다.
+    const onData = new Channel<ArrayBuffer | { exit: number | null }>();
+    onData.onmessage = (msg) => {
+      if (msg instanceof ArrayBuffer) term.write(new Uint8Array(msg));
+      else if (!disposed) latest.current.onExit(msg.exit);
+    };
 
-    invoke<number>("pty_spawn", { cwd, cols: term.cols, rows: term.rows, onData, command: latest.current.command ?? null }).then(
-      (newId) => {
+    const { command, shellAfter } = latest.current;
+    invoke<number>("pty_spawn", { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, shellAfter: shellAfter ?? null }).then(
+      async (newId) => {
+        // 자체 테스트: 생성 응답이 늦게 오는 순서를 만든다 (그 사이 끝난 명령의 종료를 잃지 않는지)
+        if (import.meta.env.DEV && devHooks.spawnDelay) await new Promise((r) => setTimeout(r, devHooks.spawnDelay));
         // StrictMode처럼 spawn이 끝나기 전에 언마운트된 경우
         if (disposed) {
           invoke("pty_kill", { id: newId });
@@ -96,12 +108,12 @@ export function Terminal({ cwd, command, shiftEnter, focused, onFocus, onTitle, 
         }
         id = newId;
       },
-      (e) => term.write(`\r\n[${latest.current.t("terminal.spawnFailed", { error: String(e) })}]\r\n`),
+      (e) => {
+        term.write(`\r\n[${latest.current.t("terminal.spawnFailed", { error: String(e) })}]\r\n`);
+        if (!disposed) latest.current.onSpawnError?.();
+      },
     );
 
-    const unlistenExit = listen<{ id: number }>("pty-exit", (e) => {
-      if (e.payload.id === id) latest.current.onExit();
-    });
     // 입력은 앞의 전송이 끝난 뒤에 보낸다. invoke는 호출마다 따로 가서 도착 순서가 보장되지 않는다
     // (tauri scripts/ipc-protocol.js). 한글 보정의 DEL+글자가 앞 글자보다 먼저 가면 엉뚱한 글자를 지운다.
     let sending: Promise<unknown> = Promise.resolve();
@@ -128,7 +140,6 @@ export function Terminal({ cwd, command, shiftEnter, focused, onFocus, onTitle, 
       resize.dispose();
       title.dispose();
       term.textarea?.removeEventListener("focus", focus);
-      unlistenExit.then((f) => f());
       if (id !== undefined) invoke("pty_kill", { id });
       liveTerms.delete(el);
       termRef.current = null;

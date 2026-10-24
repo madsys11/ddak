@@ -5,6 +5,7 @@ mod projects;
 mod pty;
 mod repos;
 mod selftest;
+mod setup;
 mod watch;
 mod worktrees;
 
@@ -30,6 +31,7 @@ pub fn run() {
             repos::repo_link,
             repos::repo_clone,
             worktrees::group_create,
+            setup::setup_script_edit,
             projects::projects_load,
             projects::projects_save,
             menu::set_menu,

@@ -13,6 +13,8 @@ export const devHooks: {
   addProject?: (path: string) => Promise<void>;
   // 지금 쓰고 있는 작업그룹 설정 (개발 빌드에서 App이 채운다)
   groups?: Groups | null;
+  // 터미널이 PTY 생성 응답을 이만큼(ms) 늦게 받은 것처럼 한다 (자체 테스트)
+  spawnDelay?: number;
 } = {
   confirm: (message, labels) => ask(message, { kind: "warning", ...labels }),
 };

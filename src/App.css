@@ -328,6 +328,33 @@ button:hover {
   border-radius: 3px;
   font-size: 10px;
 }
+.pane-badge.error {
+  color: var(--error);
+  border-color: var(--error);
+}
+/* 작업그룹 준비를 기다리는 세션 창 (터미널 자리) */
+.setup-wait {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--fg-dim);
+  user-select: none;
+}
+.setup-wait-error {
+  color: var(--error);
+}
+.setup-wait-actions {
+  display: flex;
+  gap: 8px;
+}
+.tab-warn {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--error);
+}
 /* xterm.css의 background-color: #000을 덮는다 (불러오는 순서와 무관하게 이기도록 선택자를 더 구체적으로) */
 .terminal .xterm .xterm-viewport {
   background-color: var(--terminal-bg);

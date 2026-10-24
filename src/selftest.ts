@@ -144,6 +144,10 @@ function visiblePanes() {
     .filter((p) => p.term)
     .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
 }
+// 터미널이 없는 창(작업그룹 준비를 기다리는 세션)까지 포함한 보이는 창
+const paneEls = () => [...document.querySelectorAll<HTMLElement>(".pane")].filter((el) => el.offsetParent !== null);
+const setupStatus = (pane: HTMLElement) => pane.querySelector<HTMLElement>("[data-setup-status]")?.dataset.setupStatus;
+const activeTabEl = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active");
 const tabCount = () => document.querySelectorAll(".tab").length;
 const activeTabIndex = () => [...document.querySelectorAll(".tab")].findIndex((el) => el.classList.contains("active"));
 const menu = (id: string) => emit("menu", id);
@@ -304,6 +308,9 @@ async function testTerminal(root: string) {
 
   const locale = await run(term, "locale charmap");
   check("터미널: UTF-8 로캘", locale.some((l) => l.trim() === "UTF-8"), locale.join("|"));
+  // tty가 지우기로 한글 한 글자를 통째로 지운다 (프롬프트 전·read 입력. src-tauri/src/pty.rs enable_utf8_erase)
+  const iutf8 = (await run(term, "stty -a | tr ' ' '\\n' | grep -x -- '-*iutf8'")).map((l) => l.trim());
+  check("터미널: tty IUTF8 켜짐", iutf8.includes("iutf8") && !iutf8.includes("-iutf8"), iutf8.join("|"));
 
   const term256 = await run(term, "echo $TERM");
   check("터미널: TERM=xterm-256color", term256.some((l) => l.trim() === "xterm-256color"), term256.join("|"));
@@ -911,7 +918,7 @@ async function testCreate(root: string, term: Terminal) {
   await waitFor("Esc로 메뉴 닫기", () => !contextMenu());
   rightClick(projectRow(root)!);
   await waitFor("오른쪽 클릭 메뉴", contextMenu);
-  check("만들기: 프로젝트 오른쪽 클릭 메뉴", menuLabels().join(",") === "New File…,New Folder…,-,Add Repository…,-,Remove from List", menuLabels().join(","));
+  check("만들기: 프로젝트 오른쪽 클릭 메뉴", menuLabels().join(",") === "New File…,New Folder…,-,Add Repository…,-,Edit Work Group Setup…,-,Remove from List", menuLabels().join(","));
   document.querySelector<HTMLElement>(".panel")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
   await waitFor("바깥 클릭으로 메뉴 닫기", () => !contextMenu());
   check("만들기: 바깥을 누르면 메뉴 닫힘", true);
@@ -1162,6 +1169,12 @@ async function testGroupWorktree(root: string, first: Terminal) {
   const tabTitles = () => [...document.querySelectorAll(".project-workspace:not([style*='none']) .tab .tab-title")].map((el) => el.textContent);
   const worktreeLabel = () => projectRow(root)?.querySelector(".project-worktree")?.textContent ?? "";
   const before = tabCount();
+  // 준비 스크립트: 메뉴로 처음 열면 안내(주석)만 써 둔다. 명령이 없으니 test-1에는 setup 창이 없어야 한다.
+  // 자체 테스트에서는 편집기를 띄우지 않고 경로만 받는다.
+  const setupPath = await invoke<string>("setup_script_edit", { project: root });
+  check("작업그룹 준비: 앱 데이터의 setup/<프로젝트>-<해시>.sh", /\/data-main\/setup\/proj-[0-9a-f]{6}\.sh$/.test(setupPath), setupPath);
+  const template = (await run(first, `grep -c '^#' "${setupPath}"; grep -vc '^#' "${setupPath}"`)).map((l) => l.trim()).filter((l) => /^\d+$/.test(l));
+  check("작업그룹 준비: 처음엔 주석(안내)만", Number(template[0]) > 0 && template[1] === "0", template.join("|"));
   // 트리 루트가 바뀌는 순간 이전 폴더의 항목이 남아 있으면 안 된다 (리뷰 지적 2: 그 항목으로 원본 파일을 바꿀 수 있었다).
   // React가 그린 직후마다 본다: 작업그룹 표시와 다른 폴더의 행이 함께 있으면 기록한다.
   const stale: string[] = [];
@@ -1175,7 +1188,9 @@ async function testGroupWorktree(root: string, first: Terminal) {
   await clickMenu("Terminal", "New Work Group");
   await waitFor("작업그룹 탭", () => tabCount() === before + 1, 15000);
   check("작업그룹 추가: ⇧⌘T(메뉴)로 새 탭, 이름은 <그룹>-1", tabTitles().at(-1) === "test-1" && activeTabIndex() === before, tabTitles().join(","));
-  const [g] = await waitFor("작업그룹 터미널", () => visiblePanes().length === 1 && visiblePanes()[0].term !== first && visiblePanes());
+  const [g] = await waitFor("작업그룹 터미널", () => visiblePanes().length >= 1 && visiblePanes()[0].term !== first && visiblePanes());
+  await sleep(200);
+  check("작업그룹 준비: 스크립트에 명령이 없으면 setup 창 없음", visiblePanes().length === 1, `${visiblePanes().length}`);
   await ready(g.term);
   const pwd = (await run(g.term, "pwd")).map((l) => l.trim()).find((l) => l.startsWith("/")) ?? "";
   check("작업그룹 추가: 터미널이 worktree 폴더에서 시작 (DDAK_HOME/worktrees/<프로젝트>-<해시>/test-1)", /\/home-main\/worktrees\/proj-[0-9a-f]{6}\/test-1$/.test(pwd), pwd);
@@ -1224,9 +1239,52 @@ async function testGroupWorktree(root: string, first: Terminal) {
     return ir ? ir.top + ir.height / 2 - (br.top + br.height / 2) : NaN;
   });
   check("작업그룹 추가: 탭 바 버튼 아이콘 넷이 세로 가운데", offs.length === 4 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
+  // 준비 스크립트에 명령을 넣으면 다음 작업그룹부터 세션 아래 setup 창에서 돌고, 세션은 준비가 성공한 뒤에 뜬다.
+  // 플래그 파일로 멈춰 두거나(hold) 실패하게(fail) 한다.
+  const flags = setupPath.replace(/\/[^/]+$/, "");
+  const script = [
+    'echo "SETUP_RAN $DDAK_GROUP $(pwd) $DDAK_ORIGIN"',
+    `while [ -f "${flags}/hold" ]; do sleep 0.1; done`,
+    `[ -f "${flags}/fail" ] && exit 7`,
+    "echo SETUP_OK",
+  ];
+  await run(first, `printf '%s\\n' ${script.map((l) => `'${l.replace(/'/g, "'\\''")}'`).join(" ")} >> "${setupPath}"; touch "${flags}/hold" "${flags}/fail"`);
   groupBtn.click();
   await waitFor("두 번째 작업그룹", () => tabCount() === before + 2, 15000);
   check("작업그룹 추가: 탭 바 버튼으로 두 번째는 test-2", tabTitles().at(-1) === "test-2", tabTitles().join(","));
+  const [setup] = await waitFor("setup 창", () => visiblePanes().length === 1 && visiblePanes(), 5000);
+  const wait = await waitFor("기다리는 세션 창", () => paneEls().find((el) => el.querySelector(".setup-wait")), 3000);
+  check(
+    "작업그룹 준비: 세션 아래에 setup 창 (이름표 setup), 포커스는 setup 창",
+    setup.rect.top > wait.getBoundingClientRect().top && setup.el.querySelector(".pane-label")?.firstChild?.textContent === "setup" && setup.el.classList.contains("focused"),
+    `${setup.el.querySelector(".pane-label")?.textContent} ${setup.el.className}`,
+  );
+  const waitText = wait.querySelector(".setup-wait")?.textContent ?? "";
+  check("작업그룹 준비: 준비 중에는 세션(CLI)을 띄우지 않고 안내", !wait.querySelector(".terminal") && waitText === "Starts when the work group setup finishes.", waitText);
+  check("작업그룹 준비: setup 창에 실행 중 표시", setupStatus(setup.el) === "running");
+  const ran = await waitFor("준비 스크립트 출력", () => screen(setup.term).find((l) => l.startsWith("SETUP_RAN")), 10000).catch(() => "");
+  check("작업그룹 준비: 새 작업그룹 폴더에서 DDAK_GROUP·DDAK_ORIGIN과 함께 실행", ran.includes("SETUP_RAN test-2 ") && /\/worktrees\/proj-[0-9a-f]{6}\/test-2 /.test(ran) && ran.trim().endsWith(root), ran);
+
+  // 실패하면 세션은 계속 기다리고 다시 준비 / 그래도 시작을 보인다. 탭에 실패 표시.
+  await run(first, `rm "${flags}/hold"`);
+  const failed = await waitFor("준비 실패", () => wait.querySelector(".setup-wait-error")?.textContent, 10000).catch(() => "");
+  check("작업그룹 준비: 실패하면 종료 코드와 함께 다시 준비 / 그래도 시작", failed === "Failed (exit 7)" && !!wait.querySelector("[data-action=setup-retry]") && !!wait.querySelector("[data-action=setup-start]"), failed);
+  check("작업그룹 준비: 실패 표시 (setup 창, 탭)", setupStatus(setup.el) === "failed" && !!activeTabEl()?.querySelector(".tab-warn") && !wait.querySelector(".terminal"));
+  // 다시 준비: 새 터미널에서 다시 돌고, 성공하면 세션이 뜨고 포커스가 세션으로.
+  // 생성 응답을 늦춰서, 응답(id)보다 먼저 끝난 스크립트의 종료도 받는지 본다 (리뷰 지적 3).
+  await run(first, `rm "${flags}/fail"`);
+  devHooks.spawnDelay = 1500;
+  wait.querySelector<HTMLElement>("[data-action=setup-retry]")!.click();
+  const [session, setup2] = await waitFor("준비 성공 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 10000).finally(() => {
+    devHooks.spawnDelay = undefined;
+  });
+  const ok = await waitFor("다시 준비 출력", () => screen(setup2.term).find((l) => l === "SETUP_OK"), 3000).catch(() => "");
+  check("작업그룹 준비: 다시 준비하면 새로 돌고, 성공하면 세션 시작", setup2.term !== setup.term && ok === "SETUP_OK" && session.rect.top < setup2.rect.top);
+  check(
+    "작업그룹 준비: 성공하면 포커스는 세션, 완료 표시, 탭 실패 표시 없음",
+    session.el.classList.contains("focused") && setupStatus(setup2.el) === "ok" && !activeTabEl()?.querySelector(".tab-warn"),
+    `${session.el.className} ${setupStatus(setup2.el)}`,
+  );
 
   // 실패하면 되돌린다: 커밋 없는 저장소가 있으면 worktree를 만들 수 없다
   await run(first, `git init -q "${root}/zempty"`);
@@ -1237,8 +1295,30 @@ async function testGroupWorktree(root: string, first: Terminal) {
   check("작업그룹 추가: 실패하면 만든 worktree·브랜치를 지움", left.includes("0") && !left.includes("test-3"), left.join("|"));
   await run(first, `rm -rf "${root}/zempty"`);
 
+  // 돌던 setup 창을 닫으면 중단으로 보고 기다린다. 그래도 시작을 누르면 세션이 뜨고 실패 표시는 남는다.
+  await run(first, `touch "${flags}/hold"`);
+  await clickMenu("Terminal", "New Work Group");
+  await waitFor("세 번째 작업그룹", () => tabCount() === before + 3 && visiblePanes().length === 1, 15000);
+  await menu("close_pane"); // 포커스가 setup 창
+  const stopped = await waitFor("준비 중단", () => paneEls().find((el) => el.querySelector(".setup-wait-error")), 5000);
+  check("작업그룹 준비: setup 창을 닫으면 중단 표시, 세션은 기다림", stopped.querySelector(".setup-wait-error")?.textContent === "Stopped" && visiblePanes().length === 0);
+  // 작업 폴더가 사라진 채 다시 준비: 홈 폴더에서 돌지 않고 준비 실패로 (리뷰 지적 4. portable-pty는 없는 폴더면 홈에서 띄운다)
+  const group3 = pwd.replace(/test-1$/, "test-3");
+  await run(first, `mv "${group3}" "${group3}.away"`);
+  stopped.querySelector<HTMLElement>("[data-action=setup-retry]")!.click();
+  const noDir = await waitFor("준비 시작 실패", () => stopped.querySelector(".setup-wait-error")?.textContent === "Could not start the setup" && visiblePanes(), 5000).catch(() => null);
+  const startErr = noDir?.[0] ? screen(noDir[0].term).join("\n") : "";
+  check("작업그룹 준비: 작업 폴더가 없으면 준비를 시작하지 못함으로 표시 (홈에서 돌지 않음)", !!noDir && startErr.includes("no such folder") && !startErr.includes("SETUP_RAN"), startErr.slice(-200));
+  await run(first, `mv "${group3}.away" "${group3}"`);
+  stopped.querySelector<HTMLElement>("[data-action=setup-start]")!.click();
+  await waitFor("그래도 시작", () => visiblePanes().length === 2, 5000).then(
+    () => check("작업그룹 준비: 그래도 시작하면 세션이 뜨고 탭 실패 표시는 남음", !!activeTabEl()?.querySelector(".tab-warn")),
+    (e) => check("작업그룹 준비: 그래도 시작하면 세션이 뜨고 탭 실패 표시는 남음", false, String(e)),
+  );
+  await run(first, `rm "${flags}/hold"`);
+
   // 작업그룹 탭 닫기 (worktree는 남긴다: 정리는 6단계)
-  for (let i = 0; i < 2; i++) await menu("close_pane");
+  for (let i = 0; i < 5; i++) await menu("close_pane"); // test-3 (세션 + 시작 못 한 setup), test-2 (세션 + setup), test-1
   await waitFor("작업그룹 탭 닫기", () => tabCount() === before, 5000);
 }
 

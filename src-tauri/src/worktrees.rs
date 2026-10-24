@@ -10,6 +10,7 @@
 use crate::fs::{code_err, git_kind, CodeError};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use tauri::AppHandle;
 
 // ~/.ddak. DDAK_HOME이 있으면 그 폴더 (자체 테스트가 사용자 폴더를 건드리지 않게).
 fn ddak_home() -> Result<PathBuf, CodeError> {
@@ -24,7 +25,7 @@ fn ddak_home() -> Result<PathBuf, CodeError> {
 }
 
 // 이름이 같은 프로젝트가 둘 있어도 섞이지 않게 경로 해시를 붙인다 (FNV-1a, 실행마다 같은 값).
-fn project_slug(root: &Path) -> String {
+pub fn project_slug(root: &Path) -> String {
     let mut h: u32 = 0x811c9dc5;
     for b in root.as_os_str().as_encoded_bytes() {
         h = (h ^ *b as u32).wrapping_mul(0x01000193);
@@ -85,6 +86,8 @@ struct Repo {
 pub struct Created {
     name: String,
     path: String,
+    // 돌릴 준비 스크립트 (setup.rs). 없으면 None
+    setup: Option<String>,
 }
 
 // 저장소 하나에 만들 것: 원본 저장소, worktree 폴더, 브랜치
@@ -213,14 +216,17 @@ fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError
             return Err(code_err("io", format!("{other}: {e}")));
         }
     }
-    Ok(Created { name, path: dest.to_string_lossy().into_owned() })
+    Ok(Created { name, path: dest.to_string_lossy().into_owned(), setup: None })
 }
 
 // git 명령이 몇 초 걸릴 수 있어 별도 스레드에서 돈다.
+// 프로젝트에 준비 스크립트가 있으면 그 경로를 함께 돌려준다 (프론트가 setup 창에서 돌린다).
 #[tauri::command]
-pub async fn group_create(project: String, prefix: String) -> Result<Created, CodeError> {
+pub async fn group_create(app: AppHandle, project: String, prefix: String) -> Result<Created, CodeError> {
     let home = ddak_home()?;
-    tauri::async_runtime::spawn_blocking(move || create(&home, &project, &prefix)).await.map_err(|e| code_err("io", e))?
+    let setup = crate::setup::script_to_run(&app, Path::new(&project))?;
+    let made = tauri::async_runtime::spawn_blocking(move || create(&home, &project, &prefix)).await.map_err(|e| code_err("io", e))??;
+    Ok(Created { setup, ..made })
 }
 
 #[cfg(test)]

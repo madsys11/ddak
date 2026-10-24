@@ -12,13 +12,31 @@ import type { Group, Session } from "./useGroups";
 // cwd: 이 탭의 터미널들이 뜨는 폴더 (원본 프로젝트 폴더 또는 작업그룹의 worktree 폴더).
 // group: 작업그룹으로 연 탭이면 그 그룹 이름. worktree: 새 worktree로 만든 작업그룹이면 그 이름 (탭 제목).
 // 둘 다 없으면 터미널 제목을 쓴다. name: 사용자가 바꾼 탭 이름 (탭 제목만 바뀌고 worktree·브랜치 이름은 그대로).
-type Tab = { id: number; layout: Layout; focus: number; cwd: string; group?: string; worktree?: string; name?: string };
+// setup: 작업그룹 준비 스크립트가 있는 탭이면 그 상태.
+type Tab = { id: number; layout: Layout; focus: number; cwd: string; group?: string; worktree?: string; name?: string; setup?: Setup };
+// 창에서 돌리는 세션. setup: 작업그룹 준비 스크립트를 돌리는 창 (이름표는 번역 문구).
+type PaneSession = Session & { setup?: boolean };
+// 작업그룹 준비. 세션(CLI)은 준비가 성공하거나 사용자가 "그래도 시작"을 누를 때까지(started) 띄우지 않는다.
+// pane: 준비 창 (닫았으면 null). run: 몇 번째 실행인지 (다시 준비하면 터미널을 새로 만들고, 이전 실행의 종료는
+// 무시한다). code: 실패한 종료 코드, null이면 중단 (창을 닫음·시그널). spawnFailed: 준비 창의 터미널을 만들지 못함
+// (작업 폴더가 없음 등). session: 다시 준비할 때 띄울 명령.
+type Setup = {
+  pane: number | null;
+  run: number;
+  status: "running" | "ok" | "failed";
+  code: number | null;
+  spawnFailed?: boolean;
+  started: boolean;
+  session: PaneSession;
+};
 // root: 프로젝트 폴더. sessions: 작업그룹 세션으로 띄운 터미널 → 그 세션. 없으면 그냥 셸.
-type State = { root: string; tabs: Tab[]; active: number; titles: Record<number, string>; sessions: Record<number, Session>; nextId: number };
+type State = { root: string; tabs: Tab[]; active: number; titles: Record<number, string>; sessions: Record<number, PaneSession>; nextId: number };
+// 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 돌릴 준비 스크립트 경로
+type Created = { name: string; path: string; setup: string | null };
 
 type Action =
   | { type: "newTab" }
-  | { type: "newGroupTab"; group: Group | null; cwd: string; worktree?: string }
+  | { type: "newGroupTab"; group: Group | null; cwd: string; made?: Created }
   | { type: "selectTab"; id: number }
   | { type: "selectTabAt"; index: number }
   | { type: "cycleTab"; delta: number }
@@ -29,22 +47,36 @@ type Action =
   | { type: "ratio"; tab: number; path: Path; ratio: number }
   | { type: "title"; pane: number; title: string }
   | { type: "renameTab"; id: number; name: string }
-  | { type: "moveTab"; id: number; index: number };
+  | { type: "moveTab"; id: number; index: number }
+  | { type: "setupExit"; tab: number; run: number; code: number | null; spawnFailed?: boolean }
+  | { type: "setupRetry"; tab: number }
+  | { type: "setupStart"; tab: number };
 
 // 작업그룹 탭을 하나 더한다: 그룹의 세션들을 나란히 띄운다. 그룹이 없으면 (설정을 못 읽음) 셸 하나.
-function addGroupTab(s: State, group: Group | null, cwd: string, worktree?: string): State {
+// 새 worktree에 준비 스크립트가 있으면 세션 아래에 setup 창을 하나 더 두고 거기서 돌린다.
+// 세션은 준비가 성공한 뒤에 뜬다 (의존성이 없는 폴더에서 CLI가 먼저 일을 시작하지 않게). 그동안 포커스는 준비 창.
+function addGroupTab(s: State, group: Group | null, cwd: string, made?: Created): State {
   const id = s.nextId;
-  const sessions = group?.sessions ?? [];
+  const sessions: PaneSession[] = group?.sessions ?? [];
   const panes = sessions.length ? sessions.map((_, i) => id + 1 + i) : [id + 1];
-  const tab: Tab = { id, layout: row(panes), focus: panes[0], cwd, group: group?.name, worktree };
-  return {
-    ...s,
-    tabs: [...s.tabs, tab],
-    active: id,
-    sessions: { ...s.sessions, ...Object.fromEntries(sessions.map((x, i) => [panes[i], x])) },
-    nextId: id + 1 + panes.length,
-  };
+  let layout = row(panes);
+  const added: [number, PaneSession][] = sessions.map((x, i) => [panes[i], x]);
+  let nextId = id + 1 + panes.length;
+  let setup: Setup | undefined;
+  if (made?.setup) {
+    const setupPane = nextId++;
+    layout = withSetupPane(layout, setupPane);
+    const env = [`DDAK_ORIGIN=${s.root}`, `DDAK_GROUP=${made.name}`];
+    const session: PaneSession = { name: "setup", command: "env", args: [...env, "/bin/sh", made.setup], readOnly: false, shiftEnter: null, setup: true };
+    added.push([setupPane, session]);
+    setup = { pane: setupPane, run: 0, status: "running", code: null, started: false, session };
+  }
+  const tab: Tab = { id, layout, focus: setup?.pane ?? panes[0], cwd, group: group?.name, worktree: made?.name, setup };
+  return { ...s, tabs: [...s.tabs, tab], active: id, sessions: { ...s.sessions, ...Object.fromEntries(added) }, nextId };
 }
+
+// 준비 창은 탭 아래쪽에 둔다
+const withSetupPane = (layout: Layout, pane: number): Layout => ({ dir: "col", ratio: 0.7, a: layout, b: { pane } });
 
 // 첫 탭 = 원본 폴더에서 작업하는 작업그룹 (기본 그룹).
 function initial({ group, root }: { group: Group | null; root: string }): State {
@@ -72,7 +104,7 @@ function reducer(s: State, a: Action): State {
       return { ...s, tabs: [...s.tabs, { id: s.nextId, layout: { pane }, focus: pane, cwd: s.root }], active: s.nextId, nextId: s.nextId + 2 };
     }
     case "newGroupTab":
-      return addGroupTab(s, a.group, a.cwd, a.worktree);
+      return addGroupTab(s, a.group, a.cwd, a.made);
     case "selectTab":
       return { ...s, active: a.id };
     case "selectTabAt":
@@ -96,7 +128,12 @@ function reducer(s: State, a: Action): State {
       const layout = remove(owner.layout, pane!);
       if (!layout) return closeTab(s, owner.id);
       const focus = owner.focus === pane ? paneIds(layout)[0] : owner.focus;
-      return update(owner.id, (t) => ({ ...t, layout, focus }));
+      // 돌던 준비 창을 닫으면 준비가 중단된 것으로 본다 (세션은 계속 기다리고, 다시 준비 / 그래도 시작을 고른다)
+      let setup = owner.setup;
+      if (setup && setup.pane === pane) {
+        setup = setup.status === "running" ? { ...setup, pane: null, status: "failed", code: null } : { ...setup, pane: null };
+      }
+      return update(owner.id, (t) => ({ ...t, layout, focus, setup }));
     }
     case "focus": {
       const owner = s.tabs.find((t) => paneIds(t.layout).includes(a.pane));
@@ -111,6 +148,36 @@ function reducer(s: State, a: Action): State {
       const name = a.name.trim() || undefined;
       return update(a.id, (t) => ({ ...t, name }));
     }
+    case "setupExit": {
+      const owner = s.tabs.find((t) => t.id === a.tab);
+      const setup = owner?.setup;
+      if (!owner || !setup || setup.run !== a.run || setup.status !== "running") return s;
+      const ok = a.code === 0;
+      // 성공하면 세션을 띄우고 포커스를 첫 세션으로 옮긴다 (준비 창에 있었으면)
+      const first = paneIds(owner.layout).find((p) => !s.sessions[p]?.setup) ?? owner.focus;
+      const focus = ok && owner.focus === setup.pane ? first : owner.focus;
+      return update(owner.id, (t) => ({
+        ...t,
+        focus,
+        setup: { ...setup, status: ok ? "ok" : "failed", code: ok ? null : a.code, spawnFailed: a.spawnFailed, started: setup.started || ok },
+      }));
+    }
+    case "setupRetry": {
+      const owner = s.tabs.find((t) => t.id === a.tab);
+      const setup = owner?.setup;
+      if (!owner || !setup || setup.status === "running") return s;
+      const run = { ...setup, run: setup.run + 1, status: "running" as const, code: null, spawnFailed: undefined };
+      if (setup.pane !== null) return update(owner.id, (t) => ({ ...t, focus: setup.pane!, setup: run }));
+      // 준비 창을 닫았으면 다시 연다
+      const pane = s.nextId;
+      return {
+        ...update(owner.id, (t) => ({ ...t, layout: withSetupPane(t.layout, pane), focus: pane, setup: { ...run, pane } })),
+        sessions: { ...s.sessions, [pane]: setup.session },
+        nextId: s.nextId + 1,
+      };
+    }
+    case "setupStart":
+      return update(a.tab, (t) => (t.setup ? { ...t, setup: { ...t.setup, started: true } } : t));
     case "moveTab": {
       const from = s.tabs.findIndex((t) => t.id === a.id);
       if (from < 0 || from === a.index) return s;
@@ -132,13 +199,18 @@ const pct = (v: number) => `${v * 100}%`;
 
 // 탭 영역(box) 안에서 탭(el)이 다 보이는지, 활성 탭이 보이게 스크롤하기.
 // scrollIntoView는 넘친 내용을 숨긴 바깥 요소까지 스크롤할 수 있어 탭 영역만 직접 옮긴다.
-const tabShown = (box: HTMLElement, el: HTMLElement) =>
-  el.offsetLeft >= box.scrollLeft && el.offsetLeft + el.offsetWidth <= box.scrollLeft + box.clientWidth;
+// 탭 너비는 글자 폭 때문에 소수 픽셀이라 실제 위치(getBoundingClientRect)로 재고 모자란 쪽으로 올림한다.
+// offsetLeft·offsetWidth는 반올림된 정수라 1px 안쪽이 가려진 채 남았다 (자체 테스트 간헐 실패).
+const tabShown = (box: HTMLElement, el: HTMLElement) => {
+  const [r, b] = [el.getBoundingClientRect(), box.getBoundingClientRect()];
+  return r.left >= b.left - 0.5 && r.right <= b.right + 0.5;
+};
 function revealActiveTab(box: HTMLElement) {
   const el = box.querySelector<HTMLElement>(".tab.active");
   if (!el) return;
-  if (el.offsetLeft < box.scrollLeft) box.scrollLeft = el.offsetLeft;
-  else if (!tabShown(box, el)) box.scrollLeft = el.offsetLeft + el.offsetWidth - box.clientWidth;
+  const [r, b] = [el.getBoundingClientRect(), box.getBoundingClientRect()];
+  if (r.left < b.left) box.scrollLeft += Math.floor(r.left - b.left);
+  else if (r.right > b.right) box.scrollLeft += Math.ceil(r.right - b.right);
 }
 
 type Props = {
@@ -154,6 +226,8 @@ type Props = {
 // 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
 export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
   const t = useT();
+  const setupProblem = (setup: Setup) =>
+    setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
   const [s, dispatch] = useReducer(reducer, { group, root: cwd }, initial);
   const latest = useRef({ group, onError, onTreeRoot, t });
   latest.current = { group, onError, onTreeRoot, t };
@@ -180,8 +254,8 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
     creating.current = true;
     const { group, onError, t } = latest.current;
     try {
-      const made = await invoke<{ name: string; path: string }>("group_create", { project: cwd, prefix: group?.id ?? "shell" });
-      dispatch({ type: "newGroupTab", group, cwd: made.path, worktree: made.name });
+      const made = await invoke<Created>("group_create", { project: cwd, prefix: group?.id ?? "shell" });
+      dispatch({ type: "newGroupTab", group, cwd: made.path, made });
     } catch (raw) {
       const { code, detail } = codeError(raw);
       onError(t("group.createFailed", { detail: code === "noRepos" ? t("group.noRepos") : detail }));
@@ -358,6 +432,11 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
               }}
             >
               {tab.worktree && <WorktreeIcon title={tab.cwd} />}
+              {tab.setup?.status === "failed" && (
+                <span className="tab-warn" title={setupProblem(tab.setup)}>
+                  !
+                </span>
+              )}
               {renaming === tab.id ? (
                 <TabNameInput
                   initial={titleOf(tab, i)}
@@ -429,7 +508,12 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
             className="tab-body"
             style={{ display: active ? undefined : "none" }}
           >
-            {panes.map(({ id, rect }) => (
+            {panes.map(({ id, rect }) => {
+              const session = s.sessions[id];
+              const setup = tab.setup;
+              // 준비를 기다리는 세션 창: 터미널 대신 안내 (터미널을 만들면 CLI가 바로 뜬다)
+              const waiting = session && !session.setup && setup && !setup.started;
+              return (
               <div
                 key={id}
                 className={`pane${panes.length > 1 && tab.focus === id ? " focused" : ""}${s.sessions[id] ? " session" : ""}`}
@@ -443,23 +527,61 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
                 }}
               >
                 {/* 작업그룹 세션이면 역할 이름. 같은 탭에 CLI가 여럿이라 어느 창이 누구인지 보이게 */}
-                {s.sessions[id] && (
+                {session && (
                   <div className="pane-label">
-                    {s.sessions[id].name}
-                    {s.sessions[id].readOnly && <span className="pane-badge">{t("session.readOnly")}</span>}
+                    {session.setup ? t("session.setup") : session.name}
+                    {session.readOnly && <span className="pane-badge">{t("session.readOnly")}</span>}
+                    {session.setup && setup && (
+                      <span className={`pane-badge${setup.status === "failed" ? " error" : ""}`} data-setup-status={setup.status}>
+                        {setup.status === "running" ? t("setup.running") : setup.status === "ok" ? t("setup.done") : setupProblem(setup)}
+                      </span>
+                    )}
                   </div>
                 )}
-                <Terminal
-                  cwd={tab.cwd}
-                  command={commandOf(s.sessions[id])}
-                  shiftEnter={s.sessions[id]?.shiftEnter}
-                  focused={visible && active && tab.focus === id}
-                  onFocus={() => dispatch({ type: "focus", pane: id })}
-                  onTitle={(title) => dispatch({ type: "title", pane: id, title })}
-                  onExit={() => dispatch({ type: "closePane", pane: id })}
-                />
+                {waiting ? (
+                  <div className="setup-wait">
+                    {setup.status === "failed" ? (
+                      <>
+                        <div className="setup-wait-error">{setupProblem(setup)}</div>
+                        <div className="setup-wait-actions">
+                          <button data-action="setup-retry" onClick={() => dispatch({ type: "setupRetry", tab: tab.id })}>
+                            {t("setup.retry")}
+                          </button>
+                          <button className="secondary" data-action="setup-start" onClick={() => dispatch({ type: "setupStart", tab: tab.id })}>
+                            {t("setup.startAnyway")}
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <div>{t("setup.waiting")}</div>
+                    )}
+                  </div>
+                ) : (
+                  <Terminal
+                    // 다시 준비하면 새 터미널에서 다시 돌린다
+                    key={session?.setup ? `setup-${setup?.run}` : "term"}
+                    cwd={tab.cwd}
+                    command={commandOf(session)}
+                    shiftEnter={session?.shiftEnter}
+                    shellAfter={session?.setup ? false : undefined}
+                    focused={visible && active && tab.focus === id}
+                    onFocus={() => dispatch({ type: "focus", pane: id })}
+                    onTitle={(title) => dispatch({ type: "title", pane: id, title })}
+                    // 준비 창은 끝나도 출력을 볼 수 있게 남긴다 (닫기는 ⌘W)
+                    onExit={(code) =>
+                      session?.setup && setup
+                        ? dispatch({ type: "setupExit", tab: tab.id, run: setup.run, code })
+                        : dispatch({ type: "closePane", pane: id })
+                    }
+                    // 준비 창을 띄우지 못하면 준비 실패로 (세션이 계속 기다리지 않게)
+                    onSpawnError={
+                      session?.setup && setup ? () => dispatch({ type: "setupExit", tab: tab.id, run: setup.run, code: null, spawnFailed: true }) : undefined
+                    }
+                  />
+                )}
               </div>
-            ))}
+              );
+            })}
             {dividers.map((d) => {
               const pos = d.dir === "row" ? d.parent.x + d.parent.w * d.ratio : d.parent.y + d.parent.h * d.ratio;
               const style =
