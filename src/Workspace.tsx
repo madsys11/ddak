@@ -655,6 +655,8 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError }: 
                     {...commandOf(session)}
                     shiftEnter={session?.shiftEnter}
                     shellAfter={session?.setup ? false : undefined}
+                    // 작업그룹 세션(명령이 있는 것)은 채팅방에 "작업그룹/역할"로 참여한다 (원본 작업그룹은 origin)
+                    chat={session?.command && !session.setup ? { project: s.root, name: `${tab.worktree ?? "origin"}/${session.name}`, key: session.sid ?? String(id) } : undefined}
                     focused={visible && active && tab.focus === id}
                     onFocus={() => dispatch({ type: "focus", pane: id })}
                     onTitle={(title) => dispatch({ type: "title", pane: id, title })}

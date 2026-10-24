@@ -48,6 +48,16 @@ struct Session {
     proc: Arc<Mutex<Proc>>,
     // 띄운 폴더 (실제 경로). 작업그룹을 끝낼 때 그 폴더의 세션을 찾는다 (stop_under).
     cwd: PathBuf,
+    // 목록에서 빠질 때 (닫기·작업그룹 끝내기) 부른다. 채팅방에서 나간다 (pty_spawn).
+    leave: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Session {
+    fn left(&mut self) {
+        if let Some(leave) = self.leave.take() {
+            leave();
+        }
+    }
 }
 
 // 터미널 목록. 잠그는 순서는 ending → sessions → closing.
@@ -162,7 +172,7 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc, cwd: real })
+    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -224,7 +234,7 @@ fn terminate(proc: &Mutex<Proc>) -> bool {
 // 터미널을 닫는다: 목록에서 닫는 중으로 옮기고 (빠지는 틈이 없게 두 목록을 함께 잡는다) 따로 끝낸다. 다 끝나면
 // 닫는 중에서 뺀다. 터미널(master)은 끝낼 때까지 들고 있는다.
 fn close(ptys: &Ptys, id: u32) {
-    let session = {
+    let mut session = {
         let mut sessions = ptys.sessions.lock().unwrap();
         let Some(session) = sessions.remove(&id) else {
             return;
@@ -232,6 +242,7 @@ fn close(ptys: &Ptys, id: u32) {
         ptys.closing.lock().unwrap().insert(id, (session.proc.clone(), session.cwd.clone()));
         session
     };
+    session.left();
     let closing = ptys.closing.clone();
     std::thread::spawn(move || {
         if terminate(&session.proc) {
@@ -255,6 +266,8 @@ pub fn stop_under(ptys: &Ptys, dir: &Path) -> bool {
         let procs: Vec<(u32, Arc<Mutex<Proc>>)> = closing.iter().filter(|(_, (_, cwd))| cwd.starts_with(dir)).map(|(id, (p, _))| (*id, p.clone())).collect();
         (stopped, procs)
     };
+    let mut stopped = stopped;
+    stopped.iter_mut().for_each(Session::left);
     let waits: Vec<_> = procs.into_iter().map(|(id, proc)| (id, std::thread::spawn(move || terminate(&proc)))).collect();
     let mut all = true;
     for (id, w) in waits {
@@ -307,12 +320,21 @@ fn open(
     size: PtySize,
     output: impl FnMut(Vec<u8>) -> bool + Send + 'static,
     exited: impl FnOnce(Option<u32>) + Send + 'static,
+    leave: Leave,
 ) -> Result<u32, String> {
     let ending = ptys.ending.read().unwrap();
-    if std::fs::canonicalize(cwd).is_ok_and(|real| ending.iter().any(|d| real.starts_with(d))) {
-        return Err(format!("{cwd}: this work group is ending"));
-    }
-    let session = spawn(cwd, command, fallback, shell_after, size, output, exited)?;
+    let refuse = std::fs::canonicalize(cwd).is_ok_and(|real| ending.iter().any(|d| real.starts_with(d)));
+    let spawned = if refuse { Err(format!("{cwd}: this work group is ending")) } else { spawn(cwd, command, fallback, shell_after, size, output, exited) };
+    let mut session = match spawned {
+        Ok(session) => session,
+        Err(e) => {
+            if let Some(leave) = leave {
+                leave();
+            }
+            return Err(e);
+        }
+    };
+    session.leave = leave;
     let id = ptys.next_id.fetch_add(1, Ordering::Relaxed);
     ptys.sessions.lock().unwrap().insert(id, session);
     Ok(id)
@@ -320,9 +342,43 @@ fn open(
 
 // 종료는 출력과 같은 채널로 보낸다 ({"exit": 코드}). 채널은 보낸 순서대로 전달되고 프론트가 spawn을 부르기 전에
 // 만들어 두므로, 생성 응답(id)보다 먼저 끝나도 잃지 않는다 (리뷰 P2: 전역 이벤트는 id를 받기 전이면 버려졌다).
+// 채팅방에 참여할 세션: 프로젝트(원본 폴더)와 참여자 이름 (작업그룹/역할)
+#[derive(serde::Deserialize)]
+pub struct ChatJoin {
+    project: String,
+    name: String,
+    // 창마다 고정인 키 (chat.rs Member)
+    key: String,
+}
+
+type Leave = Option<Box<dyn FnOnce() + Send>>;
+
+// 채팅방에 참여시키고 인자의 {chat}을 그 주소로 바꾼다. 나가기를 함께 돌려준다.
+fn join_chat(
+    chats: Option<Arc<crate::chat::Chats>>,
+    chat: Option<ChatJoin>,
+    command: Option<Vec<String>>,
+    fallback: Option<Vec<String>>,
+) -> (Option<Vec<String>>, Option<Vec<String>>, Leave) {
+    let joined = chat.zip(chats).map(|(c, chats)| {
+        let project = std::fs::canonicalize(&c.project).unwrap_or_else(|_| PathBuf::from(&c.project));
+        let (token, url, _) = chats.join(&project, &c.name, &c.key);
+        let leave: Box<dyn FnOnce() + Send> = Box::new(move || chats.leave(&token));
+        (url, leave)
+    });
+    let url = joined.as_ref().map_or(String::new(), |(url, _)| url.clone());
+    let fill = |argv: Option<Vec<String>>| argv.map(|a| a.into_iter().map(|x| x.replace("{chat}", &url)).collect::<Vec<_>>());
+    (fill(command), fill(fallback), joined.map(|(_, leave)| leave))
+}
+
+// chat이 있으면 채팅방에 참여시키고, 명령·fallback 인자의 {chat}을 그 창의 MCP 주소로 바꾼다 (src-tauri/src/chat.rs).
+// 터미널이 목록에서 빠지면 나간다. 채팅 서버가 없으면 (띄우지 못함) {chat}은 빈 값이 된다.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn pty_spawn(
     ptys: State<'_, Ptys>,
+    chats: State<'_, crate::chat::ChatsState>,
+    chat: Option<ChatJoin>,
     cwd: String,
     cols: u16,
     rows: u16,
@@ -332,6 +388,7 @@ pub fn pty_spawn(
     shell_after: Option<bool>,
 ) -> Result<u32, String> {
     let on_exit = on_data.clone();
+    let (command, fallback, leave) = join_chat(chats.0.clone(), chat, command, fallback);
     open(
         &ptys,
         &cwd,
@@ -343,6 +400,7 @@ pub fn pty_spawn(
         move |code| {
             let _ = on_exit.send(InvokeResponseBody::Json(serde_json::json!({ "exit": code }).to_string()));
         },
+        leave,
     )
 }
 
@@ -622,7 +680,7 @@ mod tests {
         let start = |name: &str| {
             let script = format!("set -m; (trap '' HUP; while :; do echo t >> '{}'; sleep 0.05; done) & wait", log(name).display());
             let argv: Vec<String> = ["/bin/sh", "-c", &script].iter().map(|a| a.to_string()).collect();
-            let id = open(&ptys, &dir.to_string_lossy(), Some(&argv), None, false, SIZE, |_| true, |_| ()).unwrap();
+            let id = open(&ptys, &dir.to_string_lossy(), Some(&argv), None, false, SIZE, |_| true, |_| (), None).unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             while size(name) == 0 {
                 assert!(std::time::Instant::now() < deadline, "작업이 쓰지 않음");
@@ -658,7 +716,7 @@ mod tests {
         let dir = std::fs::canonicalize(&dir).unwrap();
         let ptys = Ptys::default();
         let argv = vec!["/bin/sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
-        let try_open = |cwd: &Path| open(&ptys, &cwd.to_string_lossy(), Some(&argv), None, false, SIZE, |_| true, |_| ()).is_ok();
+        let try_open = |cwd: &Path| open(&ptys, &cwd.to_string_lossy(), Some(&argv), None, false, SIZE, |_| true, |_| (), None).is_ok();
         let held = hold(&ptys, &dir);
         let (inside, sub, other) = (try_open(&dir), try_open(&dir.join("sub")), try_open(&std::env::temp_dir()));
         drop(held);
@@ -666,6 +724,34 @@ mod tests {
         stop_under(&ptys, Path::new("/"));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!inside && !sub && other && after, "{inside} {sub} {other} {after}");
+    }
+
+    // 채팅방 참여: 인자의 {chat}이 그 창의 MCP 주소로 바뀌고 (fallback도), 터미널을 닫으면 참여자에서 빠진다
+    #[test]
+    fn chat_url_fills_args_and_leaves_on_close() {
+        let dir = std::env::temp_dir().join(format!("ddak-pty-chat-{}", std::process::id()));
+        let chats = crate::chat::Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
+        let join = ChatJoin { project: "/".into(), name: "origin/dev".into(), key: "k".into() };
+        let argv = |s: &str| Some(vec!["/bin/sh".to_string(), "-c".to_string(), s.to_string()]);
+        let (command, fallback, leave) = join_chat(Some(chats.clone()), Some(join), argv("echo URL={chat}"), argv("echo {chat}"));
+        let url = fallback.as_ref().unwrap()[2].strip_prefix("echo ").unwrap().to_string();
+        assert!(url.starts_with("http://127.0.0.1:") && url.contains("/mcp/"), "{url}");
+        assert_eq!(chats.members(Path::new("/")), ["user", "origin/dev"]);
+        let ptys = Ptys::default();
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let sink = out.clone();
+        let id = open(&ptys, "/", command.as_deref(), None, false, SIZE, move |b| { sink.lock().unwrap().extend(b); true }, |_| (), leave).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !String::from_utf8_lossy(&out.lock().unwrap()).contains(&format!("URL={url}")) {
+            assert!(std::time::Instant::now() < deadline, "주소가 인자로 가지 않음");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        close(&ptys, id);
+        assert_eq!(chats.members(Path::new("/")), ["user"], "닫아도 참여자로 남음");
+        // 채팅 서버가 없으면 빈 값
+        let (command, _, leave) = join_chat(None, Some(ChatJoin { project: "/".into(), name: "x".into(), key: "x".into() }), argv("{chat}"), None);
+        assert!(command.unwrap()[2].is_empty() && leave.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // 감싼 인자를 실제 셸에 넘겨서 그대로 돌아오는지 본다.

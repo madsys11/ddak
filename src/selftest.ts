@@ -28,6 +28,17 @@ async function waitFor<T>(what: string, fn: () => T | undefined | null | false, 
   throw new Error(`시간 초과: ${what}`);
 }
 
+// waitFor의 비동기판 (Rust 명령으로 확인할 때)
+async function waitAsync<T>(what: string, fn: () => Promise<T | undefined | null | false>, ms = 10000): Promise<T> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const v = await fn();
+    if (v) return v;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`시간 초과: ${what}`);
+}
+
 // 화면 폭 때문에 줄바꿈된 줄은 한 줄로 합친다.
 function screen(term: Terminal) {
   const buf = term.buffer.active;
@@ -169,7 +180,11 @@ async function frameInfo() {
   await new Promise((r) => requestAnimationFrame(r));
   return `focus=${document.hasFocus()} vis=${document.visibilityState} raf=${Math.round(performance.now() - t0)}ms`;
 }
-const ready = (term: Terminal) => waitFor("셸 프롬프트", () => screen(term).some((l) => l.trim() !== ""), 15000);
+// 시간 초과면 그때 화면을 같이 남긴다 (간헐 실패의 원인을 보려고)
+const ready = (term: Terminal) =>
+  waitFor("셸 프롬프트", () => screen(term).some((l) => l.trim() !== ""), 15000).catch((e) => {
+    throw new Error(`${e} | 화면 줄 ${term.buffer.active.length}, 커서 ${term.buffer.active.cursorX},${term.buffer.active.cursorY}`);
+  });
 const near = (a: number, b: number) => Math.abs(a - b) < 0.03;
 // 진짜 클릭과 달리 합성 이벤트는 브라우저 기본 동작(포커스 이동)을 하지 않는다.
 // 그래서 "기본 동작을 막았는지"(반환값 false)와 "직접 포커스를 옮겼는지"를 따로 본다.
@@ -1634,9 +1649,12 @@ async function testGroupEnd(root: string, first: Terminal) {
 
 // 세션 추가 (Terminal 메뉴, 탭 오른쪽 클릭): 작업그룹 설정의 세션을 골라 지금 탭에 분할 창으로 띄운다. 쓰기 가능한 세션이
 // 이미 있는 탭에 쓰기 가능한 세션을 또 더하면 경고하고 (취소 / 새 작업그룹 / 그래도 추가), 읽기 전용은 경고하지 않는다.
-async function testAddSession(first: Terminal) {
+async function testAddSession(root: string, first: Terminal) {
   const file = await groupsFile();
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true}`;
+  // poster: 자기 채팅방 주소({chat})로 MCP post_message를 보낸다 (claude·codex 대신 curl)
+  const rpc = `{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"tools/call\\",\\"params\\":{\\"name\\":\\"post_message\\",\\"arguments\\":{\\"text\\":\\"@user hello from poster\\"}}}`;
+  const poster = `{"name":"poster","command":"curl","args":["-s","-H","Content-Type: application/json","-d","${rpc}","{chat}"],"readOnly":true}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster}`;
   await run(first, `printf '%s' '${TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","sessions":[${pick}]}]}`)}' > "${file}"`);
   await waitFor("세션 고르기 설정", () => devHooks.groups?.groups.some((g) => g.id === "pick"), 3000);
   const before = tabCount();
@@ -1665,7 +1683,7 @@ async function testAddSession(first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -1690,6 +1708,21 @@ async function testAddSession(first: Terminal) {
   // 포커스는 마지막에 더한 reviewer라 그 오른쪽에 붙는다
   check("세션 추가: 그래도 추가 (포커스된 창 오른쪽)", labels() === "-,writer,reviewer,writer", labels());
 
+  // 채팅방: 명령이 있는 세션은 "작업그룹/역할"로 참여하고 (같은 이름은 -2), 인자의 {chat}으로 MCP에 보낼 수 있다
+  await open("menu");
+  choose("pick/poster");
+  const posted = await waitAsync(
+    "MCP로 보낸 메시지",
+    async () => (await invoke<{ from: string; text: string; to: string[] }[]>("chat_messages", { project: root })).find((m) => m.text === "@user hello from poster"),
+    10000,
+  ).catch(() => null);
+  const members = await invoke<string[]>("chat_members", { project: root });
+  check(
+    "채팅방: 세션이 작업그룹/역할로 참여하고, {chat} 주소로 보낸 메시지가 그 이름으로 기록됨",
+    posted?.from === "origin/poster" && posted.to.join(",") === "user" && members.join(",") === "user,origin/poster,origin/reviewer,origin/writer,origin/writer-2",
+    `${JSON.stringify(posted)} | ${members.join(",")}`,
+  );
+
   // 경고에서 새 작업그룹을 고르면 별도 worktree의 작업그룹을 연다 (기본 그룹)
   await open("menu");
   choose("pick/writer");
@@ -1703,6 +1736,11 @@ async function testAddSession(first: Terminal) {
     tab.querySelector<HTMLElement>("[title='Close Tab']")!.click();
   }
   await waitFor("탭 정리", () => tabCount() === before, 5000);
+  const left = await waitAsync("참여자 정리", async () => {
+    const m = await invoke<string[]>("chat_members", { project: root });
+    return m.every((n) => !n.startsWith("origin/")) && m;
+  }, 5000).catch(() => null);
+  check("채팅방: 터미널을 닫으면 참여자에서 빠짐", left?.join(",") === "user", String(left));
   await run(first, `printf '%s' '${TEST_GROUPS}' > "${file}"`);
   await waitFor("테스트 설정 복귀", () => devHooks.groups?.groups.length === 1, 3000);
 }
@@ -2106,7 +2144,7 @@ export async function runSelftest(root: string, scenario: string) {
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다
     await testGroupClone(root, first);
     await testGroupEnd(root, first);
-    await testAddSession(first);
+    await testAddSession(root, first);
     await testTabMove();
     await testTabScroll();
     await testManyTerminals(20);

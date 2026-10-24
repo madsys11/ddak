@@ -1,3 +1,6 @@
+use tauri::Manager;
+
+mod chat;
 mod clone;
 mod fs;
 mod groups;
@@ -27,6 +30,7 @@ pub fn run() {
         .manage(watch::Watches::default())
         .setup(|app| {
             menu::install(app.handle());
+            app.manage(chat::install(app.handle()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -52,6 +56,9 @@ pub fn run() {
             projects::projects_save,
             menu::set_menu,
             pty::pty_spawn,
+            chat::chat_messages,
+            chat::chat_post,
+            chat::chat_members,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,

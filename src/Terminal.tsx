@@ -38,15 +38,18 @@ type Props = {
   onExit: (code: number | null) => void;
   // PTY를 만들지 못함 (오류는 터미널에도 쓴다). 이때는 onExit이 오지 않는다.
   onSpawnError?: () => void;
+  // 채팅방에 참여할 세션: 프로젝트(원본 폴더), 참여자 이름, 창마다 고정인 키. 인자의 {chat}이 이 창의 MCP 주소로 바뀐다
+  // (src-tauri/src/chat.rs)
+  chat?: { project: string; name: string; key: string };
 };
 
-export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, focused, onFocus, onTitle, onExit, onSpawnError }: Props) {
+export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter, chat });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter, chat };
 
   useEffect(() => {
     const el = ref.current!;
@@ -98,8 +101,8 @@ export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, focus
       else if (!disposed) latest.current.onExit(msg.exit);
     };
 
-    const { command, fallback, shellAfter } = latest.current;
-    const args = { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, fallback: fallback ?? null, shellAfter: shellAfter ?? null };
+    const { command, fallback, shellAfter, chat } = latest.current;
+    const args = { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, fallback: fallback ?? null, shellAfter: shellAfter ?? null, chat: chat ?? null };
     invoke<number>("pty_spawn", args).then(
       async (newId) => {
         // 자체 테스트: 생성 응답이 늦게 오는 순서를 만든다 (그 사이 끝난 명령의 종료를 잃지 않는지)
