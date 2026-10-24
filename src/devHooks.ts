@@ -29,6 +29,8 @@ export const devHooks: {
   // 이 이름의 채팅 이벤트 등록을 실패시킨다 / 프로젝트마다 채팅 메시지를 읽은 횟수 (남은 리스너를 보려고)
   chatListenFail?: string;
   chatLoads?: Record<string, number>;
+  // 터미널의 깨우기 이벤트 등록을 이만큼(ms) 늦춘다 (터미널은 등록이 끝난 뒤 뜬다)
+  wakeListenDelay?: number;
 } = {
   confirm: (message, labels) => ask(message, { kind: "warning", ...labels }),
 };

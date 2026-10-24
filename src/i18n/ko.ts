@@ -76,6 +76,8 @@ export const ko: Messages = {
   "chat.you": "나",
   "chat.placeholder": "세션에게 메시지 (@이름으로 알림, Enter 보내기, ⇧Enter 줄바꿈)",
   "chat.listenError": "이 패널이 스스로 새로 고치지 못합니다 ({detail}). 프로젝트를 뺐다가 다시 넣으면 다시 시도합니다.",
+  "chat.wakePending": "채팅 알림 대기",
+  "chat.wakeHint": "이 세션을 멘션한 채팅 메시지가 있습니다. 입력을 마치고 Enter를 치면 알립니다. 누르면 지금 알립니다.",
   "chat.unread": "나에게 온 새 메시지",
   "addSession.menu": "세션 추가…",
   "addSession.title": "세션 추가",

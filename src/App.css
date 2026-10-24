@@ -783,3 +783,12 @@ button.secondary {
 .tabbar-btn.active {
   color: var(--fg);
 }
+/* 채팅 깨우기를 기다리는 창 (누르면 바로 깨움) */
+.pane-badge.wake {
+  font: inherit;
+  font-size: 10px;
+  color: var(--accent);
+  background: none;
+  border-color: var(--accent);
+  cursor: pointer;
+}

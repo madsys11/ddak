@@ -31,6 +31,7 @@ pub fn run() {
         .setup(|app| {
             menu::install(app.handle());
             app.manage(chat::install(app.handle()));
+            pty::start_waker(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -62,6 +63,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            pty::chat_wake_now,
             selftest::selftest_config,
             selftest::selftest_report,
             selftest::selftest_menu,

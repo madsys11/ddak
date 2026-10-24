@@ -216,6 +216,12 @@ impl Chats {
         (t.clone(), format!("http://127.0.0.1:{}/mcp/{t}", self.port), assigned)
     }
 
+    // 이 이름들로 참여한 토큰 (깨울 터미널을 찾는다)
+    pub fn tokens_named(&self, project: &Path, names: &[String]) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.members.iter().filter(|(_, m)| m.project == project && names.contains(&m.name)).map(|(t, _)| t.clone()).collect()
+    }
+
     pub fn leave(&self, token: &str) {
         let left = self.inner.lock().unwrap().members.remove(token);
         if let Some(m) = left {
@@ -392,7 +398,8 @@ impl Chats {
 }
 
 // 앱이 뜰 때: 앱 데이터 chats 폴더로 서버를 띄우고, 새 메시지는 프론트에 "chat" 이벤트로 ({ project, message }),
-// 참여자 변화는 "chat-members" 이벤트로 ({ project }) 알린다.
+// 참여자 변화는 "chat-members" 이벤트로 ({ project }) 알린다. 새 메시지에 멘션된 세션의 터미널은 깨우기를 기다리게 하고
+// "chat-wake" 이벤트로 알린다 ({ pty, pending: true, seq }, src-tauri/src/pty.rs wake).
 pub fn install(app: &tauri::AppHandle) -> ChatsState {
     use tauri::Emitter;
     let dir = match crate::projects::data_dir(app) {
@@ -404,10 +411,22 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
     };
     let emitter = app.clone();
     let on_message: OnMessage = Box::new(move |project, change| {
-        let _ = match change {
-            Change::Message(message) => emitter.emit("chat", json!({ "project": project, "message": message })),
-            Change::Members => emitter.emit("chat-members", json!({ "project": project })),
-        };
+        use tauri::Manager;
+        match change {
+            Change::Message(message) => {
+                let _ = emitter.emit("chat", json!({ "project": project, "message": message }));
+                let names: Vec<String> = message.to.iter().filter(|n| *n != USER).cloned().collect();
+                let tokens = emitter.state::<ChatsState>().0.as_ref().map(|c| c.tokens_named(project, &names)).unwrap_or_default();
+                if !tokens.is_empty() {
+                    for (pty, seq) in crate::pty::wake(&emitter.state::<crate::pty::Ptys>(), &tokens, &message.from) {
+                        let _ = emitter.emit("chat-wake", json!({ "pty": pty, "pending": true, "seq": seq }));
+                    }
+                }
+            }
+            Change::Members => {
+                let _ = emitter.emit("chat-members", json!({ "project": project }));
+            }
+        }
     });
     match Chats::start(dir, on_message) {
         Ok(chats) => ChatsState(Some(chats)),

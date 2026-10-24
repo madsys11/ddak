@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { devHooks, liveTerms } from "./devHooks";
+import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
 import { LOCALES } from "./i18n";
 import { en } from "./i18n/en";
@@ -27,6 +28,9 @@ async function waitFor<T>(what: string, fn: () => T | undefined | null | false, 
   }
   throw new Error(`시간 초과: ${what}`);
 }
+
+// 깨우기가 사용자 입력 뒤 기다리는 시간 (src-tauri/src/pty.rs WAKE_IDLE)
+const WAKE_IDLE_MS = 3000;
 
 // waitFor의 비동기판 (Rust 명령으로 확인할 때)
 async function waitAsync<T>(what: string, fn: () => Promise<T | undefined | null | false>, ms = 10000): Promise<T> {
@@ -1190,6 +1194,45 @@ function testWorkspaceStateUnit() {
   check("복원 상태: 탭 번호와 창 번호 중복도 거부", fromSaved(saved(split(1, 2)), "/x") === null);
 }
 
+// 터미널 자동 응답 판별 (깨우기의 사용자 입력에서 뺀다, src/Terminal.tsx isTerminalReply)
+function testTerminalReplyUnit() {
+  // xterm 6.0이 만드는 응답 전부 (src/Terminal.tsx 주석)
+  const replies = [
+    "\x1b[?1;2c", "\x1b[?6c", "\x1b[>0;276;0c", "\x1b[>85;95;0c", "\x1b[>83;40003;0c", "\x1b[0n", "\x1b[12;40R", "\x1b[?12;40R",
+    "\x1b[8;24;80t", "\x1b[4;600;800t", "\x1b[6;17;8t", "\x1b[?2004;1$y", "\x1b[4;2$y", "\x1bP1$r0m\x1b\\",
+    "\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\", "\x1b]10;rgb:0/0/0\x07", "\x1b[I", "\x1b[O",
+  ];
+  // 키·붙여넣기 (xterm 키보드: 화살표·Home·End·F1-F12·⇧Tab·수식 키, src/common/input/Keyboard.ts)
+  const keys = [
+    "a", "abc", "\r", "\x1b\r", "\x1b[A", "\x1bOA", "\x1b[1;5C", "\x1b[H", "\x1b[F", "\x1bOP", "\x1b[1;2P", "\x1b[15~", "\x1b[24;5~",
+    "\x1b[Z", "\x7f", "\x03", "한글", "\x1b[200~pasted\x1b[201~",
+  ];
+  const wrongReplies = replies.filter((r) => !isTerminalReply(r));
+  const wrongKeys = keys.filter((k) => isTerminalReply(k));
+  check("깨우기: 터미널 자동 응답과 사용자 키를 구분", !wrongReplies.length && !wrongKeys.length, JSON.stringify({ wrongReplies, wrongKeys }));
+}
+
+// 실제 키 이벤트로 친다 (keydown, 그것으로 글자가 나오지 않으면 keypress). \r은 Enter 키. 프로그램 입력(term.input)은
+// 사용자 입력으로 보지 않는다 (깨우기). 보낸 것을 돌려준다.
+function typeKeys(term: Terminal, text: string) {
+  const sent: string[] = [];
+  const d = term.onData((x) => sent.push(x));
+  for (const ch of text) {
+    const before = sent.length;
+    for (const type of ["keydown", "keypress"]) {
+      if (type === "keypress" && sent.length > before) break;
+      const key = ch === "\r" ? "Enter" : ch;
+      const ev = new KeyboardEvent(type, { key, bubbles: true, cancelable: true });
+      const code = ch === "\r" ? 13 : type === "keydown" ? ch.toUpperCase().charCodeAt(0) : ch.charCodeAt(0);
+      for (const prop of ["keyCode", "which"]) Object.defineProperty(ev, prop, { get: () => code });
+      Object.defineProperty(ev, "charCode", { get: () => (type === "keypress" ? code : 0) });
+      term.textarea!.dispatchEvent(ev);
+    }
+  }
+  d.dispose();
+  return sent.join("");
+}
+
 async function testImeUnit() {
   const box = document.createElement("div");
   box.style.cssText = "position:fixed; left:-2000px; top:0; width:400px; height:200px";
@@ -1691,7 +1734,11 @@ async function testAddSession(root: string, first: Terminal) {
   // poster: 자기 채팅방 주소({chat})로 MCP post_message를 보낸다 (claude·codex 대신 curl)
   const rpc = `{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"tools/call\\",\\"params\\":{\\"name\\":\\"post_message\\",\\"arguments\\":{\\"text\\":\\"@user hello from poster\\"}}}`;
   const poster = `{"name":"poster","command":"curl","args":["-s","-H","Content-Type: application/json","-d","${rpc}","{chat}"],"readOnly":true}`;
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster}`;
+  // listener: 받은 줄을 GOT:으로 찍는다 (깨우기가 입력한 알림을 본다)
+  // 시작할 때 커서 위치를 물어서 xterm이 자동 응답(ESC[행;열R)을 보내게 한다 (사용자 입력이 아니다. 리뷰 P2)
+  // 줄을 받을 때마다 상태(ESC[5n)·DEC 커서 위치(ESC[?6n)도 물어서, Enter 직후에 응답이 오게 한다 (리뷰 후속 P2)
+  const listener = `{"name":"listener","command":"sh","args":["-c","stty -echo; printf \\"\\\\033[6n\\"; while read l; do echo GOT:$l; printf \\"\\\\033[5n\\\\033[?6n\\"; done"],"readOnly":true}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener}`;
   await run(first, `printf '%s' '${TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","sessions":[${pick}]}]}`)}' > "${file}"`);
   await waitFor("세션 고르기 설정", () => devHooks.groups?.groups.some((g) => g.id === "pick"), 3000);
   const before = tabCount();
@@ -1720,7 +1767,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer,pick/poster" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -1881,6 +1928,70 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   await waitFor("닫기", () => !shown(), 2000);
   await waitFor("터미널 포커스", terminalFocused, 2000).catch(() => null);
   check("채팅 패널: 버튼으로 닫아도 터미널로 포커스", terminalFocused(), document.activeElement?.className ?? "");
+
+  // 깨우기: 멘션된 세션의 터미널에 알림을 입력하고 Enter. 한 번도 치지 않은 창은 바로, 초안이 있으면 배지만 띄우고
+  // 기다렸다가, 배지를 누르면 바로 깨운다.
+  await openAdd("menu");
+  choose("pick/listener");
+  const listenerPane = await waitFor("listener 창", () => visiblePanes().find((p) => p.el.querySelector(".pane-label")?.firstChild?.textContent === "listener"), 5000);
+  await sleep(1000);
+  const got = () => screen(listenerPane.term).filter((l) => l.startsWith("GOT:"));
+  await invoke("chat_post", { project: root, text: "@origin/listener hello" });
+  const woke = await waitFor("깨운 알림", () => got().find((l) => l.includes("New chat message from user")), 6000).catch(() => null);
+  check(
+    "깨우기: 멘션된 세션의 터미널에 알림을 입력하고 Enter (한 번도 치지 않은 창은 바로)",
+    !!woke && woke.startsWith("GOT:[ddak] New chat message from user. Read it with the ddak read_messages tool"),
+    woke ?? got().join("|"),
+  );
+  // Enter를 친 직후 프로그램이 질의해 온 응답은 입력 중으로 보지 않는다: 다음 멘션은 조용해지면 (누르지 않아도) 깨운다
+  const enterTyped = typeKeys(listenerPane.term, "hi\r");
+  await waitFor("친 줄", () => got().some((l) => l === "GOT:hi"), 3000).catch(() => null);
+  await sleep(500);
+  const beforeEnter = got().length;
+  await invoke("chat_post", { project: root, text: "@origin/listener after enter" });
+  const afterEnter = await waitFor("Enter 뒤 깨움", () => got().length > beforeEnter && got().at(-1)!.includes("[ddak] New chat message from user"), WAKE_IDLE_MS + 4000).catch(() => null);
+  check("깨우기: Enter 직후 온 터미널 응답(ESC[0n, ESC[?…R)은 입력 중으로 보지 않음", enterTyped === "hi\r" && !!afterEnter, `${JSON.stringify(enterTyped)} ${got().slice(-2).join(" | ")}`);
+
+  const typed = typeKeys(listenerPane.term, "abc");
+  const beforeDraft = got().length;
+  await sleep(200);
+  await invoke("chat_post", { project: root, text: "@origin/listener again" });
+  const badge = () => listenerPane.el.querySelector<HTMLElement>("[data-wake]");
+  await waitFor("알림 대기 배지", badge, 3000).catch(() => null);
+  await sleep(WAKE_IDLE_MS + 1000);
+  const waited = !!badge() && got().length === beforeDraft;
+  badge()?.click();
+  const forced = await waitFor("바로 깨움", () => got().find((l) => l.startsWith("GOT:abc[ddak] New chat message")), 5000).catch(() => null);
+  await waitFor("배지 사라짐", () => !badge(), 3000).catch(() => null);
+  check(
+    "깨우기: 초안이 있으면 배지만 띄우고 기다림, 누르면 바로 깨우고 배지가 사라짐",
+    typed === "abc" && waited && !!forced && !badge(),
+    `${JSON.stringify(typed)} ${waited} ${forced} ${!!badge()} | ${got().join(" | ")}`,
+  );
+
+  // 변경 번호가 더 오래된 상태는 버린다 (리뷰 P2: 앞 깨우기의 해제가 새 대기를 지웠다). 순서가 바뀐 이벤트를 직접 보낸다.
+  const pty = Number(listenerPane.el.querySelector<HTMLElement>(".terminal")!.dataset.pty);
+  const big = 1e12;
+  await emit("chat-wake", { pty, pending: true, seq: big });
+  await waitFor("대기 배지", badge, 2000).catch(() => null);
+  await emit("chat-wake", { pty, pending: false, seq: big - 1 });
+  await sleep(300);
+  const kept = !!badge();
+  await emit("chat-wake", { pty, pending: false, seq: big + 1 });
+  await waitFor("배지 사라짐", () => !badge(), 2000).catch(() => null);
+  check("깨우기: 늦게 온 이전 해제가 새 대기 배지를 지우지 않음", kept && !badge(), `${kept} ${!!badge()}`);
+
+  // 터미널은 깨우기 이벤트 등록이 끝난 뒤에 뜬다 (리뷰 P2: 등록 전에 온 대기 상태를 놓쳤다)
+  devHooks.wakeListenDelay = 1500;
+  const existing = new Set(visiblePanes().map((p) => p.term));
+  const t0 = performance.now();
+  await openAdd("menu");
+  choose("pick/listener");
+  const spawned = await waitFor("늦게 등록한 터미널", () => visiblePanes().find((p) => !existing.has(p.term) && p.el.querySelector<HTMLElement>(".terminal")?.dataset.pty), 8000).catch(() => null);
+  const elapsed = performance.now() - t0;
+  devHooks.wakeListenDelay = undefined;
+  check("깨우기: 터미널은 깨우기 이벤트 등록이 끝난 뒤에 뜸", !!spawned && elapsed >= 1400, `${Math.round(elapsed)}ms`);
+  await menu("close_pane");
 }
 
 // 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
@@ -2270,6 +2381,7 @@ export async function runSelftest(root: string, scenario: string) {
     await testCreate(root, first);
     await testRename(root, first);
     await testImeUnit();
+    testTerminalReplyUnit();
     testWorkspaceStateUnit();
     await testGroups(first);
     await testGroupWorktree(root, first);

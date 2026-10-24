@@ -272,6 +272,8 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
   const [ending, setEnding] = useState<Tab | null>(null);
   // 세션 추가 창을 연 탭
   const [adding, setAdding] = useState<number | null>(null);
+  // 채팅 깨우기를 기다리는 창 → 바로 깨우기 (src-tauri/src/pty.rs wake)
+  const [waking, setWaking] = useState<Record<number, () => void>>({});
   const activeRef = useRef(s.active);
   activeRef.current = s.tabs.some((tab) => tab.id === s.active) ? s.active : -1;
   // 탭마다 터미널을 다시 띄운 횟수. 터미널 key에 넣어서, 늘면 그 탭의 터미널을 새로 띄운다.
@@ -644,6 +646,11 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
                   <div className="pane-label">
                     {session.setup ? t("session.setup") : session.name}
                     {session.readOnly && <span className="pane-badge">{t("session.readOnly")}</span>}
+                    {waking[id] && (
+                      <button className="pane-badge wake" data-wake title={t("chat.wakeHint")} onClick={waking[id]}>
+                        {t("chat.wakePending")}
+                      </button>
+                    )}
                     {session.setup && setup && (
                       <span className={`pane-badge${setup.status === "failed" ? " error" : ""}`} data-setup-status={setup.status}>
                         {setup.status === "running" ? t("setup.running") : setup.status === "ok" ? t("setup.done") : setupProblem(setup)}
@@ -677,6 +684,15 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
                     {...commandOf(session)}
                     shiftEnter={session?.shiftEnter}
                     shellAfter={session?.setup ? false : undefined}
+                    onWake={(pending, wakeNow) =>
+                      setWaking((w) => {
+                        if (!pending) {
+                          const { [id]: _, ...rest } = w;
+                          return rest;
+                        }
+                        return { ...w, [id]: wakeNow };
+                      })
+                    }
                     // 작업그룹 세션(명령이 있는 것)은 채팅방에 "작업그룹/역할"로 참여한다 (원본 작업그룹은 origin)
                     chat={session?.command && !session.setup ? { project: s.root, name: `${tab.worktree ?? "origin"}/${session.name}`, key: session.sid ?? String(id) } : undefined}
                     focused={visible && active && tab.focus === id}

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -41,15 +42,29 @@ type Props = {
   // 채팅방에 참여할 세션: 프로젝트(원본 폴더), 참여자 이름, 창마다 고정인 키. 인자의 {chat}이 이 창의 MCP 주소로 바뀐다
   // (src-tauri/src/chat.rs)
   chat?: { project: string; name: string; key: string };
+  // 채팅 깨우기를 기다리는지 바뀔 때 (src-tauri/src/pty.rs wake). wakeNow: 기다리지 않고 바로 깨운다
+  onWake?: (pending: boolean, wakeNow: () => void) => void;
 };
 
-export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError }: Props) {
+// xterm이 프로그램의 질의에 스스로 보내는 응답 (xterm 6.0 InputHandler·CoreBrowserTerminal의 triggerDataEvent 전부):
+// 장치 속성 CSI ? … c / CSI > … c, 상태 CSI 0 n, 커서 위치 CSI 행;열 R / CSI ? 행;열 R, 창 정보 CSI 8|4|6;…;… t,
+// 모드 질의 CSI ? … $ y, DCS 응답(ESC P … ESC \), OSC 색 응답, 포커스 CSI I / CSI O. 키보드가 만드는 CSI는 ~, A-D, H, F,
+// P-S, Z로 끝나서 c·n·t·$y와 겹치지 않는다. R은 ⇧F3 등(CSI 1;수식 R)과 모양이 같지만 글자를 쓰는 키가 아니라 응답으로 봐도
+// 초안 판단에는 상관없다 (리뷰 후속 P2: CSI 0 n, CSI ? 1;1 R을 놓쳤다).
+export const isTerminalReply = (data: string) =>
+  /^\x1b\[[?>]?[\d;]*[cnRt]$/.test(data) ||
+  /^\x1b\[\??[\d;]*\$y$/.test(data) ||
+  /^\x1b\[[IO]$/.test(data) ||
+  /^\x1b\][\s\S]*(\x07|\x1b\\)$/.test(data) ||
+  /^\x1bP[\s\S]*\x1b\\$/.test(data);
+
+export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter, chat });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, theme, t, command, fallback, shiftEnter, shellAfter, chat };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, shiftEnter, shellAfter, chat });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, shiftEnter, shellAfter, chat };
 
   useEffect(() => {
     const el = ref.current!;
@@ -101,9 +116,35 @@ export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat,
       else if (!disposed) latest.current.onExit(msg.exit);
     };
 
+    // 채팅 깨우기 상태 ({ pty, pending }). 생성 응답(id)보다 먼저 온 것은 모아 두었다가 id를 받으면 반영한다.
+    // 변경 번호(seq)가 더 오래된 상태는 버린다 (이벤트 순서가 바뀔 수 있다. 리뷰 P2: 앞 깨우기의 해제가 새 대기를 지웠다).
+    // 터미널은 등록이 끝난 뒤 띄운다 (리뷰 P2: 등록 전에 온 대기 상태를 놓쳤다).
+    type Wake = { pty: number; pending: boolean; seq: number };
+    const early = new Map<number, Wake>();
+    let seen = 0;
+    const wake = (w: Wake) => {
+      if (w.seq <= seen) return;
+      seen = w.seq;
+      const target = id!;
+      latest.current.onWake?.(w.pending, () => invoke("chat_wake_now", { id: target }));
+    };
+    const wakes = (async () => {
+      if (import.meta.env.DEV && devHooks.wakeListenDelay) await new Promise((r) => setTimeout(r, devHooks.wakeListenDelay));
+      return listen<Wake>("chat-wake", ({ payload }) => {
+        if (disposed) return;
+        if (id === undefined) {
+          if ((early.get(payload.pty)?.seq ?? 0) < payload.seq) early.set(payload.pty, payload);
+        } else if (payload.pty === id) wake(payload);
+      });
+    })();
+
     const { command, fallback, shellAfter, chat } = latest.current;
     const args = { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, fallback: fallback ?? null, shellAfter: shellAfter ?? null, chat: chat ?? null };
-    invoke<number>("pty_spawn", args).then(
+    // 등록에 실패해도 터미널은 띄운다 (깨우기 배지만 못 본다)
+    wakes.then(
+      () => undefined,
+      () => undefined,
+    ).then(() => (disposed ? new Promise<number>(() => {}) : invoke<number>("pty_spawn", args))).then(
       async (newId) => {
         // 자체 테스트: 생성 응답이 늦게 오는 순서를 만든다 (그 사이 끝난 명령의 종료를 잃지 않는지)
         if (import.meta.env.DEV && devHooks.spawnDelay) await new Promise((r) => setTimeout(r, devHooks.spawnDelay));
@@ -113,6 +154,9 @@ export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat,
           return;
         }
         id = newId;
+        if (import.meta.env.DEV) el.dataset.pty = String(newId);
+        if (early.has(newId)) wake(early.get(newId)!);
+        early.clear();
       },
       (e) => {
         term.write(`\r\n[${latest.current.t("terminal.spawnFailed", { error: String(e) })}]\r\n`);
@@ -123,10 +167,18 @@ export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat,
     // 입력은 앞의 전송이 끝난 뒤에 보낸다. invoke는 호출마다 따로 가서 도착 순서가 보장되지 않는다
     // (tauri scripts/ipc-protocol.js). 한글 보정의 DEL+글자가 앞 글자보다 먼저 가면 엉뚱한 글자를 지운다.
     let sending: Promise<unknown> = Promise.resolve();
+    // 사용자 입력인지 (깨우기가 입력 중인지 본다, src-tauri/src/pty.rs Input): 키·붙여넣기·IME 이벤트 직후에 나온 데이터이고
+    // 터미널이 스스로 보내는 응답 모양이 아닐 때. onData에는 xterm의 자동 응답(커서 위치, 포커스, 장치 속성 등)도 온다
+    // (리뷰 P2). IME 조합 결과는 xterm이 조금 뒤(setTimeout)에 보내서 시간 창을 둔다.
+    let userAt = -Infinity;
+    const userEvent = () => (userAt = performance.now());
+    const userEvents = ["keydown", "keypress", "beforeinput", "input", "paste", "compositionstart", "compositionupdate", "compositionend"];
+    userEvents.forEach((e) => term.textarea?.addEventListener(e, userEvent, true));
     const input = term.onData((data) => {
       if (id === undefined) return;
       const target = id;
-      sending = sending.then(() => invoke("pty_write", { id: target, data })).catch(() => {});
+      const user = performance.now() - userAt < 300 && !isTerminalReply(data);
+      sending = sending.then(() => invoke("pty_write", { id: target, data, user })).catch(() => {});
     });
     const resize = term.onResize(({ cols, rows }) => {
       if (id !== undefined) invoke("pty_resize", { id, cols, rows });
@@ -140,6 +192,8 @@ export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat,
 
     return () => {
       disposed = true;
+      wakes.then((f) => f(), () => {});
+      userEvents.forEach((e) => term.textarea?.removeEventListener(e, userEvent, true));
       observer.disconnect();
       input.dispose();
       unfixIme();

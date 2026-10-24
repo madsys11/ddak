@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tauri::State;
@@ -50,6 +50,51 @@ struct Session {
     cwd: PathBuf,
     // 목록에서 빠질 때 (닫기·작업그룹 끝내기) 부른다. 채팅방에서 나간다 (pty_spawn).
     leave: Option<Box<dyn FnOnce() + Send>>,
+    // 채팅방 참여 토큰 (깨울 터미널을 찾는다)
+    chat_token: Option<String>,
+    // 사용자의 마지막 입력 (깨우기가 입력 중인지 본다)
+    input: Input,
+}
+
+// 사용자 입력 (pty_write). 깨우기는 쓰는 중인 초안과 섞이지 않게, 마지막으로 친 것이 Enter(제출)이고 IDLE 동안 입력이
+// 없을 때만 알림을 입력한다. 한 번도 치지 않았으면 비어 있는 것으로 본다.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Input {
+    last: Option<Instant>,
+    submitted: bool,
+}
+
+impl Input {
+    const NONE: Input = Input { last: None, submitted: true };
+
+    fn typed(&mut self, data: &str, now: Instant) {
+        self.last = Some(now);
+        // ⇧Enter(ESC CR)는 줄바꿈이라 제출이 아니다 (claude·codex 기본 설정)
+        self.submitted = data.ends_with('\r') && !data.ends_with("\u{1b}\r");
+    }
+
+    fn quiet(&self, now: Instant) -> bool {
+        self.submitted && self.last.is_none_or(|t| now.duration_since(t) >= WAKE_IDLE)
+    }
+}
+
+// 깨우기 (docs/spec.md "채팅방 설계"): 멘션된 세션의 터미널에 알림 문구를 쓰고 WAKE_GAP 뒤에 Enter를 따로 보낸다
+// (한 번에 보내면 claude가 붙여넣기로 봐서 제출하지 않는다. docs/reviews/2026-10-24-chat-wake-experiment.md).
+pub const WAKE_IDLE: Duration = Duration::from_secs(3);
+const WAKE_GAP: Duration = Duration::from_millis(300);
+
+fn wake_notice(from: &[String]) -> String {
+    format!(
+        "[ddak] New chat message from {}. Read it with the ddak read_messages tool, then reply with post_message and @mention whoever should get the reply.",
+        from.join(", ")
+    )
+}
+
+// 깨우기를 기다리는 터미널: 보낸 사람들, 바로 깨우기 (사용자가 누름)
+#[derive(Default)]
+struct Pending {
+    from: Vec<String>,
+    now: bool,
 }
 
 impl Session {
@@ -64,13 +109,18 @@ impl Session {
 #[derive(Default)]
 pub struct Ptys {
     next_id: AtomicU32,
-    sessions: Mutex<HashMap<u32, Session>>,
+    sessions: Arc<Mutex<HashMap<u32, Session>>>,
     // 닫았지만 아직 다 끝나지 않은 터미널 (프로세스, 띄운 폴더). 다 끝나면 빠진다. 작업그룹을 끝낼 때 이것도 기다린다
     // (리뷰 후속 P1: 먼저 닫은 터미널의 백그라운드 작업을 놓쳤다).
     closing: Arc<Mutex<HashMap<u32, (Arc<Mutex<Proc>>, PathBuf)>>>,
     // 끝내는 중인 작업그룹 폴더. 그 안에는 새 터미널을 띄우지 않는다 (리뷰 후속 P1: 확인 뒤 새로 뜬 터미널이 커밋했다).
     // 띄우기는 읽기로 잡은 채 확인·띄우기·등록을 하고, 잠그기는 쓰기로 잡으므로 띄우는 중인 것은 등록을 마친 뒤에 잠근다.
     ending: RwLock<Vec<PathBuf>>,
+    // 깨우기를 기다리는 터미널 (wake, wake_tick)
+    wakes: Mutex<HashMap<u32, Pending>>,
+    // 깨우기 상태 변경 번호. wakes를 잡은 채 매긴다. 이벤트는 잠금 밖에서 보내 순서가 바뀔 수 있어서, 프론트가 터미널마다
+    // 더 오래된 번호를 버린다 (리뷰 P2: 앞 깨우기의 해제가 새 대기를 지웠다).
+    wake_seq: AtomicU64,
 }
 
 // 셸 한 단어로 감싼다: 작은따옴표 안에서는 아무것도 해석되지 않고, 작은따옴표 자체만 '\''로 끊어 넣는다.
@@ -172,7 +222,7 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None })
+    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -320,8 +370,12 @@ fn open(
     size: PtySize,
     output: impl FnMut(Vec<u8>) -> bool + Send + 'static,
     exited: impl FnOnce(Option<u32>) + Send + 'static,
-    leave: Leave,
+    joined: Option<Joined>,
 ) -> Result<u32, String> {
+    let (leave, chat_token): (Leave, _) = match joined {
+        Some(j) => (Some(j.leave), Some(j.token)),
+        None => (None, None),
+    };
     let ending = ptys.ending.read().unwrap();
     let refuse = std::fs::canonicalize(cwd).is_ok_and(|real| ending.iter().any(|d| real.starts_with(d)));
     let spawned = if refuse { Err(format!("{cwd}: this work group is ending")) } else { spawn(cwd, command, fallback, shell_after, size, output, exited) };
@@ -335,6 +389,7 @@ fn open(
         }
     };
     session.leave = leave;
+    session.chat_token = chat_token;
     let id = ptys.next_id.fetch_add(1, Ordering::Relaxed);
     ptys.sessions.lock().unwrap().insert(id, session);
     Ok(id)
@@ -353,22 +408,28 @@ pub struct ChatJoin {
 
 type Leave = Option<Box<dyn FnOnce() + Send>>;
 
-// 채팅방에 참여시키고 인자의 {chat}을 그 주소로 바꾼다. 나가기를 함께 돌려준다.
+// 채팅방 참여: 나가기와 토큰
+struct Joined {
+    leave: Box<dyn FnOnce() + Send>,
+    token: String,
+}
+
+// 채팅방에 참여시키고 인자의 {chat}을 그 주소로 바꾼다. 나가기와 토큰을 함께 돌려준다.
 fn join_chat(
     chats: Option<Arc<crate::chat::Chats>>,
     chat: Option<ChatJoin>,
     command: Option<Vec<String>>,
     fallback: Option<Vec<String>>,
-) -> (Option<Vec<String>>, Option<Vec<String>>, Leave) {
+) -> (Option<Vec<String>>, Option<Vec<String>>, Option<Joined>) {
     let joined = chat.zip(chats).map(|(c, chats)| {
         let project = std::fs::canonicalize(&c.project).unwrap_or_else(|_| PathBuf::from(&c.project));
         let (token, url, _) = chats.join(&project, &c.name, &c.key);
-        let leave: Box<dyn FnOnce() + Send> = Box::new(move || chats.leave(&token));
-        (url, leave)
+        let t = token.clone();
+        (url, Joined { leave: Box::new(move || chats.leave(&t)), token })
     });
     let url = joined.as_ref().map_or(String::new(), |(url, _)| url.clone());
     let fill = |argv: Option<Vec<String>>| argv.map(|a| a.into_iter().map(|x| x.replace("{chat}", &url)).collect::<Vec<_>>());
-    (fill(command), fill(fallback), joined.map(|(_, leave)| leave))
+    (fill(command), fill(fallback), joined.map(|(_, j)| j))
 }
 
 // chat이 있으면 채팅방에 참여시키고, 명령·fallback 인자의 {chat}을 그 창의 MCP 주소로 바꾼다 (src-tauri/src/chat.rs).
@@ -388,7 +449,7 @@ pub fn pty_spawn(
     shell_after: Option<bool>,
 ) -> Result<u32, String> {
     let on_exit = on_data.clone();
-    let (command, fallback, leave) = join_chat(chats.0.clone(), chat, command, fallback);
+    let (command, fallback, joined) = join_chat(chats.0.clone(), chat, command, fallback);
     open(
         &ptys,
         &cwd,
@@ -400,15 +461,98 @@ pub fn pty_spawn(
         move |code| {
             let _ = on_exit.send(InvokeResponseBody::Json(serde_json::json!({ "exit": code }).to_string()));
         },
-        leave,
+        joined,
     )
 }
 
+// user: 사용자가 친 것 (키·붙여넣기·IME). 터미널이 스스로 보낸 응답(커서 위치 등)은 깨우기의 입력 상태에 넣지 않는다
+// (리뷰 P2: 커서 위치 응답 때문에 입력 중으로 보고 깨우지 않았다). 무엇이 사용자 입력인지는 프론트가 정한다 (Terminal.tsx).
 #[tauri::command]
-pub fn pty_write(ptys: State<'_, Ptys>, id: u32, data: String) -> Result<(), String> {
+pub fn pty_write(ptys: State<'_, Ptys>, id: u32, data: String, user: Option<bool>) -> Result<(), String> {
+    write_input(&ptys, id, &data, user.unwrap_or(false))
+}
+
+fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<(), String> {
     let mut sessions = ptys.sessions.lock().unwrap();
     let session = sessions.get_mut(&id).ok_or("no such pty")?;
+    if user {
+        session.input.typed(data, Instant::now());
+    }
     session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())
+}
+
+// 이 토큰들로 참여한 터미널이 from의 메시지를 받았다: 깨우기를 기다린다. (기다리게 된 터미널, 변경 번호)
+pub fn wake(ptys: &Ptys, tokens: &[String], from: &str) -> Vec<(u32, u64)> {
+    let sessions = ptys.sessions.lock().unwrap();
+    let mut wakes = ptys.wakes.lock().unwrap();
+    let ids: Vec<u32> = sessions.iter().filter(|(_, s)| s.chat_token.as_ref().is_some_and(|t| tokens.contains(t))).map(|(id, _)| *id).collect();
+    ids.into_iter()
+        .map(|id| {
+            let p = wakes.entry(id).or_default();
+            if !p.from.iter().any(|f| f == from) {
+                p.from.push(from.to_string());
+            }
+            (id, ptys.wake_seq.fetch_add(1, Ordering::Relaxed) + 1)
+        })
+        .collect()
+}
+
+// 깨우기를 기다리는 터미널을 본다 (주기적으로, now는 지금). 사용자가 입력 중이 아니거나 바로 깨우기를 눌렀으면 알림을
+// 쓰고, WAKE_GAP 뒤에 그 사이 사용자가 입력하지 않았으면 Enter를 보낸다. 입력했으면 Enter를 보내지 않는다 (알림이
+// 초안과 함께 제출되지 않게). 대기에서 빠진 터미널과 변경 번호 (깨웠거나, 터미널이 없어져 그만둠)
+pub fn wake_tick(ptys: &Ptys, now: Instant) -> Vec<(u32, u64)> {
+    let mut sessions = ptys.sessions.lock().unwrap();
+    let mut wakes = ptys.wakes.lock().unwrap();
+    let (mut woke, mut gone) = (Vec::new(), Vec::new());
+    for (id, p) in wakes.iter() {
+        let Some(session) = sessions.get_mut(id) else {
+            gone.push(*id);
+            continue;
+        };
+        if !(p.now || session.input.quiet(now)) {
+            continue;
+        }
+        if session.writer.write_all(wake_notice(&p.from).as_bytes()).is_err() {
+            gone.push(*id);
+            continue;
+        }
+        woke.push(*id);
+        let (all, id, before) = (ptys.sessions.clone(), *id, session.input);
+        std::thread::spawn(move || {
+            std::thread::sleep(WAKE_GAP);
+            if let Some(s) = all.lock().unwrap().get_mut(&id) {
+                if s.input == before {
+                    let _ = s.writer.write_all(b"\r");
+                }
+            }
+        });
+    }
+    woke.into_iter()
+        .chain(gone)
+        .map(|id| {
+            wakes.remove(&id);
+            (id, ptys.wake_seq.fetch_add(1, Ordering::Relaxed) + 1)
+        })
+        .collect()
+}
+
+// 깨우기 확인을 주기적으로 돌린다. 대기에서 빠진 터미널은 "chat-wake" 이벤트로 알린다 ({ pty, pending: false, seq }).
+pub fn start_waker(app: tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(250));
+        for (id, seq) in wake_tick(&app.state::<Ptys>(), Instant::now()) {
+            let _ = app.emit("chat-wake", serde_json::json!({ "pty": id, "pending": false, "seq": seq }));
+        }
+    });
+}
+
+// 깨우기를 기다리는 터미널을 사용자가 눌러 바로 깨운다 (다음 확인 때)
+#[tauri::command]
+pub fn chat_wake_now(ptys: State<'_, Ptys>, id: u32) {
+    if let Some(p) = ptys.wakes.lock().unwrap().get_mut(&id) {
+        p.now = true;
+    }
 }
 
 #[tauri::command]
@@ -752,6 +896,88 @@ mod tests {
         let (command, _, leave) = join_chat(None, Some(ChatJoin { project: "/".into(), name: "x".into(), key: "x".into() }), argv("{chat}"), None);
         assert!(command.unwrap()[2].is_empty() && leave.is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 입력 중인지: 한 번도 안 쳤거나, 마지막으로 친 것이 Enter이고 WAKE_IDLE이 지났을 때만 깨울 수 있다. ⇧Enter(ESC CR)는
+    // 줄바꿈이다.
+    #[test]
+    fn input_quiet_only_after_submit_and_idle() {
+        let t = Instant::now();
+        let mut i = Input::NONE;
+        assert!(i.quiet(t));
+        i.typed("abc", t);
+        assert!(!i.quiet(t + WAKE_IDLE * 2), "초안이 있는데 깨움");
+        i.typed("\r", t);
+        assert!(!i.quiet(t + Duration::from_secs(1)) && i.quiet(t + WAKE_IDLE));
+        i.typed("\u{1b}\r", t);
+        assert!(!i.quiet(t + WAKE_IDLE * 2), "⇧Enter를 제출로 봄");
+    }
+
+    // 깨우기: 멘션된 참여자의 터미널에 알림을 쓰고 잠시 뒤 Enter를 따로 보낸다. 보낸 사람은 모아서 한 번에. 초안이 있거나
+    // 막 쳤으면 기다리고, 알림을 쓴 뒤 사용자가 치면 Enter를 보내지 않는다. 터미널이 없어지면 그만둔다.
+    #[test]
+    fn wake_writes_notice_then_enter_when_quiet() {
+        let ptys = Ptys::default();
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let sink = out.clone();
+        let argv: Vec<String> = ["/bin/sh", "-c", "stty -echo; while read l; do echo \"GOT:$l\"; done"].iter().map(|a| a.to_string()).collect();
+        let joined = Joined { leave: Box::new(|| ()), token: "tok".into() };
+        let id = open(&ptys, "/", Some(&argv), None, false, SIZE, move |b| { sink.lock().unwrap().extend(b); true }, |_| (), Some(joined)).unwrap();
+        let text = || String::from_utf8_lossy(&out.lock().unwrap()).to_string();
+        let wait = |what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !text().contains(what) {
+                assert!(Instant::now() < deadline, "{what} 없음: {:?}", text());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let first = wake(&ptys, &["tok".into(), "other".into()], "origin/a");
+        assert_eq!(first.iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        wake(&ptys, &["tok".into()], "origin/b");
+        wake(&ptys, &["tok".into()], "origin/a");
+        // 초안이 있으면 오래 지나도 기다린다
+        write_input(&ptys, id, "draft", true).unwrap();
+        assert!(wake_tick(&ptys, Instant::now() + WAKE_IDLE * 2).is_empty());
+        // 터미널이 스스로 보낸 응답(커서 위치)은 입력 상태에 넣지 않는다 (리뷰 P2)
+        write_input(&ptys, id, "\u{1b}[1;1R", false).unwrap();
+        assert!(wake_tick(&ptys, Instant::now() + WAKE_IDLE * 2).is_empty(), "응답이 초안을 지움");
+        write_input(&ptys, id, "\r", true).unwrap();
+        wait("GOT:draft");
+        // 막 제출했으면 기다리고, 조용해지면 깨운다
+        assert!(wake_tick(&ptys, Instant::now()).is_empty());
+        write_input(&ptys, id, "\u{1b}[5;1R", false).unwrap();
+        let done = wake_tick(&ptys, Instant::now() + WAKE_IDLE);
+        assert_eq!(done.iter().map(|w| w.0).collect::<Vec<_>>(), [id], "응답 때문에 깨우지 않음");
+        // 변경 번호는 늘어난다 (프론트가 오래된 상태를 버린다)
+        assert!(done[0].1 > first[0].1);
+        // (가짜 응답 바이트도 PTY로 가서 read의 줄 앞에 붙는다)
+        wait("[ddak] New chat message from origin/a, origin/b. Read it with the ddak read_messages tool");
+        assert!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).is_empty(), "한 번 깨운 뒤에도 또 깨움");
+
+        // 알림과 Enter 사이에 온 자동 응답(사용자 입력 아님)은 Enter를 막지 않는다 (리뷰 후속 P2)
+        wake(&ptys, &["tok".into()], "origin/r");
+        assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        write_input(&ptys, id, "\u{1b}[0n", false).unwrap();
+        wait("from origin/r. Read it with the ddak read_messages tool");
+
+        // 알림을 쓴 뒤 사용자가 치면 Enter를 보내지 않는다 (사용자가 Enter를 쳐야 함께 제출된다)
+        wake(&ptys, &["tok".into()], "origin/c");
+        assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        write_input(&ptys, id, "y", true).unwrap();
+        std::thread::sleep(WAKE_GAP * 3);
+        assert!(!text().contains("GOT:[ddak] New chat message from origin/c"), "사용자 입력 뒤에 Enter를 보냄");
+        write_input(&ptys, id, "\r", true).unwrap();
+        wait("from origin/c. Read it with the ddak read_messages tool, then reply with post_message and @mention whoever should get the reply.y");
+
+        // 바로 깨우기는 초안이 있어도 깨운다. 터미널이 없어지면 그만둔다
+        wake(&ptys, &["tok".into()], "origin/d");
+        write_input(&ptys, id, "z", true).unwrap();
+        ptys.wakes.lock().unwrap().get_mut(&id).unwrap().now = true;
+        assert_eq!(wake_tick(&ptys, Instant::now()).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        wake(&ptys, &["tok".into()], "origin/e");
+        close(&ptys, id);
+        assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "없어진 터미널을 그만두지 않음");
     }
 
     // 감싼 인자를 실제 셸에 넘겨서 그대로 돌아오는지 본다.

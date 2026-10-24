@@ -76,6 +76,8 @@ export const en = {
   "chat.you": "you",
   "chat.placeholder": "Message the sessions (@name to notify, Enter to send, ⇧Enter for a new line)",
   "chat.listenError": "This panel cannot refresh itself ({detail}). Remove and add the project again to retry.",
+  "chat.wakePending": "chat message waiting",
+  "chat.wakeHint": "A chat message mentions this session. It is told once you stop typing and press Enter. Click to tell it now.",
   "chat.unread": "New message for you",
   "addSession.menu": "Add Session…",
   "addSession.title": "Add Session",
