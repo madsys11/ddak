@@ -3,6 +3,7 @@ use tauri::Manager;
 mod chat;
 mod clone;
 mod fs;
+mod git;
 mod groups;
 mod menu;
 mod prepare;
@@ -45,6 +46,10 @@ pub fn run() {
             repos::repo_link,
             repos::repo_clone,
             worktrees::group_create,
+            git::git_repos,
+            git::git_graph,
+            git::git_commit,
+            git::git_fingerprint,
             worktrees::group_status,
             worktrees::group_end,
             workspace::workspace_load,

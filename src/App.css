@@ -287,6 +287,17 @@ button:hover {
 .tabbar-spacer {
   flex: 1;
 }
+/* 탭 바 버튼 사이 구분선 (Git Graph | 채팅) */
+.tabbar-sep {
+  flex: none;
+  align-self: center;
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  /* --border는 다크 테마 탭 바 배경과 거의 같아 안 보인다. 아이콘의 흐린 글자색을 반투명으로 */
+  background: var(--fg-dim);
+  opacity: 0.45;
+}
 
 .tab-body {
   flex: 1;
@@ -791,4 +802,184 @@ button.secondary {
   background: none;
   border-color: var(--accent);
   cursor: pointer;
+}
+
+/* Git Graph 탭 (src/GitGraph.tsx) */
+.git-graph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--terminal-bg);
+}
+.git-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.git-repo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-dim);
+}
+.git-repo select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.git-count,
+.git-none {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.git-none {
+  padding: 10px;
+}
+.git-error {
+  padding: 6px 10px;
+  color: var(--error);
+  white-space: pre-wrap;
+}
+.git-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.git-list {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+.git-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.git-row:hover {
+  background: var(--hover);
+}
+.git-row.selected {
+  background: var(--row-active);
+}
+.git-lanes {
+  flex: none;
+  overflow: hidden;
+}
+.git-lanes path {
+  fill: none;
+  stroke-width: 2;
+}
+.git-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.git-author,
+.git-date {
+  flex: none;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.git-author {
+  width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.git-sha {
+  flex: none;
+  color: var(--fg-dim);
+  font-family: Menlo, monospace;
+  font-size: 11px;
+}
+.git-ref {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 16px;
+}
+.git-ref.branch {
+  border-color: var(--accent);
+}
+.git-ref.remote {
+  color: var(--fg-dim);
+}
+.git-ref.tag {
+  border-style: dashed;
+}
+.git-ref.head {
+  font-weight: 600;
+  border-color: var(--fg);
+}
+.git-ref.group {
+  color: var(--menu-hover-fg);
+  background: var(--menu-hover-bg);
+  border-color: var(--menu-hover-bg);
+}
+.git-detail {
+  width: 380px;
+  flex: none;
+  overflow: auto;
+  padding: 10px 12px;
+  border-left: 1px solid var(--border);
+}
+.git-detail-sha {
+  font-family: Menlo, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+.git-detail-meta {
+  margin-top: 4px;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.git-parent {
+  margin-right: 4px;
+  padding: 0 4px;
+  font-family: Menlo, monospace;
+  font-size: 11px;
+}
+.git-message {
+  margin: 10px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+.git-files-title {
+  color: var(--fg-dim);
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.git-file {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  word-break: break-all;
+}
+.git-status {
+  flex: none;
+  width: 12px;
+  font-family: Menlo, monospace;
+  color: var(--fg-dim);
+}
+.git-status.s-A {
+  color: var(--graph-3);
+}
+.git-status.s-D {
+  color: var(--error);
 }

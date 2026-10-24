@@ -28,6 +28,8 @@ const ZOOM_ITEMS: &[(&str, &str)] = &[
 ];
 
 const CLOSE_WINDOW: &str = "close_window";
+// 보기 메뉴: 프로젝트의 Git Graph 탭을 연다 (src/GitGraph.tsx). 단축키는 없다.
+const GIT_GRAPH: &str = "git_graph";
 const EDIT_GROUPS: &str = "edit_groups";
 const THEME_PREFIX: &str = "theme:";
 const LOCALE_PREFIX: &str = "locale:";
@@ -92,7 +94,7 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         }
         sub.build()
     };
-    let mut view = SubmenuBuilder::new(app, l("view"));
+    let mut view = SubmenuBuilder::new(app, l("view")).item(&MenuItemBuilder::with_id(GIT_GRAPH, l(GIT_GRAPH)).build(app)?).separator();
     for (id, accel) in ZOOM_ITEMS {
         view = view.item(&MenuItemBuilder::with_id(*id, l(id)).accelerator(*accel).build(app)?);
     }
@@ -138,6 +140,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) {
                 let _ = window.close();
             }
         } else if TERMINAL_ITEMS.iter().map(|(item, _)| *item).chain(ZOOM_ITEMS.iter().map(|(item, _)| *item)).any(|item| item == id)
+            || id == GIT_GRAPH
             || id.starts_with(THEME_PREFIX)
             || id.starts_with(LOCALE_PREFIX)
         {

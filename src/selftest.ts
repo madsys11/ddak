@@ -1192,6 +1192,9 @@ function testWorkspaceStateUnit() {
   check("복원 상태: 같은 탭 안 중복 창 번호는 거부", fromSaved(saved(split(2, 2)), "/x") === null);
   check("복원 상태: 다른 탭과 중복 창 번호는 거부", fromSaved(saved(split(2, 3), 2), "/x") === null);
   check("복원 상태: 탭 번호와 창 번호 중복도 거부", fromSaved(saved(split(1, 2)), "/x") === null);
+  const gitTab = (git: unknown) => JSON.stringify({ version: 1, active: 1, tabs: [{ id: 1, layout: { pane: 2 }, focus: 2, cwd: "/x", git }], sessions: {} });
+  check("복원 상태: Git Graph 탭과 고른 저장소를 읽음", fromSaved(gitTab({ repo: "server" }), "/x")?.tabs[0].git?.repo === "server");
+  check("복원 상태: Git Graph 탭 모양이 틀리면 거부", fromSaved(gitTab({ repo: 3 }), "/x") === null);
 }
 
 // 터미널 자동 응답 판별 (깨우기의 사용자 입력에서 뺀다, src/Terminal.tsx isTerminalReply)
@@ -1421,7 +1424,7 @@ async function testGroupWorktree(root: string, first: Terminal) {
     const [br, ir] = [btn.getBoundingClientRect(), btn.querySelector("svg")?.getBoundingClientRect()];
     return ir ? ir.top + ir.height / 2 - (br.top + br.height / 2) : NaN;
   });
-  check("작업그룹 추가: 탭 바 버튼 아이콘 다섯(채팅 포함)이 세로 가운데", offs.length === 5 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
+  check("작업그룹 추가: 탭 바 버튼 아이콘 여섯(Git Graph·채팅 포함)이 세로 가운데", offs.length === 6 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
   // 준비 스크립트에 명령을 넣으면 다음 작업그룹부터 세션 아래 setup 창에서 돌고, 세션은 준비가 성공한 뒤에 뜬다.
   // 플래그 파일로 멈춰 두거나(hold) 실패하게(fail) 한다.
   const flags = setupPath.replace(/\/[^/]+$/, "");
@@ -1994,6 +1997,117 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   await menu("close_pane");
 }
 
+// Git Graph 탭 (src/GitGraph.tsx): 프로젝트마다 하나. 저장소를 골라 커밋 그래프를 보인다. 참조·HEAD와 작업그룹(터미널 탭의
+// 이름·세션)을 커밋에 붙이고, 참조가 바뀌면 다시 읽고, 커밋을 누르면 메시지와 바뀐 파일을 보인다. 채팅과 함께 쓴다.
+async function testGitGraph(root: string, first: Terminal) {
+  const ws = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const gitBtn = () => ws().querySelector<HTMLElement>("[data-action=git]")!;
+  const view = () => ws().querySelector<HTMLElement>(".tab-body:not([style*='none']) .git-graph");
+  const rows = () => [...(view()?.querySelectorAll<HTMLElement>(".git-row") ?? [])];
+  const row = (subject: string) => rows().find((r) => r.querySelector(".git-subject")?.lastChild?.textContent === subject);
+  const chips = (r: HTMLElement | undefined, kind: string) => [...(r?.querySelectorAll<HTMLElement>(`.git-ref.${kind}`) ?? [])].map((c) => c.textContent);
+  const before = tabCount();
+  // 그래프 첫 읽기만 실패시킨다: 다음 확인(3초) 때 다시 읽어야 한다 (리뷰 P2)
+  let graphCalls = 0;
+  devHooks.gitGraphFail = () => graphCalls++ === 0;
+  gitBtn().click();
+  await waitFor("Git Graph 탭", () => view() && tabCount() === before + 1, 5000);
+  const retried = await waitFor("실패 뒤 다시 읽기", () => rows().length > 0 && !view()!.querySelector(".git-error"), 8000).then(() => true, () => false);
+  devHooks.gitGraphFail = undefined;
+  check("Git Graph: 그래프 읽기가 한 번 실패해도 다음 확인 때 다시 읽음", retried && graphCalls >= 2, `${retried} ${graphCalls}`);
+  // 지문 조회가 한 번 실패하면 오류를 보이고, 다음 조회가 성공하면 (지문이 같아도) 지운다 (리뷰 후속 P3)
+  let printCalls = 0;
+  devHooks.gitFingerprintFail = () => printCalls++ === 0;
+  const shown = await waitFor("지문 오류", () => view()!.querySelector(".git-error"), 5000).then(() => true, () => false);
+  const cleared = await waitFor("오류 지움", () => !view()!.querySelector(".git-error") && printCalls >= 2, 5000).then(() => true, () => false);
+  devHooks.gitFingerprintFail = undefined;
+  check("Git Graph: 지문 조회 오류는 다음 조회가 성공하면 지움", shown && cleared && rows().length > 0, `${shown} ${cleared} ${printCalls}`);
+  gitBtn().click();
+  await clickMenu("View", "Git Graph");
+  await sleep(300);
+  const splitOff = [...ws().querySelectorAll<HTMLButtonElement>(".tabbar-btn")].filter((b) => b.disabled).length === 2;
+  check(
+    "Git Graph: 탭 바 버튼·보기 메뉴로 열고, 프로젝트마다 하나 (다시 누르면 그 탭), 분할은 끔",
+    tabCount() === before + 1 && activeTabEl()?.querySelector(".tab-title")?.textContent === "Git Graph" && splitOff,
+    `${tabCount()} ${activeTabEl()?.textContent} ${splitOff}`,
+  );
+
+  const repos = await invoke<{ name: string }[]>("git_repos", { project: root });
+  const select = () => view()!.querySelector<HTMLSelectElement>("select")!;
+  await waitFor("저장소 목록", () => select().options.length === repos.length && repos.length > 0, 5000);
+  check("Git Graph: 프로젝트의 저장소를 고를 수 있음", [...select().options].map((o) => o.value).join(",") === repos.map((r) => r.name).join(","), [...select().options].map((o) => o.value).join(","));
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select(), "server");
+  select().dispatchEvent(new Event("change", { bubbles: true }));
+  const kept = await waitFor("그래프", () => row("end-test"), 8000).catch(() => undefined);
+  const headRow = rows().find((r) => r.querySelector(".git-ref.head"));
+  check(
+    "Git Graph: 커밋과 참조(브랜치·HEAD), 원본 탭(작업그룹)과 세션을 HEAD 커밋에 표시",
+    chips(kept, "branch").includes(`ddak/${"test-6"}`) && !!headRow && chips(headRow, "group").some((g) => g?.startsWith("Test · shell")),
+    `${chips(kept, "branch")} | ${chips(headRow, "group")}`,
+  );
+
+  // 원본에 커밋하면 다시 읽는다 (참조가 바뀜)
+  await run(first, `git -C "${root}/server" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m graph-live`);
+  const live = await waitFor("새 커밋", () => row("graph-live"), 8000).catch(() => undefined);
+  check("Git Graph: 참조가 바뀌면 다시 읽어 새 커밋을 보임 (HEAD)", !!live && chips(live, "head").length === 1, rows()[0]?.textContent ?? "");
+
+  // 새 worktree로 만든 작업그룹: 그 worktree가 있는 커밋(원본 HEAD에서 시작)에 그 탭 이름과 세션을 붙인다
+  const tabsBefore = tabCount();
+  await clickMenu("Terminal", "New Work Group");
+  await waitFor("새 작업그룹", () => tabCount() === tabsBefore + 1 && !view(), 60000);
+  const groupTab = activeTabEl()!;
+  const groupName = groupTab.querySelector(".tab-title")!.textContent!;
+  gitBtn().click();
+  const tagged = await waitFor("작업그룹 표시", () => rows().find((r) => chips(r, "group").includes(`${groupName} · shell`)), 8000).catch(() => undefined);
+  check("Git Graph: 새 worktree 작업그룹의 탭 이름·세션을 그 worktree의 커밋에 표시", tagged === row("graph-live") && chips(tagged, "branch").includes(`ddak/${groupName}`), `${groupName} ${chips(tagged, "group")} ${chips(tagged, "branch")}`);
+  groupTab.querySelector<HTMLElement>("[title='Close Tab']")!.click();
+  await waitFor("작업그룹 탭 닫기", () => tabCount() === tabsBefore, 3000);
+  await waitFor("Git Graph로", () => view(), 3000).catch(() => null);
+
+  // end-test 상세를 읽은 뒤 graph-live를 고르고 그 응답을 늦춘다: 기다리는 동안 end-test 상세가 남아 보이지 않고, 응답이
+  // 오면 graph-live 상세 (리뷰 P2)
+  const liveSha = row("graph-live")?.dataset.sha;
+  const message = () => view()!.querySelector(".git-detail .git-message")?.textContent;
+  row("end-test")?.click();
+  await waitFor("end-test 상세", () => message() === "end-test", 5000).catch(() => null);
+  devHooks.gitDetailDelay = (sha) => (sha === liveSha ? 1500 : 0);
+  row("graph-live")?.click();
+  await sleep(300);
+  const waiting = message();
+  await waitFor("graph-live 상세", () => message() === "graph-live", 4000).catch(() => null);
+  devHooks.gitDetailDelay = undefined;
+  check("Git Graph: 다른 커밋을 고르면 응답을 기다리는 동안 이전 상세를 보이지 않음", waiting === undefined && message() === "graph-live", `${waiting} → ${message()}`);
+  // 상세 읽기가 실패하면 이전 상세(graph-live)를 남기지 않고 오류를 보인다
+  const endSha = row("end-test")?.dataset.sha;
+  devHooks.gitDetailFail = (sha) => sha === endSha;
+  row("end-test")?.click();
+  await waitFor("상세 실패", () => view()!.querySelector(".git-detail .git-error"), 3000).catch(() => null);
+  const failedPane = view()!.querySelector(".git-detail")?.textContent ?? "";
+  devHooks.gitDetailFail = undefined;
+  check("Git Graph: 상세 읽기가 실패하면 이전 상세 대신 오류", failedPane.includes("injected failure") && !failedPane.includes("graph-live"), failedPane);
+
+  // 커밋을 누르면 메시지와 바뀐 파일 (지금 고른 것이 end-test라 다른 커밋을 먼저 고른다. 같은 행을 다시 누르면 선택이 풀린다)
+  row("graph-live")?.click();
+  await sleep(300);
+  row("end-test")?.click();
+  const detail = () => view()!.querySelector<HTMLElement>(".git-detail");
+  // 누른 직후에는 이전 커밋(graph-live)의 상세가 아직 DOM에 남아 있어서 end-test 메시지를 기다린다
+  await waitFor("커밋 상세", () => detail()?.querySelector(".git-message")?.textContent === "end-test", 5000).catch(() => null);
+  const files = [...(detail()?.querySelectorAll<HTMLElement>("[data-file]") ?? [])].map((f) => f.dataset.file);
+  check("Git Graph: 커밋을 누르면 메시지와 바뀐 파일", detail()?.querySelector(".git-message")?.textContent === "end-test" && files.join(",") === "end-new.txt", `${detail()?.textContent}`);
+
+  // 채팅 패널과 함께 쓴다
+  ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  const chat = () => ws().querySelector<HTMLElement>(".chat-panel");
+  await waitFor("채팅", () => chat()?.style.display !== "none", 2000).catch(() => null);
+  const both = chat()?.style.display !== "none" && !!view() && view()!.getBoundingClientRect().width > 200;
+  check("Git Graph: 채팅 패널과 함께 보임", both, `${chat()?.style.display} ${view()?.getBoundingClientRect().width}`);
+  ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  await waitFor("채팅 닫기", () => chat()?.style.display === "none", 2000).catch(() => null);
+  activeTabEl()!.querySelector<HTMLElement>("[title='Close Tab']")!.click();
+  await waitFor("Git Graph 탭 닫기", () => tabCount() === before, 3000);
+}
+
 // 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
 async function testTabRename() {
   const tab = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active")!;
@@ -2182,7 +2296,15 @@ async function testLastExit(first: Terminal) {
     buttons.join("|"),
   );
   const btns = [...ws.querySelectorAll<HTMLButtonElement>(".tabbar-btn")];
-  check("닫기: 빈 화면에도 탭 바 (분할 버튼만 비활성)", btns.length === 5 && btns.map((b) => b.disabled).join() === "false,false,true,true,false", btns.map((b) => b.disabled).join());
+  // 순서: 터미널, 작업그룹, 분할 둘, Git Graph, 구분선, 채팅
+  const order = [...ws.querySelectorAll<HTMLElement>(".tabbar-btn, .tabbar-sep")]
+    .map((b) => (b.classList.contains("tabbar-sep") ? "|" : (b.dataset.action ?? ((b as HTMLButtonElement).disabled ? "split" : "terminal"))))
+    .join();
+  check(
+    "닫기: 빈 화면에도 탭 바 (분할 버튼만 비활성), 순서는 만드는 버튼 왼쪽·보는 버튼 오른쪽 끝",
+    btns.length === 6 && btns.map((b) => b.disabled).join() === "false,false,true,true,false,false" && order === "terminal,new-group,split,split,git,|,chat",
+    `${btns.map((b) => b.disabled).join()} ${order}`,
+  );
   ws.querySelector<HTMLElement>("[data-action=origin-group]")!.click();
   const term = await waitFor("다시 열기", () => visiblePanes()[0]?.term);
   await ready(term);
@@ -2395,6 +2517,7 @@ export async function runSelftest(root: string, scenario: string) {
     await testGroupClone(root, first);
     await testGroupEnd(root, first);
     await testAddSession(root, first);
+    await testGitGraph(root, first);
     await testTabMove();
     await testTabScroll();
     await testManyTerminals(20);

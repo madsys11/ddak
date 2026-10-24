@@ -6,7 +6,8 @@ import { ContextMenu, type MenuState } from "./ContextMenu";
 import { EndGroupDialog } from "./EndGroupDialog";
 import { devHooks } from "./devHooks";
 import { codeError } from "./errors";
-import { ChatIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
+import { GitGraph } from "./GitGraph";
+import { ChatIcon, GitIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { Terminal } from "./Terminal";
 import { useT } from "./prefs";
@@ -35,7 +36,9 @@ type Action =
   | { type: "setupRetry"; tab: number }
   | { type: "setupStart"; tab: number }
   | { type: "resumeTabs"; ids: number[] }
-  | { type: "addSession"; tab: number; session: Session };
+  | { type: "addSession"; tab: number; session: Session }
+  | { type: "openGit" }
+  | { type: "gitRepo"; tab: number; repo: string };
 
 // 작업그룹 탭을 하나 더한다: 그룹의 세션들을 나란히 띄운다. 그룹이 없으면 (설정을 못 읽음) 셸 하나.
 // 새 worktree에 준비 스크립트가 있으면 세션 아래에 setup 창을 하나 더 두고 거기서 돌린다.
@@ -103,6 +106,15 @@ function step(s: State, a: Action): State {
       const opened = a.saved ?? addGroupTab({ ...s, loaded: true }, a.group, s.root);
       return { ...opened, saveBlocked: a.blocked };
     }
+    // Git Graph 탭: 프로젝트마다 하나. 있으면 그 탭으로. 터미널은 없고 layout은 자리용 창 하나 (닫기·순서·저장을 그대로 쓴다)
+    case "openGit": {
+      const open = s.tabs.find((t) => t.git);
+      if (open) return { ...s, active: open.id };
+      const pane = s.nextId + 1;
+      return { ...s, tabs: [...s.tabs, { id: s.nextId, layout: { pane }, focus: pane, cwd: s.root, git: {} }], active: s.nextId, nextId: s.nextId + 2 };
+    }
+    case "gitRepo":
+      return update(a.tab, (t) => ({ ...t, git: { ...t.git, repo: a.repo } }));
     case "newTab": {
       // 셸 탭은 원본 프로젝트 폴더에서 연다
       const pane = s.nextId + 1;
@@ -122,7 +134,7 @@ function step(s: State, a: Action): State {
     case "closeTab":
       return closeTab(s, a.id);
     case "split": {
-      if (!tab) return s;
+      if (!tab || tab.git) return s;
       const pane = s.nextId;
       return { ...update(tab.id, (t) => ({ ...t, layout: split(t.layout, t.focus, a.dir, pane), focus: pane })), nextId: s.nextId + 1 };
     }
@@ -143,7 +155,7 @@ function step(s: State, a: Action): State {
     // 세션 추가: 그 탭의 포커스된 창 오른쪽에 새 창을 두고 그 세션을 띄운다 (창마다 새 세션 ID)
     case "addSession": {
       const owner = s.tabs.find((t) => t.id === a.tab);
-      if (!owner) return s;
+      if (!owner || owner.git) return s;
       const pane = s.nextId;
       return {
         ...update(owner.id, (t) => ({ ...t, layout: split(t.layout, t.focus, "row", pane), focus: pane })),
@@ -287,7 +299,8 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
 
-  const titleOf = (tab: Tab, i: number) => tab.name ?? tab.worktree ?? tab.group ?? (s.titles[tab.focus] || t("workspace.tabTitle", { n: i + 1 }));
+  const titleOf = (tab: Tab, i: number) =>
+    tab.name ?? (tab.git ? t("git.title") : undefined) ?? tab.worktree ?? tab.group ?? (s.titles[tab.focus] || t("workspace.tabTitle", { n: i + 1 }));
 
   // 터미널 번호는 Workspace마다 따로 매기므로 자기 영역 안에서만 찾는다.
   const focusPane = (pane: number) =>
@@ -362,6 +375,7 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
       if (!visibleRef.current) return;
       if (e.payload === "new_group") createGroupRef.current();
       else if (e.payload === "add_session") activeRef.current >= 0 && setAdding(activeRef.current);
+      else if (e.payload === "git_graph") dispatch({ type: "openGit" });
       else if (MENU[e.payload]) dispatch(MENU[e.payload]);
     });
     return () => {
@@ -529,16 +543,15 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
               onDoubleClick={() => setRenaming(tab.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                const items = [
-                  { label: t("workspace.renameTab"), action: () => setRenaming(tab.id) },
-                  { label: t("addSession.menu"), action: () => setAdding(tab.id) },
-                ];
+                const items = [{ label: t("workspace.renameTab"), action: () => setRenaming(tab.id) }];
+                if (!tab.git) items.push({ label: t("addSession.menu"), action: () => setAdding(tab.id) });
                 // 새 worktree로 만든 작업그룹이면 끝내기 (원본 그룹·셸 탭은 지울 것이 없다)
                 if (tab.worktree) items.push({ label: t("endGroup.menu"), action: () => setEnding(tab) });
                 setMenu({ x: e.clientX, y: e.clientY, items });
               }}
             >
               {tab.worktree && <WorktreeIcon title={tab.cwd} />}
+              {tab.git && <GitIcon />}
               {tab.setup?.status === "failed" && (
                 <span className="tab-warn" title={setupProblem(tab.setup)}>
                   !
@@ -576,12 +589,18 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
           <WorktreeIcon />
         </button>
         <div className="tabbar-spacer" />
-        <button className="tabbar-btn" disabled={!activeTab} title={t("workspace.splitRight")} onClick={() => dispatch({ type: "split", dir: "row" })}>
+        <button className="tabbar-btn" disabled={!activeTab || !!activeTab.git} title={t("workspace.splitRight")} onClick={() => dispatch({ type: "split", dir: "row" })}>
           <SplitIcon dir="row" />
         </button>
-        <button className="tabbar-btn" disabled={!activeTab} title={t("workspace.splitDown")} onClick={() => dispatch({ type: "split", dir: "col" })}>
+        <button className="tabbar-btn" disabled={!activeTab || !!activeTab.git} title={t("workspace.splitDown")} onClick={() => dispatch({ type: "split", dir: "col" })}>
           <SplitIcon dir="col" />
         </button>
+        {/* 만드는 버튼(터미널, 작업그룹)은 왼쪽, 프로젝트를 보는 버튼(Git Graph, 채팅)은 오른쪽 끝에 나란히.
+            Git Graph는 탭을 열고 채팅은 오른쪽 패널을 여닫아서 둘 사이를 구분선으로 나눈다 */}
+        <button className="tabbar-btn" data-action="git" title={t("git.open")} onClick={() => dispatch({ type: "openGit" })}>
+          <GitIcon />
+        </button>
+        <div className="tabbar-sep" />
         <button
           className={`tabbar-btn${chatOpen ? " active" : ""}${chatUnread && !chatOpen ? " unread" : ""}`}
           data-action="chat"
@@ -614,6 +633,21 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
       {s.tabs.map((tab) => {
         const { panes, dividers } = measure(tab.layout);
         const active = tab.id === s.active;
+        if (tab.git) {
+          // 작업그룹 표시: 터미널 탭마다 폴더, 이름, 세션 이름 (그 폴더의 worktree가 있는 커밋에 붙인다)
+          const places = s.tabs
+            .filter((x) => !x.git)
+            .map((x) => ({
+              cwd: x.cwd,
+              label: titleOf(x, s.tabs.indexOf(x)),
+              sessions: paneIds(x.layout).flatMap((p) => (s.sessions[p] && !s.sessions[p].setup ? [s.sessions[p].name] : [])),
+            }));
+          return (
+            <div key={tab.id} className="tab-body" style={{ display: active ? undefined : "none" }}>
+              <GitGraph project={s.root} repo={tab.git.repo} visible={visible && active} places={places} onRepo={(repo) => dispatch({ type: "gitRepo", tab: tab.id, repo })} />
+            </div>
+          );
+        }
         return (
           <div
             key={tab.id}

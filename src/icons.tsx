@@ -57,6 +57,15 @@ export const SplitIcon = ({ dir }: { dir: "row" | "col" }) => (
   </Svg>
 );
 
+// 탭 바 버튼·Git Graph 탭: "git" 글자. 점과 갈래 모양은 작업그룹(worktree) 아이콘과 헷갈려서 글자로 둔다 (2026-10-25 시안).
+export const GitIcon = () => (
+  <Svg className="icon-tool">
+    <text x="8" y="11.6" textAnchor="middle" fontFamily="-apple-system, BlinkMacSystemFont, system-ui, sans-serif" fontSize="9.6" fontWeight="700" fill="currentColor">
+      git
+    </text>
+  </Svg>
+);
+
 // 탭 바 버튼: 채팅방 (말풍선)
 export const ChatIcon = () => (
   <Svg className="icon-tool">

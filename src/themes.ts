@@ -36,6 +36,13 @@ const dark: Theme = {
     "--icon-repo": "#E2C08D",
     "--icon-worktree": "#81B88B",
     "--tree-link": "#9D9D9D",
+    // Git Graph 레인 (VS Code Git Graph 확장의 기본 색)
+    "--graph-1": "#0085D9",
+    "--graph-2": "#D9008F",
+    "--graph-3": "#00D90A",
+    "--graph-4": "#D98500",
+    "--graph-5": "#A300D9",
+    "--graph-6": "#FF0000",
     // 대화상자
     "--overlay": "#00000080",
     "--widget-bg": "#202020", // editorWidget.background
@@ -93,6 +100,13 @@ const solarizedLight: Theme = {
     "--icon-repo": "#B58900",
     "--icon-worktree": "#859900",
     "--tree-link": "#93A1A1",
+    // Git Graph 레인 (Solarized 강조색)
+    "--graph-1": "#268BD2",
+    "--graph-2": "#D33682",
+    "--graph-3": "#859900",
+    "--graph-4": "#CB4B16",
+    "--graph-5": "#6C71C4",
+    "--graph-6": "#DC322F",
     "--overlay": "#00000033",
     "--widget-bg": "#EEE8D5",
     "--input-bg": "#DDD6C1",
