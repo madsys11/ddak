@@ -594,3 +594,22 @@ button.secondary {
   background: var(--widget-bg);
   border: 1px solid var(--error);
 }
+
+/* 작업그룹 끝내기: 저장소마다 한 줄 */
+.end-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.end-row code {
+  font-family: Menlo, monospace;
+  font-size: 12px;
+}
+.end-state {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.end-state.error {
+  color: var(--error);
+}

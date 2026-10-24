@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ContextMenu, type MenuState } from "./ContextMenu";
+import { EndGroupDialog } from "./EndGroupDialog";
 import { devHooks } from "./devHooks";
 import { codeError } from "./errors";
 import { SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
@@ -31,7 +32,8 @@ type Action =
   | { type: "moveTab"; id: number; index: number }
   | { type: "setupExit"; tab: number; run: number; code: number | null; spawnFailed?: boolean }
   | { type: "setupRetry"; tab: number }
-  | { type: "setupStart"; tab: number };
+  | { type: "setupStart"; tab: number }
+  | { type: "resumeTabs"; ids: number[] };
 
 // 작업그룹 탭을 하나 더한다: 그룹의 세션들을 나란히 띄운다. 그룹이 없으면 (설정을 못 읽음) 셸 하나.
 // 새 worktree에 준비 스크립트가 있으면 세션 아래에 setup 창을 하나 더 두고 거기서 돌린다.
@@ -136,6 +138,14 @@ function step(s: State, a: Action): State {
       }
       return update(owner.id, (t) => ({ ...t, layout, focus, setup }));
     }
+    // 작업그룹을 끝내다가 멈춰 그 탭들의 세션을 다시 띄운다: 이어서 하기(resume)로. 준비를 기다리던 세션은 뜬 적이 없다.
+    case "resumeTabs": {
+      const sessions = { ...s.sessions };
+      for (const tab of s.tabs.filter((t) => a.ids.includes(t.id) && (!t.setup || t.setup.started))) {
+        for (const p of paneIds(tab.layout)) if (sessions[p] && !sessions[p].setup) sessions[p] = { ...sessions[p], resumed: true };
+      }
+      return { ...s, sessions };
+    }
     case "focus": {
       const owner = s.tabs.find((t) => paneIds(t.layout).includes(a.pane));
       return owner && owner.focus !== a.pane ? update(owner.id, (t) => ({ ...t, focus: a.pane })) : s;
@@ -238,6 +248,15 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
   const [renaming, setRenaming] = useState<number | null>(null);
   const [dragging, setDragging] = useState<number | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
+  // 끝내기 창을 연 작업그룹 탭
+  const [ending, setEnding] = useState<Tab | null>(null);
+  // 탭마다 터미널을 다시 띄운 횟수. 터미널 key에 넣어서, 늘면 그 탭의 터미널을 새로 띄운다.
+  const [runs, setRuns] = useState<Record<number, number>>({});
+  // 작업그룹을 끝내느라 세션을 끝내는(끝낸) 터미널 ("탭:횟수"). 그 터미널은 끝나도 창을 닫지 않는다.
+  const stopping = useRef(new Set<string>());
+  // 그 폴더(작업그룹 폴더)에서 띄운 탭. group_end가 그 폴더의 터미널을 모두 끝낸다.
+  const tabsIn = (dir: string) => s.tabs.filter((t) => t.cwd === dir || t.cwd.startsWith(`${dir}/`)).map((t) => t.id);
+  const runKey = (tab: number) => `${tab}:${runs[tab] ?? 0}`;
   const tabsRef = useRef<HTMLDivElement>(null);
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
@@ -473,7 +492,10 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
               onDoubleClick={() => setRenaming(tab.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                setMenu({ x: e.clientX, y: e.clientY, items: [{ label: t("workspace.renameTab"), action: () => setRenaming(tab.id) }] });
+                const items = [{ label: t("workspace.renameTab"), action: () => setRenaming(tab.id) }];
+                // 새 worktree로 만든 작업그룹이면 끝내기 (원본 그룹·셸 탭은 지울 것이 없다)
+                if (tab.worktree) items.push({ label: t("endGroup.menu"), action: () => setEnding(tab) });
+                setMenu({ x: e.clientX, y: e.clientY, items });
               }}
             >
               {tab.worktree && <WorktreeIcon title={tab.cwd} />}
@@ -604,7 +626,7 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
                 ) : (
                   <Terminal
                     // 다시 준비하면 새 터미널에서 다시 돌린다
-                    key={session?.setup ? `setup-${setup?.run}` : "term"}
+                    key={session?.setup ? `setup-${setup?.run}` : `term-${runs[tab.id] ?? 0}`}
                     cwd={tab.cwd}
                     {...commandOf(session)}
                     shiftEnter={session?.shiftEnter}
@@ -616,7 +638,7 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
                     onExit={(code) =>
                       session?.setup && setup
                         ? dispatch({ type: "setupExit", tab: tab.id, run: setup.run, code })
-                        : dispatch({ type: "closePane", pane: id })
+                        : !stopping.current.has(runKey(tab.id)) && dispatch({ type: "closePane", pane: id })
                     }
                     // 준비 창을 띄우지 못하면 준비 실패로 (세션이 계속 기다리지 않게)
                     onSpawnError={
@@ -647,6 +669,24 @@ export function Workspace({ cwd, visible, group, onTreeRoot, onError }: Props) {
         );
       })}
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
+      {ending?.worktree && (
+        <EndGroupDialog
+          project={s.root}
+          group={ending.cwd}
+          name={ending.worktree}
+          onClose={() => setEnding(null)}
+          onStopping={() => tabsIn(ending.cwd).forEach((id) => stopping.current.add(runKey(id)))}
+          onFailed={(stopped) => {
+            const ids = tabsIn(ending.cwd);
+            if (!stopped) return ids.forEach((id) => stopping.current.delete(runKey(id)));
+            // 세션을 끝낸 뒤라 다시 띄운다 (끝낸 터미널의 늦은 종료는 이전 key의 것이라 창을 닫지 않는다)
+            dispatch({ type: "resumeTabs", ids });
+            setRuns((r) => ({ ...r, ...Object.fromEntries(ids.map((id) => [id, (r[id] ?? 0) + 1])) }));
+          }}
+          // 끝났으면 그 폴더의 탭을 닫는다 (세션은 이미 끝났다)
+          onEnded={() => tabsIn(ending.cwd).forEach((id) => dispatch({ type: "closeTab", id }))}
+        />
+      )}
     </div>
   );
 }

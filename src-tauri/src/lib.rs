@@ -40,6 +40,8 @@ pub fn run() {
             repos::repo_link,
             repos::repo_clone,
             worktrees::group_create,
+            worktrees::group_status,
+            worktrees::group_end,
             workspace::workspace_load,
             workspace::workspace_save,
             workspace::workspace_set_aside,

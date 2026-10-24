@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -33,9 +33,9 @@ fn enable_utf8_erase(_master: &dyn MasterPty) -> Result<(), String> {
     Ok(())
 }
 
-// 자식 프로세스. 거두기는 끝내기(terminate)만 한다: 신호를 다 보낸 뒤에 거둔다. 거두지 않은 자식은 끝났어도
-// 좀비로 PID를 쥐고 있어서, 그 번호는 다른 프로세스에도 새 프로세스 그룹에도 쓰이지 않는다. 그래서 자식(그룹
-// 리더)이 먼저 끝나도 그 그룹에 남은 프로세스에게 안전하게 보낼 수 있다 (리뷰 P1: portable-pty의 clone_killer는
+// 자식 프로세스. 거두기는 끝내기(terminate)만 한다: 세션이 다 끝난 뒤에 거둔다. 거두지 않은 자식은 끝났어도
+// 좀비로 PID를 쥐고 있어서, 그 번호는 다른 프로세스에도 새 그룹·세션에도 쓰이지 않는다. 그래서 자식(세션 리더)이
+// 먼저 끝나도 그 세션에 남은 프로세스를 안전하게 찾고 보낼 수 있다 (리뷰 P1: portable-pty의 clone_killer는
 // 확인 없이 저장한 PID에 보낸다. 후속 P2: 부모가 먼저 끝나면 SIGHUP을 무시하는 자식이 남았다).
 struct Proc {
     child: Box<dyn Child + Send + Sync>,
@@ -46,12 +46,21 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     proc: Arc<Mutex<Proc>>,
+    // 띄운 폴더 (실제 경로). 작업그룹을 끝낼 때 그 폴더의 세션을 찾는다 (stop_under).
+    cwd: PathBuf,
 }
 
+// 터미널 목록. 잠그는 순서는 ending → sessions → closing.
 #[derive(Default)]
 pub struct Ptys {
     next_id: AtomicU32,
     sessions: Mutex<HashMap<u32, Session>>,
+    // 닫았지만 아직 다 끝나지 않은 터미널 (프로세스, 띄운 폴더). 다 끝나면 빠진다. 작업그룹을 끝낼 때 이것도 기다린다
+    // (리뷰 후속 P1: 먼저 닫은 터미널의 백그라운드 작업을 놓쳤다).
+    closing: Arc<Mutex<HashMap<u32, (Arc<Mutex<Proc>>, PathBuf)>>>,
+    // 끝내는 중인 작업그룹 폴더. 그 안에는 새 터미널을 띄우지 않는다 (리뷰 후속 P1: 확인 뒤 새로 뜬 터미널이 커밋했다).
+    // 띄우기는 읽기로 잡은 채 확인·띄우기·등록을 하고, 잠그기는 쓰기로 잡으므로 띄우는 중인 것은 등록을 마친 뒤에 잠근다.
+    ending: RwLock<Vec<PathBuf>>,
 }
 
 // 셸 한 단어로 감싼다: 작은따옴표 안에서는 아무것도 해석되지 않고, 작은따옴표 자체만 '\''로 끊어 넣는다.
@@ -121,6 +130,7 @@ fn spawn(
     if !Path::new(cwd).is_dir() {
         return Err(format!("{cwd}: no such folder"));
     }
+    let real = std::fs::canonicalize(cwd).map_err(|e| e.to_string())?;
     let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
     enable_utf8_erase(&*pair.master)?;
     let child = pair.slave.spawn_command(shell_command(cwd, command, fallback, shell_after)).map_err(|e| e.to_string())?;
@@ -152,35 +162,160 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc })
+    Ok(Session { master: pair.master, writer, proc, cwd: real })
 }
 
-// 끝내기: 자식의 프로세스 그룹에 SIGHUP, 0.25초 안에 그룹이 비지 않으면 SIGKILL, 그 뒤 자식을 거둔다 (리뷰 P2:
-// SIGHUP을 무시하는 준비 스크립트가 계속 돌았다). 준비 스크립트는 셸이 exec로 바뀌어 자식이 그룹 리더이고 그
-// 자식들도 같은 그룹이다. 거두기 전이라 리더가 끝났어도 그룹 ID는 다시 쓰이지 않는다 (Proc).
-fn terminate(proc: &Mutex<Proc>) {
-    let mut p = proc.lock().unwrap();
-    let Some(pid) = p.child.process_id().map(|id| id as i32).filter(|_| !p.reaped) else {
-        return;
+// 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
+#[cfg(target_os = "macos")]
+fn session_members(sid: i32) -> Vec<i32> {
+    const SZOMB: u32 = 5; // sys/proc.h
+    let alive = |pid: i32| {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+        n == size && info.pbi_status != SZOMB
     };
-    let group_alive = || unsafe { libc::kill(-pid, 0) } == 0;
-    // 그룹이 없으면 (자식이 그룹을 바꿈) 자식에게만
-    if unsafe { libc::kill(-pid, libc::SIGHUP) } != 0 {
-        unsafe { libc::kill(pid, libc::SIGHUP) };
-    }
-    for _ in 0..5 {
-        if !group_alive() {
-            break;
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    let mut pids = vec![0 as libc::pid_t; count.max(0) as usize + 256];
+    let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate(n.max(0) as usize);
+    pids.into_iter().filter(|&p| p > 0 && unsafe { libc::getsid(p) } == sid && alive(p)).collect()
+}
+
+// 끝내기: 이 터미널에서 띄운 프로세스를 모두 끝내고 끝날 때까지 기다린다. 자식의 프로세스 그룹만 보면, 대화형 셸이
+// 작업마다 그룹을 따로 만들어서 SIGHUP을 무시하는 백그라운드 작업이 남는다 (리뷰 후속 P1). 그래서 세션(setsid,
+// ID = 자식 PID) 전체에 SIGHUP(멈춘 작업도 받게 SIGCONT), 0.25초 뒤에도 남으면 SIGKILL, 좀비를 뺀 구성원이 없어질
+// 때까지(최대 3초) 기다린 뒤 자식을 거둔다. 그래서 nohup으로 띄운 작업도 터미널을 닫으면 끝난다.
+// 세션을 떠난 프로세스(스스로 setsid한 데몬 등)는 찾지 못한다. 다 끝나지 않았으면 거두지 않고 false
+// (자식이 좀비로 세션 ID를 쥐고 있어 다시 불러도 안전하다).
+fn terminate(proc: &Mutex<Proc>) -> bool {
+    let mut p = proc.lock().unwrap();
+    let Some(sid) = p.child.process_id().map(|id| id as i32).filter(|_| !p.reaped) else {
+        return true;
+    };
+    let signal = |sig| {
+        for pid in session_members(sid) {
+            unsafe { libc::kill(pid, sig) };
         }
-        std::thread::sleep(Duration::from_millis(50));
+    };
+    let wait_empty = |tries: u32| {
+        for _ in 0..tries {
+            if session_members(sid).is_empty() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        session_members(sid).is_empty()
+    };
+    signal(libc::SIGHUP);
+    signal(libc::SIGCONT);
+    if !wait_empty(5) {
+        signal(libc::SIGKILL);
+        if !wait_empty(60) {
+            return false;
+        }
     }
-    if group_alive() {
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
-    }
-    // 리더가 그룹을 옮겼어도 끝낸다 (거두기 전이라 안전)
-    unsafe { libc::kill(pid, libc::SIGKILL) };
     let _ = p.child.wait();
     p.reaped = true;
+    true
+}
+
+// 터미널을 닫는다: 목록에서 닫는 중으로 옮기고 (빠지는 틈이 없게 두 목록을 함께 잡는다) 따로 끝낸다. 다 끝나면
+// 닫는 중에서 뺀다. 터미널(master)은 끝낼 때까지 들고 있는다.
+fn close(ptys: &Ptys, id: u32) {
+    let session = {
+        let mut sessions = ptys.sessions.lock().unwrap();
+        let Some(session) = sessions.remove(&id) else {
+            return;
+        };
+        ptys.closing.lock().unwrap().insert(id, (session.proc.clone(), session.cwd.clone()));
+        session
+    };
+    let closing = ptys.closing.clone();
+    std::thread::spawn(move || {
+        if terminate(&session.proc) {
+            closing.lock().unwrap().remove(&id);
+        }
+        drop(session);
+    });
+}
+
+// 작업그룹 끝내기: dir을 잠근 동안 (hold) 그 안에서 띄운 터미널과 닫는 중인 터미널을 모두 끝내고 끝날 때까지 기다린다.
+// 끝낸 터미널은 목록에서 빠지므로 프론트의 pty_kill은 아무것도 하지 않는다. 다 끝났으면 true.
+pub fn stop_under(ptys: &Ptys, dir: &Path) -> bool {
+    let (stopped, procs) = {
+        let mut sessions = ptys.sessions.lock().unwrap();
+        let mut closing = ptys.closing.lock().unwrap();
+        let ids: Vec<u32> = sessions.iter().filter(|(_, s)| s.cwd.starts_with(dir)).map(|(id, _)| *id).collect();
+        let stopped: Vec<Session> = ids.iter().filter_map(|id| sessions.remove(id)).collect();
+        for (id, s) in ids.iter().zip(&stopped) {
+            closing.insert(*id, (s.proc.clone(), s.cwd.clone()));
+        }
+        let procs: Vec<(u32, Arc<Mutex<Proc>>)> = closing.iter().filter(|(_, (_, cwd))| cwd.starts_with(dir)).map(|(id, (p, _))| (*id, p.clone())).collect();
+        (stopped, procs)
+    };
+    let waits: Vec<_> = procs.into_iter().map(|(id, proc)| (id, std::thread::spawn(move || terminate(&proc)))).collect();
+    let mut all = true;
+    for (id, w) in waits {
+        if w.join().unwrap_or(false) {
+            ptys.closing.lock().unwrap().remove(&id);
+        } else {
+            all = false;
+        }
+    }
+    drop(stopped);
+    all
+}
+
+// dir 안에서 띄운 터미널이 남아 있는지 (닫는 중 포함)
+#[cfg(test)]
+fn running_under(ptys: &Ptys, dir: &Path) -> bool {
+    let sessions = ptys.sessions.lock().unwrap();
+    let closing = ptys.closing.lock().unwrap();
+    sessions.values().any(|s| s.cwd.starts_with(dir)) || closing.values().any(|(_, cwd)| cwd.starts_with(dir))
+}
+
+// 끝내는 동안 dir을 잠근다. 돌려받은 것을 놓으면 풀린다.
+pub struct Ending<'a> {
+    ptys: &'a Ptys,
+    dir: PathBuf,
+}
+
+impl Drop for Ending<'_> {
+    fn drop(&mut self) {
+        let mut ending = self.ptys.ending.write().unwrap();
+        if let Some(i) = ending.iter().position(|d| *d == self.dir) {
+            ending.remove(i);
+        }
+    }
+}
+
+pub fn hold<'a>(ptys: &'a Ptys, dir: &Path) -> Ending<'a> {
+    ptys.ending.write().unwrap().push(dir.to_path_buf());
+    Ending { ptys, dir: dir.to_path_buf() }
+}
+
+// 띄우고 목록에 넣는다. 끝내는 중인 작업그룹 폴더 안이면 띄우지 않는다.
+#[allow(clippy::too_many_arguments)]
+fn open(
+    ptys: &Ptys,
+    cwd: &str,
+    command: Option<&[String]>,
+    fallback: Option<&[String]>,
+    shell_after: bool,
+    size: PtySize,
+    output: impl FnMut(Vec<u8>) -> bool + Send + 'static,
+    exited: impl FnOnce(Option<u32>) + Send + 'static,
+) -> Result<u32, String> {
+    let ending = ptys.ending.read().unwrap();
+    if std::fs::canonicalize(cwd).is_ok_and(|real| ending.iter().any(|d| real.starts_with(d))) {
+        return Err(format!("{cwd}: this work group is ending"));
+    }
+    let session = spawn(cwd, command, fallback, shell_after, size, output, exited)?;
+    let id = ptys.next_id.fetch_add(1, Ordering::Relaxed);
+    ptys.sessions.lock().unwrap().insert(id, session);
+    Ok(id)
 }
 
 // 종료는 출력과 같은 채널로 보낸다 ({"exit": 코드}). 채널은 보낸 순서대로 전달되고 프론트가 spawn을 부르기 전에
@@ -197,7 +332,8 @@ pub fn pty_spawn(
     shell_after: Option<bool>,
 ) -> Result<u32, String> {
     let on_exit = on_data.clone();
-    let session = spawn(
+    open(
+        &ptys,
         &cwd,
         command.as_deref(),
         fallback.as_deref(),
@@ -207,10 +343,7 @@ pub fn pty_spawn(
         move |code| {
             let _ = on_exit.send(InvokeResponseBody::Json(serde_json::json!({ "exit": code }).to_string()));
         },
-    )?;
-    let id = ptys.next_id.fetch_add(1, Ordering::Relaxed);
-    ptys.sessions.lock().unwrap().insert(id, session);
-    Ok(id)
+    )
 }
 
 #[tauri::command]
@@ -232,13 +365,8 @@ pub fn pty_resize(ptys: State<'_, Ptys>, id: u32, cols: u16, rows: u16) -> Resul
 
 #[tauri::command]
 pub fn pty_kill(ptys: State<'_, Ptys>, id: u32) -> Result<(), String> {
-    // 기다림이 길 수 있어 (SIGHUP 뒤 유예) 따로 돌린다. 터미널(master)은 끝낼 때까지 들고 있는다.
-    if let Some(session) = ptys.sessions.lock().unwrap().remove(&id) {
-        std::thread::spawn(move || {
-            terminate(&session.proc);
-            drop(session);
-        });
-    }
+    // 기다림이 길 수 있어 (SIGHUP 뒤 유예) 따로 돌린다
+    close(&ptys, id);
     Ok(())
 }
 
@@ -444,6 +572,100 @@ mod tests {
         let after = out.lock().unwrap().len();
         assert_eq!(before, after, "끝낸 뒤에도 출력이 이어짐");
         assert_eq!(code, Ok(None), "시그널로 끝났으니 종료 코드 없음");
+    }
+
+    // 작업그룹 끝내기: 그 폴더에서 띄운 터미널의 세션이 다 끝난 뒤에 돌아온다. SIGHUP을 무시하고 그룹을 따로 만든
+    // 작업(job control: terminate의 그룹 신호가 닿지 않는다)도 남지 않는다. 다른 폴더의 터미널은 그대로다.
+    #[test]
+    fn stop_under_ends_whole_session_before_returning() {
+        let dir = std::env::temp_dir().join(format!("ddak-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let log = dir.join("log");
+        let script = format!("set -m; (trap '' HUP; while :; do echo t >> '{}'; sleep 0.05; done) & wait", log.display());
+        let argv: Vec<String> = ["/bin/sh", "-c", &script].iter().map(|a| a.to_string()).collect();
+        let other: Vec<String> = ["/bin/sh", "-c", "sleep 30"].iter().map(|a| a.to_string()).collect();
+        let open = |cwd: &Path, argv: &[String]| spawn(&cwd.to_string_lossy(), Some(argv), None, false, SIZE, |_| true, |_| ()).unwrap();
+        let ptys = Ptys::default();
+        ptys.sessions.lock().unwrap().insert(1, open(&dir, &argv));
+        ptys.sessions.lock().unwrap().insert(2, open(Path::new("/"), &other));
+        let size = || std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while size() == 0 {
+            assert!(std::time::Instant::now() < deadline, "작업이 쓰지 않음");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(stop_under(&ptys, &dir), "다 끝나지 않음");
+        let before = size();
+        std::thread::sleep(Duration::from_millis(400));
+        let after = size();
+        assert!(!running_under(&ptys, &dir) && running_under(&ptys, Path::new("/")), "다른 폴더의 터미널까지 끝냄");
+        if let Some(rest) = ptys.sessions.lock().unwrap().remove(&2) {
+            terminate(&rest.proc);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(before, after, "끝낸 뒤에도 그 폴더의 작업이 계속 씀");
+    }
+
+    // 먼저 닫은 터미널(일반 닫기 경로)의 백그라운드 작업도 끝내기가 기다린다 (리뷰 후속 P1: 닫으면 목록에서 바로 빠지고
+    // 그룹만 끝내서, 그 뒤 stop_under가 못 찾았고 작업이 계속 썼다). 닫기만 해도 결국 세션 전체가 끝난다.
+    #[test]
+    fn stop_under_waits_for_terminals_already_closed() {
+        let dir = std::env::temp_dir().join(format!("ddak-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let ptys = Ptys::default();
+        let log = |name: &str| dir.join(name);
+        let size = |name: &str| std::fs::metadata(log(name)).map(|m| m.len()).unwrap_or(0);
+        let start = |name: &str| {
+            let script = format!("set -m; (trap '' HUP; while :; do echo t >> '{}'; sleep 0.05; done) & wait", log(name).display());
+            let argv: Vec<String> = ["/bin/sh", "-c", &script].iter().map(|a| a.to_string()).collect();
+            let id = open(&ptys, &dir.to_string_lossy(), Some(&argv), None, false, SIZE, |_| true, |_| ()).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while size(name) == 0 {
+                assert!(std::time::Instant::now() < deadline, "작업이 쓰지 않음");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            id
+        };
+        let stable = |name: &str| {
+            let before = size(name);
+            std::thread::sleep(Duration::from_millis(400));
+            before == size(name)
+        };
+        // 닫기만 해도 끝난다
+        close(&ptys, start("a"));
+        std::thread::sleep(Duration::from_millis(600));
+        let closed_alone = stable("a");
+        // 닫은 직후 끝내기는 그것까지 끝난 뒤에 돌아온다
+        close(&ptys, start("b"));
+        let all = stop_under(&ptys, &dir);
+        let after_stop = stable("b");
+        let running = running_under(&ptys, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(closed_alone, "닫은 터미널의 작업이 계속 씀");
+        assert!(all && after_stop && !running, "끝내기 뒤에도 닫은 터미널의 작업이 씀 ({all}, {after_stop}, {running})");
+    }
+
+    // 끝내는 중인 폴더(와 그 안)에는 새 터미널을 띄우지 않는다 (리뷰 후속 P1). 다른 폴더는 띄우고, 풀면 다시 띄운다.
+    #[test]
+    fn ending_folder_refuses_new_terminals() {
+        let dir = std::env::temp_dir().join(format!("ddak-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let ptys = Ptys::default();
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), "sleep 30".to_string()];
+        let try_open = |cwd: &Path| open(&ptys, &cwd.to_string_lossy(), Some(&argv), None, false, SIZE, |_| true, |_| ()).is_ok();
+        let held = hold(&ptys, &dir);
+        let (inside, sub, other) = (try_open(&dir), try_open(&dir.join("sub")), try_open(&std::env::temp_dir()));
+        drop(held);
+        let after = try_open(&dir);
+        stop_under(&ptys, Path::new("/"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!inside && !sub && other && after, "{inside} {sub} {other} {after}");
     }
 
     // 감싼 인자를 실제 셸에 넘겨서 그대로 돌아오는지 본다.

@@ -1530,6 +1530,104 @@ async function testGroupClone(root: string, first: Terminal) {
   await waitFor("복제 작업그룹 탭 닫기", () => tabCount() === before, 5000);
 }
 
+// 작업그룹 끝내기 (worktrees.rs end): 커밋 안 한 변경이 있으면 끝내지 않고, 병합 안 된 브랜치는 남기고 나머지는 지운다.
+async function testGroupEnd(root: string, first: Terminal) {
+  const sh = async (cmd: string) => (await run(first, cmd, 20000)).map((l) => l.trim()).filter(Boolean);
+  const openMenu = async (tab: HTMLElement) => {
+    rightClick(tab);
+    await waitFor("탭 메뉴", contextMenu);
+    return menuLabels();
+  };
+  const firstTab = document.querySelectorAll<HTMLElement>(".project-workspace:not([style*='none']) .tab")[0];
+  const originItems = await openMenu(firstTab);
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  await waitFor("메뉴 닫기", () => !contextMenu());
+  check("작업그룹 끝내기: 원본 탭에는 끝내기 없음", !originItems.includes("End Work Group…"), originItems.join(","));
+
+  const before = tabCount();
+  await clickMenu("Terminal", "New Work Group");
+  await waitFor("끝낼 작업그룹", () => tabCount() === before + 1 && visiblePanes().length >= 2, 60000);
+  const tab = activeTabEl()!;
+  const name = tab.querySelector(".tab-title")!.textContent!;
+  const path = tab.querySelector<HTMLElement>(".tab-title")!.title;
+  const dialog = () => document.querySelector<HTMLElement>(".end-group-dialog");
+  const repoState = (repo: string) => dialog()?.querySelector(`[data-repo='${repo}'] .end-state`)?.textContent ?? "";
+  const endButton = () => dialog()?.querySelector<HTMLButtonElement>("[data-action=end-group]");
+  const openDialog = async () => {
+    await openMenu(activeTabEl()!);
+    [...document.querySelectorAll<HTMLElement>(".context-item")].find((el) => el.textContent === "End Work Group…")!.click();
+    await waitFor("상태", () => dialog()?.querySelector("[data-repo]"), 10000);
+  };
+
+  await sh(`echo x > "${path}/server/end-new.txt"`);
+  await openDialog();
+  check(
+    "작업그룹 끝내기: 커밋 안 한 변경이 있으면 보이고 끝낼 수 없음",
+    repoState("server") === "1 uncommitted changes" && repoState("cloned") === "merged · branch deleted" && !!endButton()?.disabled && !!dialog()?.querySelector(".modal-error"),
+    `${repoState("server")} | ${repoState("cloned")} | ${endButton()?.disabled}`,
+  );
+  dialog()!.querySelector<HTMLElement>("button.secondary")!.click();
+  await waitFor("창 닫기", () => !dialog());
+
+  // 작업그룹 폴더에 모르는 항목이 있으면 끝내지 않는다 (지우는 기능이라 아는 것만 지운다)
+  await sh(`mv "${path}/server/end-new.txt" "${path}/todo.md"`);
+  await openDialog();
+  const unknownMsg = dialog()?.querySelector(".modal-error")?.textContent ?? "";
+  check("작업그룹 끝내기: 작업그룹 폴더의 모르는 항목이 있으면 끝낼 수 없음", unknownMsg.includes("todo.md") && !!endButton()?.disabled, unknownMsg);
+  dialog()!.querySelector<HTMLElement>("button.secondary")!.click();
+  await waitFor("창 닫기", () => !dialog());
+
+  await sh(`mv "${path}/todo.md" "${path}/server/end-new.txt" && cd "${path}/server" && git add -A && git -c user.name=t -c user.email=t@example.com commit -qm end-test && cd - > /dev/null`);
+  await openDialog();
+  check("작업그룹 끝내기: 병합 안 된 커밋은 브랜치를 남긴다고 보임", repoState("server") === "1 commits not merged · branch kept" && !endButton()?.disabled, repoState("server"));
+  dialog()!.querySelector<HTMLElement>("button.secondary")!.click();
+  await waitFor("창 닫기", () => !dialog());
+
+  // 확인한 뒤 지우기 전에 세션이 바꾼 것을 잃지 않는다 (리뷰 P1): 이 폴더의 세션을 끝내고 기다린 뒤 다시 확인한다.
+  // 셸이 SIGHUP을 받으면 worktree에 파일을 만들게 해 두면, 세션을 끝낸 뒤 확인에서 멈추고 세션을 다시 띄운다.
+  const shellTerm = () => visiblePanes().find((p) => !p.el.querySelector("[data-setup-status]"))?.term;
+  const old = shellTerm()!;
+  await run(old, `trap 'echo x > "${path}/server/late.txt"' HUP`);
+  await openDialog();
+  endButton()!.click();
+  const stopError = () => dialog()?.querySelector(".modal-error")?.textContent ?? "";
+  await waitFor("세션을 끝낸 뒤 멈춤", () => !endButton()?.disabled && stopError(), 20000);
+  const restartHint = [...dialog()!.querySelectorAll(".modal-hint")].some((el) => el.textContent?.includes("started again"));
+  await waitFor("다시 띄운 터미널", () => shellTerm() && shellTerm() !== old, 10000);
+  const alive = await sh(`test -e "${path}/server/late.txt" && echo late-there`);
+  const again = await run(shellTerm()!, "echo alive-$((1+1))");
+  check(
+    "작업그룹 끝내기: 세션을 끝낸 뒤 생긴 변경이면 지우지 않고 멈추고, 세션을 다시 띄움",
+    stopError().startsWith("Uncommitted changes appeared in: server") && restartHint && tabCount() === before + 1 && alive.includes("late-there") && again.some((l) => l.trim() === "alive-2"),
+    `${stopError()} | ${restartHint} | ${tabCount()} | ${alive.join(",")} | ${again.join(",")}`,
+  );
+  dialog()!.querySelector<HTMLElement>("button.secondary")!.click();
+  await waitFor("창 닫기", () => !dialog());
+
+  // 끝내면 SIGHUP을 무시하는 백그라운드 작업(대화형 셸은 그룹을 따로 만든다)까지 끝낸 뒤 지운다. 남았다면 나중에 표시를 남긴다.
+  const marker = `${root}/../late-marker-${name}`;
+  await sh(`rm "${path}/server/late.txt"`);
+  await run(shellTerm()!, `(trap '' HUP; sleep 3; echo late > "${marker}") &`);
+  await openDialog();
+  endButton()!.click();
+  await waitFor("끝냄", () => tabCount() === before && dialog()?.querySelector(".end-row code"), 20000);
+  const kept = [...dialog()!.querySelectorAll(".end-row")].map((el) => el.textContent);
+  check("작업그룹 끝내기: 탭을 닫고 남긴 브랜치를 이유와 함께 알림", kept.join(",") === `serverddak/${name}not merged`, kept.join(","));
+  dialog()!.querySelector<HTMLElement>("button")!.click();
+  await waitFor("창 닫기", () => !dialog());
+
+  await sleep(3500);
+  const facts = await sh(
+    `test -e "${marker}" && echo late-there; test -e "${path}" && echo dir-there; for r in server cloned linked; do printf '%s=' $r; git -C "${root}/$r" branch --list "ddak/${name}*" | tr -d ' *\\n'; echo; done; ` +
+      `ls -a "${path.replace(/\/[^/]+$/, "")}" | grep -c "ddak-group-${name}"; git -C "${root}/server" worktree list | grep -c "/${name}/"`,
+  );
+  check(
+    "작업그룹 끝내기: 세션을 모두 끝내고, 폴더·worktree·병합된 브랜치·기록을 지우고 병합 안 된 브랜치만 남김",
+    !facts.includes("late-there") && !facts.includes("dir-there") && facts.includes(`server=ddak/${name}`) && facts.includes("cloned=") && facts.includes("linked=") && facts.slice(-2).join(",") === "0,0",
+    facts.join("|"),
+  );
+}
+
 // 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
 async function testTabRename() {
   const tab = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active")!;
@@ -1928,6 +2026,7 @@ export async function runSelftest(root: string, scenario: string) {
     await testWebglLoss(first);
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다
     await testGroupClone(root, first);
+    await testGroupEnd(root, first);
     await testTabMove();
     await testTabScroll();
     await testManyTerminals(20);
