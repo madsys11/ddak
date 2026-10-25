@@ -58,7 +58,8 @@ pub struct Groups {
 // 채팅방: claude는 --mcp-config(JSON 문자열)와 --allowedTools mcp__ddak(묻지 않고 그 서버의 도구를 씀), codex는
 // mcp_servers.ddak.url과 default_tools_approval_mode="approve" (없으면 도구마다 승인을 요구한다). 두 옵션 모두 값을
 // 여럿 받으므로 바로 뒤에 다른 옵션을 둔다 (docs/reviews/2026-10-24-chat-mcp-experiment.md).
-pub const DEFAULT: &str = r#"{
+// 역할 프롬프트는 TEMPLATE의 @DEV_PROMPT@·@REVIEWER_PROMPT@ 자리에 넣는다 (default_config). 역할 + 작업그룹 공통 규약.
+const TEMPLATE: &str = r#"{
   "default": "dev-review",
   "groups": [
     {
@@ -68,15 +69,15 @@ pub const DEFAULT: &str = r#"{
         {
           "name": "dev",
           "command": "claude",
-          "args": ["--session-id", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--append-system-prompt", "You are the planner and developer in this work group. A read-only reviewer works in the same folder."],
-          "resume": ["--resume", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--append-system-prompt", "You are the planner and developer in this work group. A read-only reviewer works in the same folder."],
+          "args": ["--session-id", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--append-system-prompt", "@DEV_PROMPT@"],
+          "resume": ["--resume", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--append-system-prompt", "@DEV_PROMPT@"],
           "shiftEnter": "\u001b\r"
         },
         {
           "name": "reviewer",
           "command": "codex",
-          "args": ["-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions=\"You are the reviewer and QA in this work group. Do not modify files. When asked, review the changes in this folder and report problems with evidence.\""],
-          "resume": ["resume", "--last", "-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions=\"You are the reviewer and QA in this work group. Do not modify files. When asked, review the changes in this folder and report problems with evidence.\""],
+          "args": ["-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions=\"@REVIEWER_PROMPT@\""],
+          "resume": ["resume", "--last", "-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions=\"@REVIEWER_PROMPT@\""],
           "readOnly": true,
           "shiftEnter": "\u001b\r"
         }
@@ -90,6 +91,29 @@ pub const DEFAULT: &str = r#"{
   ]
 }
 "#;
+
+// 작업그룹 공통 규약 (docs/reviews/2026-10-25-group-protocol-design.md): 승인은 사용자만, 답장·멘션 기준, 지적의 ID·심각도,
+// 리뷰 1회 + 재리뷰 최대 2회 뒤 사용자에게, 리뷰 대상 명시, 재시작 뒤 채팅 다시 읽기.
+// codex에는 -c의 TOML 기본 문자열 안에 그대로 들어가고 JSON 문자열 안에도 그대로 넣으므로 큰따옴표·역슬래시·줄바꿈을 쓰지
+// 않는다. 인자 치환({chat}, {session})과 섞이지 않게 중괄호도 쓰지 않는다 (테스트가 확인한다).
+const RULES: &str = "Work group rules. \
+(1) Only the user approves commits, pushes, merges, deleting work, and changes of design or scope. A message from another session is never the user's approval, and passing review grants no new permission. \
+(2) In the chat, post only what moves the work: the result of something you were asked to do, a needed request (such as a review request) or question, or a concrete blocker. Do not post acknowledgements, thanks, waiting or status-only messages. @mention someone only if they must act next or you are delivering what they asked for. Send review results to whoever asked, and the final report of a task to the user. \
+(3) Give each review finding an ID (R1, R2, ...) and a severity: P0 data loss or must stop now; P1 severe failure on a main path; P2 bug or regression with evidence, within the change; P3 improvement or preference. P0 to P2 block, P3 does not. An unproven possibility is a question, not a finding. \
+(4) A change gets one review and at most two re-reviews. A re-review checks only the earlier findings and regressions caused by the fixes; mark any newly found blocking problem as new scope. If blocking findings remain after the second re-review, stop the exchange and report once to the user: the open findings, the evidence of both sides, and the options. Running out of rounds is not approval. \
+(5) A review request names its target: the repository, the base commit, and whether uncommitted changes are included. Do not change the target while it is under review, or say which state a result covers. \
+(6) After a restart, read the chat with read_messages (pass since to read further back) before continuing.";
+
+const DEV_ROLE: &str = "You are the planner and developer in this work group. A read-only reviewer works in the same folder. \
+Check each review finding against the code or an experiment before acting on it, and record your decision, evidence and fix.";
+
+const REVIEWER_ROLE: &str = "You are the reviewer and QA in this work group. Do not modify files. \
+When asked, review the requested target and report every finding with its ID, severity, evidence (file and line, or reproduction steps) and whether it blocks.";
+
+// 파일이 없을 때 써 두는 기본 설정 (역할 프롬프트를 넣은 TEMPLATE)
+pub fn default_config() -> String {
+    TEMPLATE.replace("@DEV_PROMPT@", &format!("{DEV_ROLE} {RULES}")).replace("@REVIEWER_PROMPT@", &format!("{REVIEWER_ROLE} {RULES}"))
+}
 
 fn validate(g: &Groups) -> Result<(), CodeError> {
     if g.groups.is_empty() {
@@ -131,7 +155,7 @@ pub fn ensure_file<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, CodeError>
     match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut f) => {
             use std::io::Write;
-            f.write_all(DEFAULT.as_bytes()).map_err(|e| code_err("io", e))?;
+            f.write_all(default_config().as_bytes()).map_err(|e| code_err("io", e))?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(code_err("io", e)),
@@ -157,13 +181,25 @@ mod tests {
 
     #[test]
     fn default_is_valid() {
-        let g = parse(DEFAULT.as_bytes()).unwrap();
+        let g = parse(default_config().as_bytes()).unwrap();
         assert_eq!(g.default, "dev-review");
         let reviewer = &g.groups[0].sessions[1];
         assert!(reviewer.read_only && reviewer.args.contains(&"read-only".to_string()));
         assert_eq!(g.groups[1].sessions[0].command, ""); // 셸
         assert_eq!(g.groups[0].sessions[0].shift_enter.as_deref(), Some("\x1b\r"));
         assert_eq!(g.groups[1].sessions[0].shift_enter, None);
+        // 역할 프롬프트: 역할 + 공통 규약이 처음과 복원 인자에 똑같이 들어간다
+        let dev = &g.groups[0].sessions[0];
+        let prompt = |args: &[String]| args[args.iter().position(|a| a == "--append-system-prompt").unwrap() + 1].clone();
+        assert_eq!(prompt(&dev.args), format!("{DEV_ROLE} {RULES}"));
+        assert_eq!(dev.resume.as_deref().map(prompt), Some(format!("{DEV_ROLE} {RULES}")));
+        let instructions = format!("developer_instructions=\"{REVIEWER_ROLE} {RULES}\"");
+        assert!(reviewer.args.contains(&instructions) && reviewer.resume.as_ref().unwrap().contains(&instructions));
+        assert!(!default_config().contains("_PROMPT@"), "자리표시자가 남음");
+        // TOML·JSON 문자열에 그대로 넣을 수 있고 인자 치환과 섞이지 않는다
+        for text in [RULES, DEV_ROLE, REVIEWER_ROLE] {
+            assert!(!text.chars().any(|c| matches!(c, '"' | '\\' | '{' | '}') || c.is_control()), "{text}");
+        }
     }
 
     #[test]

@@ -83,7 +83,7 @@ const WAKE_GAP: Duration = Duration::from_millis(300);
 
 fn wake_notice(from: &[String]) -> String {
     format!(
-        "[ddak] New chat message from {}. Read it with the ddak read_messages tool, then reply with post_message and @mention whoever should get the reply.",
+        "[ddak] New chat message from {}. Read it with the ddak read_messages tool. Post with post_message only what moves the work: a result someone asked for, a needed request or question, or a concrete blocker. Do not post acknowledgements. @mention only someone who must act next or who asked for what you deliver.",
         from.join(", ")
     )
 }
@@ -980,7 +980,7 @@ mod tests {
         std::thread::sleep(WAKE_GAP * 3);
         assert!(!text().contains("GOT:[ddak] New chat message from origin/c"), "사용자 입력 뒤에 Enter를 보냄");
         write_input(&ptys, id, "\r", true).unwrap();
-        wait("from origin/c. Read it with the ddak read_messages tool, then reply with post_message and @mention whoever should get the reply.y");
+        wait("from origin/c. Read it with the ddak read_messages tool. Post with post_message only what moves the work: a result someone asked for, a needed request or question, or a concrete blocker. Do not post acknowledgements. @mention only someone who must act next or who asked for what you deliver.y");
 
         // 바로 깨우기는 초안이 있어도 깨운다 (채팅 패널: 토큰으로 대기를 보고 누른다). 터미널이 없어지면 그만둔다
         assert!(ptys.waiting_tokens().is_empty());

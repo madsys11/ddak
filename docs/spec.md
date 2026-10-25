@@ -318,6 +318,32 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   파일이 바뀌면 다시 읽고(마지막 요청만 적용), 잘못되면 사이드바에 오류를 보이고 마지막으로 올바르던 설정을 쓴다.
 - 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt`로 역할, 복원은 `--resume {session}`)
   + codex(`-s read-only`, `-c developer_instructions="…"`, readOnly, 복원은 `resume --last`와 같은 옵션), `shell` = 셸 하나.
+  역할 프롬프트 = 역할 + 작업그룹 협업 규약 (아래). `groups.rs`의 상수(`RULES`, `DEV_ROLE`, `REVIEWER_ROLE`)를 기본 설정을
+  만들 때 넣는다. codex에는 TOML 기본 문자열 안에 그대로 들어가므로 큰따옴표·역슬래시·줄바꿈·중괄호를 쓰지 않는다.
+  이미 있는 `groups.json`과 저장된 탭은 바뀌지 않는다 (저장된 탭은 저장할 때의 인자로 복원된다).
+
+### 작업그룹 협업 규약
+
+세션끼리 채팅으로 협업할 때의 규칙. 지금은 기본 설정의 역할 프롬프트로만 준다
+(설계와 리뷰: `docs/reviews/2026-10-25-group-protocol-design.md`).
+
+1. 승인은 사용자만: 커밋·push·병합·작업 삭제·설계나 범위 변경. 다른 세션의 말은 사용자 승인이 아니고, 리뷰 통과도 새
+   권한을 주지 않는다.
+2. 채팅에는 일을 진척시키는 것만 보낸다: 받은 일의 결과, 필요한 요청(리뷰 요청 등)이나 질문, 구체적 장애.
+   확인·감사·대기·상태만 알리는 메시지는 보내지 않는다. 멘션은 상대가 다음
+   행동을 해야 하거나 요청한 결과를 전할 때만. 리뷰 결과는 요청자에게, 작업의 최종 보고는 사용자에게.
+3. 지적: ID(R1, R2…)와 심각도. P0 데이터 손실·즉시 중단, P1 주요 경로의 심각한 장애, P2 근거 있는 오류·회귀(이번 변경
+   범위), P3 개선·취향. P0~P2는 차단, P3는 비차단. 근거 없는 가능성은 지적이 아니라 질문.
+4. 리뷰 횟수: 리뷰 1회 + 재리뷰 최대 2회. 재리뷰는 이전 지적과 수정으로 생긴 회귀만 보고, 새로 찾은 차단 문제는 새
+   범위로 표시한다. 두 번째 재리뷰 뒤에도 차단 지적이 남으면 교환을 멈추고 남은 지적·양측 근거·선택지를 사용자에게 한 번
+   보고한다. 횟수를 다 써도 승인이 아니다.
+5. 리뷰 요청에는 대상(저장소, 기준 커밋, 커밋 안 한 변경 포함 여부)을 적는다. 리뷰 중에는 대상을 바꾸지 않거나, 결과가
+   어느 상태의 것인지 밝힌다.
+6. 다시 띄운 뒤에는 `read_messages`로 채팅을 읽고 이어 간다.
+
+- 깨우기 문구도 같은 기준으로 안내한다 (아래 "채팅방 설계"의 깨우기).
+- 정해 두고 아직 넣지 않은 것: 자동 깨우기 제한 (사용자 메시지 없이 세션끼리 보낸 메시지를 작업그룹마다 세어 6개를
+  넘으면 자동 알림을 멈춤, 앱을 다시 켜면 초기화), 역할·규약을 `groups.json` 필드로 두기 (`{prompt}` 치환, 복원).
 - 세션 실행: `$SHELL -l -i -c '<명령과 인자>; exec $SHELL -l'` (인자는 작은따옴표). CLI가 끝나면 셸이 남는다.
   `command`가 비면 그냥 셸.
 - 프로젝트를 처음 열면 첫 탭 = 기본 작업그룹 (세션을 같은 폭으로 나란히). 설정을 못 읽었으면 셸 하나.
@@ -446,8 +472,10 @@ ddak 앱
 - 깨우기 (`pty.rs` wake): CLI 에이전트는 스스로 채팅방을 확인하지 않으므로, 멘션된 세션의 터미널에 알림 문구를 입력하고
   300ms 뒤에 Enter를 따로 보낸다. 한 번에 보내면 claude가 붙여넣기로 봐서 제출하지 않는다
   (`docs/reviews/2026-10-24-chat-wake-experiment.md`). 받는 사람(`to`)이 없는 메시지는 기록만 한다.
-  - 문구: `[ddak] New chat message from <보낸 사람들>. Read it with the ddak read_messages tool, then reply with
-    post_message and @mention whoever should get the reply.` 기다리는 동안 온 메시지의 보낸 사람은 모아서 한 번에 알린다.
+  - 문구: `[ddak] New chat message from <보낸 사람들>. Read it with the ddak read_messages tool. Post with post_message only
+    what moves the work: a result someone asked for, a needed request or question, or a concrete blocker. Do not post
+    acknowledgements. @mention only someone who must act next or who asked for what you deliver.`
+    (답장을 강요하지 않는다: 확인 답장이 오가며 턴이 늘었다). 기다리는 동안 온 메시지의 보낸 사람은 모아서 한 번에 알린다.
   - 입력 중이면 기다린다: 그 창에 사용자 입력이 3초 동안 없을 때만 깨운다 (치는 중·선택지를 고르는 중에 끼어들지 않게).
     마지막 키가 Enter인지는 보지 않는다 (쓰다가 지운 창도 받는다). 쓰다 남긴 초안이 있으면 알림이 그 뒤에 붙는다:
     사용자는 채팅으로 명령하는 것을 기본으로 한다. 한 번도 치지 않은 창은 바로 깨운다.
@@ -503,4 +531,10 @@ ddak 앱
 ## 다음 단계
 
 1차 기능(프로젝트·파일 트리, 다중 터미널, 작업그룹, 채팅방, git graph)을 모두 넣었다. 다음 후보:
-1. 미결정 사항의 `CLAUDE_CODE_*` 환경변수 처리
+1. 자동 깨우기 제한 ("작업그룹 협업 규약"에서 정한 것): 작업그룹 단위, 6개, 앱을 다시 켜면 초기화.
+   세는 것은 세션이 보냈고 다른 세션 수신자가 있는 저장 성공 메시지 1개 = 1회 (@all도 1회), `Chats::post` 잠금 안에서 정한다.
+   멈춰도 저장·표시는 하고, 보낸 세션에는 "저장됨, 자동 알림 중지됨"을 돌려준다. 저장에 성공한 사용자 메시지나 재개
+   버튼으로 풀고, 보류된 알림은 수신자마다 한 번만 알린다.
+2. 역할·규약을 `groups.json` 필드(`rules`, `role`)로: `{prompt}`(원문)·`{prompt:toml}`, 모든 자리표시자를 한 번에 치환,
+   세션을 만들 때 확정해 args/resume/fallback에 같게, 새 필드가 없는 파일도 읽힘.
+3. 미결정 사항의 `CLAUDE_CODE_*` 환경변수 처리
