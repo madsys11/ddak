@@ -9,6 +9,7 @@ import { codeError } from "./errors";
 import { GitGraph } from "./GitGraph";
 import { ChatIcon, GitIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
+import { usePointerTrack } from "./pointerTrack";
 import { Terminal } from "./Terminal";
 import { useT } from "./prefs";
 import { type Group, promptOf } from "./useGroups";
@@ -453,26 +454,8 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
     return () => window.removeEventListener("keydown", onKey, true);
   }, [s.tabs.length]);
 
-  // 끌기(탭·구분선)는 포인터가 요소 밖으로 나가도 따라가도록 window에서 받는다 (끄는 중에 탭 요소가 DOM에서
-  // 옮겨져서 포인터 캡처도 못 쓴다). 끝나는 경우를 모두 같은 정리로 모은다 (리뷰 지적 5): pointerup, pointercancel,
-  // 버튼이 눌려 있지 않은 움직임 (창 밖에서 떼면 pointerup이 오지 않는다), 언마운트, 새 끌기 시작.
-  const endPointer = useRef<(() => void) | null>(null);
-  useEffect(() => () => endPointer.current?.(), []);
-  function trackPointer(onMove: (ev: PointerEvent, end: () => void) => void, onEnd?: () => void) {
-    endPointer.current?.();
-    const move = (ev: PointerEvent) => (ev.buttons === 0 ? end() : onMove(ev, end));
-    const end = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      if (endPointer.current === end) endPointer.current = null;
-      onEnd?.();
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end);
-    window.addEventListener("pointercancel", end);
-    endPointer.current = end;
-  }
+  // 끌기(탭·구분선)의 시작·끝 정리 (src/pointerTrack.ts)
+  const trackPointer = usePointerTrack();
 
   // 탭을 끌어서 순서 바꾸기. 4px 넘게 움직여야 끌기로 본다 (그냥 누르기·더블클릭과 구분).
   // 끄는 동안 포인터가 지나간 자리로 바로 옮기고, 탭 영역 끝에 가면 그쪽으로 스크롤한다.

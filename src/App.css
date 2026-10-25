@@ -39,7 +39,7 @@ button:hover {
 }
 
 .sidebar {
-  width: 260px;
+  position: relative;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -676,7 +676,7 @@ button.secondary {
 
 /* 채팅방 오른쪽 패널 (src/ChatPanel.tsx) */
 .chat-panel {
-  width: 340px;
+  position: relative;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -1054,4 +1054,29 @@ button.secondary {
 }
 .git-status.s-D {
   color: var(--error);
+}
+
+/* 패널 가로 크기 막대 (src/Resizer.tsx): 파일 트리 오른쪽 끝, 채팅 패널 왼쪽 끝. 경계선 위에 겹쳐 잡기 쉽게 폭을 둔다. */
+.panel-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 5;
+  cursor: col-resize;
+}
+.panel-resizer.right {
+  right: -3px;
+}
+.panel-resizer.left {
+  left: -3px;
+}
+.panel-resizer:hover,
+body.resizing .panel-resizer:active {
+  background: var(--accent-dim);
+}
+/* 끄는 동안은 어디서든 크기 바꾸기 커서, 글자 선택 안 함 */
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
 }

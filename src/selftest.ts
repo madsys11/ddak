@@ -180,10 +180,13 @@ const key = (k: string, code: string, shift = false) =>
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // 앱 창이 포커스를 잃으면 WebKit이 화면 갱신을 늦춘다 (자체 테스트 중 다른 앱을 쓸 때). 그러면 ResizeObserver·
 // DOM 렌더러 그리기처럼 화면 갱신에 묶인 것이 늦게 온다. 그런 검사가 실패하면 이 값을 같이 남긴다.
-async function frameInfo() {
+// 화면 갱신(rAF) 한 번을 기다린다. 창이 가려지면 rAF가 멈추므로 ms까지만 기다린다 (끝없이 기다려 단계 제한 시간 300초에
+// 걸리고 뒤 단계가 돌지 않았다, 2026-10-25 tabScroll).
+async function frameInfo(ms = 3000) {
   const t0 = performance.now();
-  await new Promise((r) => requestAnimationFrame(r));
-  return `focus=${document.hasFocus()} vis=${document.visibilityState} raf=${Math.round(performance.now() - t0)}ms`;
+  const drawn = await Promise.race([new Promise<boolean>((r) => requestAnimationFrame(() => r(true))), sleep(ms).then(() => false)]);
+  const raf = drawn ? `${Math.round(performance.now() - t0)}ms` : `>${ms}ms(멈춤)`;
+  return `focus=${document.hasFocus()} vis=${document.visibilityState} raf=${raf}`;
 }
 // 시간 초과면 그때 화면을 같이 남긴다 (간헐 실패의 원인을 보려고)
 const ready = (term: Terminal) =>
@@ -1226,6 +1229,87 @@ async function testGroups(term: Terminal) {
     await write(testConfig);
     await waitFor("테스트 설정 복귀", () => devHooks.groups?.default === "test", 3000);
   }
+}
+
+// 패널 크기·파일 트리 숨기기 (src/Resizer.tsx, prefs.tsx): 파일 트리 오른쪽 끝·채팅 패널 왼쪽 끝을 끌어 폭을 바꾸고 (최소·최대로
+// 자르고 저장), 더블클릭하면 그 패널만 기본값, 보기 메뉴 "패널 크기 초기화"는 둘 다. "파일 트리 보이기"(⌘B)로 숨기고 다시 보인다.
+async function testPanels() {
+  const sidebar = () => document.querySelector<HTMLElement>(".sidebar")!;
+  const ws = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const chat = () => ws().querySelector<HTMLElement>(".chat-panel")!;
+  const w = (el: HTMLElement) => parseInt(el.style.width);
+  const bar = (el: HTMLElement) => el.querySelector<HTMLElement>(":scope > .panel-resizer")!;
+  const dragBy = async (el: HTMLElement, dx: number) => {
+    const r = el.getBoundingClientRect();
+    const [x, y] = [r.left + r.width / 2, r.top + 10];
+    el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, clientX: x, clientY: y, buttons: 1 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: x + dx, clientY: y, buttons: 1 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: x + dx, clientY: y }));
+    await sleep(100);
+  };
+  // 끌기가 끝난 뒤의 움직임은 폭을 바꾸지 않는다 (리뷰 R1): 취소(pointercancel), 창 밖에서 뗌(버튼 없는 pointermove)
+  const endedBy = async (el: HTMLElement, end: "cancel" | "released") => {
+    const r = el.getBoundingClientRect();
+    const [x, y] = [r.left + r.width / 2, r.top + 10];
+    el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, clientX: x, clientY: y, buttons: 1 }));
+    if (end === "cancel") window.dispatchEvent(new PointerEvent("pointercancel", { clientX: x, clientY: y }));
+    else window.dispatchEvent(new PointerEvent("pointermove", { clientX: x + 30, clientY: y, buttons: 0 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: x + 120, clientY: y, buttons: 1 }));
+    await sleep(100);
+    return document.body.classList.contains("resizing");
+  };
+  const sizes: number[] = [w(sidebar())];
+  await dragBy(bar(sidebar()), 100);
+  sizes.push(w(sidebar()));
+  const saved = localStorage.getItem("ddak.sidebarWidth");
+  await dragBy(bar(sidebar()), 1000);
+  sizes.push(w(sidebar()));
+  await dragBy(bar(sidebar()), -2000);
+  sizes.push(w(sidebar()));
+  bar(sidebar()).dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await sleep(100);
+  sizes.push(w(sidebar()));
+  check("패널: 파일 트리 폭을 끌어 바꾸고 (160~600으로 자름, 저장), 더블클릭하면 기본 260", sizes.join(",") === "260,360,600,160,260" && saved === "360", `${sizes} ${saved}`);
+  const stuckAfterCancel = await endedBy(bar(sidebar()), "cancel");
+  const afterCancel = w(sidebar());
+  const stuckAfterRelease = await endedBy(bar(sidebar()), "released");
+  const afterRelease = w(sidebar());
+  // 끝나지 않은 끌기를 새 끌기로 바꿔도 끄는 중 표시(크기 조절 커서·선택 막기)는 남는다 (리뷰 R2)
+  const down = () => bar(sidebar()).dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, clientX: 10, clientY: 10, buttons: 1 }));
+  down();
+  down();
+  const stillResizing = document.body.classList.contains("resizing");
+  window.dispatchEvent(new PointerEvent("pointerup", { clientX: 10, clientY: 10 }));
+  check(
+    "패널: 끌기를 취소하거나 창 밖에서 떼면 끝나고, 그 뒤 움직임은 폭을 바꾸지 않음. 새 끌기로 바꿔도 끄는 중 표시는 남음",
+    stillResizing && !document.body.classList.contains("resizing") &&
+    afterCancel === 260 && afterRelease === 260 && !stuckAfterCancel && !stuckAfterRelease,
+    `${afterCancel} ${stuckAfterCancel} ${afterRelease} ${stuckAfterRelease} ${stillResizing}`,
+  );
+
+  ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  await waitFor("채팅 열기", () => chat().style.display !== "none", 2000);
+  const chat0 = w(chat());
+  await dragBy(bar(chat()), -100);
+  const chat1 = w(chat());
+  await dragBy(bar(sidebar()), 50);
+  const side1 = w(sidebar());
+  await clickMenu("View", "Reset Panel Sizes");
+  const reset = await waitFor("패널 크기 초기화", () => w(sidebar()) === 260 && w(chat()) === 340, 3000).then(() => true, () => false);
+  check("패널: 채팅 패널은 왼쪽 끝을 끌어 넓히고, 보기 메뉴 초기화는 둘 다 기본값", chat0 === 340 && chat1 === 440 && side1 === 310 && reset, `${chat0} ${chat1} ${side1} ${w(sidebar())} ${w(chat())}`);
+  ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+
+  await clickMenu("View", "Show File Tree");
+  const hidden = await waitFor("파일 트리 숨김", () => sidebar().style.display === "none", 3000).then(() => true, () => false);
+  const offMenu = await waitMenu((m) => m.includes("View/Show File Tree"));
+  await clickMenu("View", "Show File Tree");
+  const back = await waitFor("파일 트리 다시", () => sidebar().style.display === "", 3000).then(() => true, () => false);
+  const onMenu = await waitMenu((m) => m.includes("View/Show File Tree [x]"));
+  check(
+    "패널: 보기 메뉴 파일 트리 보이기로 숨기고 다시 보임 (메뉴 체크도 따라감)",
+    hidden && offMenu.includes("View/Show File Tree") && back && onMenu.includes("View/Show File Tree [x]") && localStorage.getItem("ddak.sidebar") === "true",
+    `${hidden} ${back} ${offMenu.filter((m) => m.includes("File Tree"))} ${onMenu.filter((m) => m.includes("File Tree"))}`,
+  );
 }
 
 // 한글 보정(src/hangul.ts)만 따로: 화면 밖 xterm에 붙여서 나가는 입력을 본다.
@@ -2800,6 +2884,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["groupWorktree", () => testGroupWorktree(root, t())],
     ["tabRename", testTabRename],
     ["prefs", testPrefs],
+    ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],

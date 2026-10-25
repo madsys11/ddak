@@ -30,6 +30,9 @@ const ZOOM_ITEMS: &[(&str, &str)] = &[
 const CLOSE_WINDOW: &str = "close_window";
 // 보기 메뉴: 프로젝트의 Git Graph 탭을 연다 (src/GitGraph.tsx). 단축키는 없다.
 const GIT_GRAPH: &str = "git_graph";
+// 보기 메뉴: 파일 트리 보이기(체크, ⌘B)·패널 크기 초기화 (프론트 src/prefs.tsx)
+const TOGGLE_SIDEBAR: &str = "toggle_sidebar";
+const RESET_PANELS: &str = "reset_panels";
 const EDIT_GROUPS: &str = "edit_groups";
 const THEME_PREFIX: &str = "theme:";
 const LOCALE_PREFIX: &str = "locale:";
@@ -46,6 +49,13 @@ pub struct MenuSpec {
     labels: HashMap<String, String>,
     themes: Vec<Choice>,
     locales: Vec<Choice>,
+    // 파일 트리가 보이는지 (보기 메뉴의 체크)
+    #[serde(default = "shown")]
+    sidebar: bool,
+}
+
+fn shown() -> bool {
+    true
 }
 
 fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<R>> {
@@ -94,7 +104,12 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         }
         sub.build()
     };
-    let mut view = SubmenuBuilder::new(app, l("view")).item(&MenuItemBuilder::with_id(GIT_GRAPH, l(GIT_GRAPH)).build(app)?).separator();
+    let mut view = SubmenuBuilder::new(app, l("view"))
+        .item(&MenuItemBuilder::with_id(GIT_GRAPH, l(GIT_GRAPH)).build(app)?)
+        .separator()
+        .item(&CheckMenuItemBuilder::with_id(TOGGLE_SIDEBAR, l(TOGGLE_SIDEBAR)).checked(spec.sidebar).accelerator("CmdOrCtrl+B").build(app)?)
+        .item(&MenuItemBuilder::with_id(RESET_PANELS, l(RESET_PANELS)).build(app)?)
+        .separator();
     for (id, accel) in ZOOM_ITEMS {
         view = view.item(&MenuItemBuilder::with_id(*id, l(id)).accelerator(*accel).build(app)?);
     }
@@ -140,7 +155,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) {
                 let _ = window.close();
             }
         } else if TERMINAL_ITEMS.iter().map(|(item, _)| *item).chain(ZOOM_ITEMS.iter().map(|(item, _)| *item)).any(|item| item == id)
-            || id == GIT_GRAPH
+            || [GIT_GRAPH, TOGGLE_SIDEBAR, RESET_PANELS].contains(&id)
             || id.starts_with(THEME_PREFIX)
             || id.starts_with(LOCALE_PREFIX)
         {

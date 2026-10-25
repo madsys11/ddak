@@ -4,7 +4,8 @@ import { SetupDialog } from "./SetupDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
 import { Children, TreeContext, Twisty, indent, useFolderMenu, useOpenWhenCreating, useTree } from "./FileTree";
 import { ProjectIcon } from "./icons";
-import { useT } from "./prefs";
+import { PANEL_SIZES, usePrefs, useT } from "./prefs";
+import { Resizer } from "./Resizer";
 import { baseName, type Project } from "./useProjects";
 
 type Props = {
@@ -22,6 +23,7 @@ type Props = {
 // 프로젝트 목록. 프로젝트를 펼치면 그 폴더의 파일 트리가 보인다.
 export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate, onRemove }: Props) {
   const t = useT();
+  const { panels, setPanelWidth } = usePrefs();
   const [addingTo, setAddingTo] = useState<string | null>(null);
   // 작업그룹 준비 창을 연 프로젝트
   const [settingUp, setSettingUp] = useState<string | null>(null);
@@ -56,7 +58,9 @@ export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate
   );
 
   return (
-    <aside className="sidebar">
+    // 숨겨도 그리기는 한다 (펼친 폴더 등 트리 상태를 잃지 않게). 보기 메뉴 "파일 트리 보이기"(⌘B, src/prefs.tsx)
+    <aside className="sidebar" style={{ width: panels.sidebarWidth, display: panels.sidebar ? undefined : "none" }}>
+      <Resizer edge="right" width={panels.sidebarWidth} {...PANEL_SIZES.sidebar} onWidth={(w) => setPanelWidth("sidebar", w)} onReset={() => setPanelWidth("sidebar", null)} />
       <div className="sidebar-header">
         <span>{t("sidebar.projects")}</span>
         <button className="icon-btn" title={t("sidebar.addProject")} onClick={onAdd}>

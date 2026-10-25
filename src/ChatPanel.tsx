@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { devHooks } from "./devHooks";
 import { draggedPath, isPathDrag } from "./dragPath";
-import { usePrefs } from "./prefs";
+import { PANEL_SIZES, usePrefs } from "./prefs";
+import { Resizer } from "./Resizer";
 
 // src-tauri/src/chat.rs Message
 // held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음
@@ -25,7 +26,7 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
   onClose: () => void;
   onUnread: (unread: boolean) => void;
 }) {
-  const { t, locale } = usePrefs();
+  const { t, locale, panels, setPanelWidth } = usePrefs();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<string[]>([]);
   // 깨우기를 기다리는 참여자 (터미널 이름 줄의 배지와 같은 상태. 채팅을 보는 동안에도 보이게)
@@ -169,7 +170,8 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
   const time = (ms: number) => new Date(ms).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
 
   return (
-    <aside className="chat-panel" style={{ display: open ? undefined : "none" }}>
+    <aside className="chat-panel" style={{ width: panels.chatWidth, display: open ? undefined : "none" }}>
+      <Resizer edge="left" width={panels.chatWidth} {...PANEL_SIZES.chat} onWidth={(w) => setPanelWidth("chat", w)} onReset={() => setPanelWidth("chat", null)} />
       <div className="chat-head">
         <span className="chat-title">{t("chat.title")}</span>
         <button className="chat-clear" data-action="chat-clear" title={t("chat.clear")} disabled={messages.length === 0} onClick={clear}>
