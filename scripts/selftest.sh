@@ -58,13 +58,13 @@ JSON
 
 printf '{"projects":[{"path":"%s"}],"active":"%s"}' "$root" "$root" > "$base/data-resume/projects.json"
 # resume: 두 번 켠다 (resume-save가 남긴 상태를 resume-check가 복원). keeps는 복원 인자로 이어 가고,
-# fresh는 복원 인자가 실패해 처음 인자로 돌아간다.
-cat > "$base/data-resume/groups.json" <<'JSON'
-{"default":"duo","groups":[{"id":"duo","name":"Duo","sessions":[
-  {"name":"keeps","command":"sh","args":["-c","echo \"FIRST {session}\""],"resume":["-c","echo \"RESUMED {session}\""]},
+# fresh는 복원 인자가 실패해 처음 인자로 돌아간다. keeps의 역할(KP1)은 둘 사이에 KP2로 바꾼다: 복원은 세션을 만들 때
+# 저장한 프롬프트({prompt})를 써야 한다.
+duo='{"default":"duo","groups":[{"id":"duo","name":"Duo","sessions":[
+  {"name":"keeps","role":"ROLE","command":"sh","args":["-c","echo \"FIRST {session}\""],"resume":["-c","echo \"RESUMED {session} {prompt}\""]},
   {"name":"fresh","command":"sh","args":["-c","echo \"FRESH {session}\""],"resume":["-c","exit 1"]}
-]}]}
-JSON
+]}]}'
+print -r -- "${duo/ROLE/KP1}" > "$base/data-resume/groups.json"
 
 # 하나가 실패해도 나머지를 다 돌리고, 끝에 하나라도 실패했으면 실패로 끝낸다.
 failed=0
@@ -76,6 +76,7 @@ for scenario in main restart corrupt; do
 done
 if [[ " $only " == *" resume "* ]]; then
   run resume-save resume || failed=1
+  print -r -- "${duo/ROLE/KP2}" > "$base/data-resume/groups.json"
   run resume-check resume || failed=1
 fi
 exit $failed

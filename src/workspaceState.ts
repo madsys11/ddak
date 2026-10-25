@@ -9,8 +9,9 @@ import type { Session } from "./useGroups";
 export type Tab = { id: number; layout: Layout; focus: number; cwd: string; group?: string; worktree?: string; name?: string; setup?: Setup; git?: GitTab };
 export type GitTab = { repo?: string };
 // 창에서 돌리는 세션. setup: 작업그룹 준비를 돌리는 창 (이름표는 번역 문구). sid: 창마다 정한 세션 ID (인자의 {session}).
-// resumed: 복원한 세션이라 이어서 하기(resume) 인자로 띄운다.
-export type PaneSession = Session & { setup?: boolean; sid?: string; resumed?: boolean };
+// prompt: 세션을 만들 때 정한 프롬프트 (인자의 {prompt}, useGroups.ts promptOf). resumed: 복원한 세션이라 이어서 하기(resume)
+// 인자로 띄운다.
+export type PaneSession = Session & { setup?: boolean; sid?: string; prompt?: string; resumed?: boolean };
 // 작업그룹 준비. 세션(CLI)은 준비가 성공하거나 사용자가 "그래도 시작"을 누를 때까지(started) 띄우지 않는다.
 // pane: 준비 창 (닫았으면 null). run: 몇 번째 실행인지 (다시 준비하면 터미널을 새로 만들고, 이전 실행의 종료는
 // 무시한다). code: 실패한 종료 코드, null이면 중단 (창을 닫음·시그널). spawnFailed: 준비 창의 터미널을 만들지 못함
@@ -73,7 +74,8 @@ function isSession(v: unknown): v is PaneSession {
     (v.resume === undefined || v.resume === null || isStrings(v.resume)) &&
     typeof v.readOnly === "boolean" &&
     (v.shiftEnter === null || isString(v.shiftEnter)) &&
-    isOptString(v.sid)
+    isOptString(v.sid) &&
+    isOptString(v.prompt)
   );
 }
 
@@ -147,12 +149,13 @@ export function fromSaved(text: string, root: string): State | null {
   return { root, tabs, active, titles: {}, sessions, nextId: Math.max(0, ...ids) + 1, loaded: true };
 }
 
-// 세션을 띄울 명령. 인자의 {session}은 그 창의 세션 ID. 복원한 세션은 resume 인자로 띄우고, 그것이 실패하면
-// (이어서 할 대화가 아직 없음 등) 처음 인자로 띄운다 (src-tauri/src/pty.rs fallback).
-export function commandOf(s: PaneSession | undefined): { command?: string[]; fallback?: string[] } {
+// 세션을 띄울 명령. 복원한 세션은 resume 인자로 띄우고, 그것이 실패하면 (이어서 할 대화가 아직 없음 등) 처음 인자로
+// 띄운다 (src-tauri/src/pty.rs fallback). 인자의 자리표시자는 여기서 바꾸지 않고 값(vars)과 함께 넘긴다: Rust가 {chat}까지
+// 한 번에 바꾼다 (차례로 바꾸면 넣은 프롬프트 안의 {chat} 등이 다시 바뀌었다). 처음·복원·fallback에 같은 값을 쓴다.
+export function commandOf(s: PaneSession | undefined): { command?: string[]; fallback?: string[]; vars?: Record<string, string> } {
   if (!s?.command) return {};
-  const fill = (args: string[]) => args.map((a) => a.split("{session}").join(s.sid ?? ""));
-  const first = [s.command, ...fill(s.args)];
-  if (s.resumed && s.resume) return { command: [s.command, ...fill(s.resume)], fallback: first };
-  return { command: first };
+  const vars = { session: s.sid ?? "", prompt: s.prompt ?? "" };
+  const first = [s.command, ...s.args];
+  if (s.resumed && s.resume) return { command: [s.command, ...s.resume], fallback: first, vars };
+  return { command: first, vars };
 }

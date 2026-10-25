@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { useT } from "./prefs";
-import type { Group, Session } from "./useGroups";
+import { type Group, type Session, promptOf } from "./useGroups";
+
+// 고른 세션과 그때 정한 프롬프트 (인자의 {prompt})
+export type PickedSession = Session & { prompt: string };
 
 // 쓰기 가능한 세션: 명령이 있고 읽기 전용이 아닌 것 (그냥 셸은 사용자가 직접 쓰므로 세지 않는다)
 export const isWriter = (s: { command: string; readOnly: boolean; setup?: boolean }) => !!s.command && !s.readOnly && !s.setup;
@@ -11,17 +14,19 @@ export const isWriter = (s: { command: string; readOnly: boolean; setup?: boolea
 export function AddSessionDialog({ groups, writers, onAdd, onNewGroup, onClose }: {
   groups: Group[] | null;
   writers: string[];
-  onAdd: (session: Session) => void;
+  onAdd: (session: PickedSession) => void;
   onNewGroup: () => void;
   onClose: () => void;
 }) {
   const t = useT();
   // 경고를 보이는 중인 세션
-  const [warned, setWarned] = useState<Session | null>(null);
+  const [warned, setWarned] = useState<PickedSession | null>(null);
 
-  const pick = (s: Session) => {
-    if (isWriter(s) && writers.length) return setWarned(s);
-    onAdd(s);
+  // 프롬프트는 이 세션이 든 그룹의 규약으로 정한다 (지금 탭의 그룹이 아니라. useGroups.ts promptOf)
+  const pick = (g: Group, s: Session) => {
+    const picked = { ...s, prompt: promptOf(g, s) };
+    if (isWriter(s) && writers.length) return setWarned(picked);
+    onAdd(picked);
     onClose();
   };
 
@@ -66,7 +71,7 @@ export function AddSessionDialog({ groups, writers, onAdd, onNewGroup, onClose }
             <div className="session-choices">
               {groups?.flatMap((g) =>
                 g.sessions.map((s, i) => (
-                  <button key={`${g.id}/${i}`} className="session-choice" data-session={`${g.id}/${s.name}`} autoFocus={g === groups[0] && i === 0} onClick={() => pick(s)}>
+                  <button key={`${g.id}/${i}`} className="session-choice" data-session={`${g.id}/${s.name}`} autoFocus={g === groups[0] && i === 0} onClick={() => pick(g, s)}>
                     <span className="session-name">{s.name}</span>
                     <span className="session-group">{g.name}</span>
                     {s.readOnly && <span className="pane-badge">{t("session.readOnly")}</span>}

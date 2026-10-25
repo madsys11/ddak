@@ -1780,12 +1780,14 @@ async function testAddSession(root: string, first: Terminal) {
   // chatter: 같은 작업그룹(origin)의 listener를 멘션한 메시지를 MCP로 7개 보낸다 (자동 깨우기 제한 WAKE_LIMIT=6). $0은 주소, $1은 요청
   const chatRpc = `{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"tools/call\\",\\"params\\":{\\"name\\":\\"post_message\\",\\"arguments\\":{\\"text\\":\\"@origin/listener ping\\"}}}`;
   const chatter = `{"name":"chatter","command":"sh","args":["-c","for i in 1 2 3 4 5 6 7; do curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"; echo; done","{chat}","${chatRpc}"],"readOnly":true}`;
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter}`;
-  // tty 한 줄은 1024바이트까지라 두 번에 나눠 쓰고 옮긴다 (쓰는 도중의 반쪽 파일을 읽지 않게)
-  const content = TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","sessions":[${pick}]}]}`);
-  const half = Math.ceil(content.length / 2);
-  await run(first, `printf '%s' '${content.slice(0, half)}' > "${file}.part"`);
-  await run(first, `printf '%s' '${content.slice(half)}' >> "${file}.part" && mv "${file}.part" "${file}"`);
+  // prompter: 역할(role) + 그룹 규약(rules)이 인자의 {prompt}·{prompt:toml}로 들어가는지 찍는다. 역할 안의 {chat}은 바뀌면 안 된다
+  const prompter = `{"name":"prompter","role":"R {chat}","command":"sh","args":["-c","printf \\"A:%s|B:%s|\\" \\"$0\\" \\"$1\\"","{prompt}","v={prompt:toml}"],"readOnly":true}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter}`;
+  // 터미널에 보내는 명령은 900바이트까지라 (run) 500자씩 나눠 붙인 뒤 옮긴다 (쓰는 도중의 반쪽 파일을 읽지 않게)
+  const content = TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","rules":"S2","sessions":[${pick}]}]}`);
+  await run(first, `: > "${file}.part"`);
+  for (let i = 0; i < content.length; i += 500) await run(first, `printf '%s' '${content.slice(i, i + 500)}' >> "${file}.part"`);
+  await run(first, `mv "${file}.part" "${file}"`);
   await waitFor("세션 고르기 설정", () => devHooks.groups?.groups.some((g) => g.id === "pick"), 3000);
   const before = tabCount();
   await menu("new_tab");
@@ -1813,7 +1815,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -1852,6 +1854,23 @@ async function testAddSession(root: string, first: Terminal) {
     posted?.from === "origin/poster" && posted.to.join(",") === "user" && members.join(",") === "user,origin/poster,origin/reviewer,origin/writer,origin/writer-2",
     `${JSON.stringify(posted)} | ${members.join(",")}`,
   );
+
+  // 역할·규약: 세션의 role과 그 세션이 든 그룹(pick)의 rules가 빈 줄로 이어져 {prompt}로, {prompt:toml}은 TOML 문자열로
+  // 들어간다. 자리표시자는 한 번에 바꿔서 넣은 역할 안의 {chat}은 그대로다. 확인한 뒤 닫는다 (뒤 검사의 참여자 목록)
+  await open("menu");
+  choose("pick/prompter");
+  const prompterPane = await waitFor("prompter 창", () => visiblePanes().find((p) => p.el.querySelector(".pane-label")?.firstChild?.textContent === "prompter"), 5000);
+  const promptLines = await waitFor("prompter 출력", () => {
+    const lines = screen(prompterPane.term);
+    return lines.some((l) => l.includes("|B:")) && lines;
+  }, 10000).catch(() => screen(prompterPane.term));
+  check(
+    "역할·규약: {prompt}는 역할 + 그룹 규약, {prompt:toml}은 TOML 문자열, 넣은 값 안의 {chat}은 그대로",
+    promptLines.includes("A:R {chat}") && promptLines.some((l) => l.includes('S2|B:v="R {chat}\\n\\nS2"|')),
+    promptLines.filter((l) => l.trim()).slice(-4).join(" ⏎ "),
+  );
+  await menu("close_pane");
+  await waitAsync("prompter 나감", async () => !(await invoke<string[]>("chat_members", { project: root })).includes("origin/prompter"), 5000).catch(() => null);
 
   await testChatPanel(root, open, choose);
 
@@ -2585,9 +2604,10 @@ async function testResumeCheck(root: string) {
   await ready(shell.term);
   const facts = await savedFacts(shell.term, root);
   const sid = (name: string) => facts.find((l) => l.startsWith(`SID ${name} `))?.split(" ")[2] ?? "?";
-  await waitFor("이어서 하기", () => screen(keeps.term).some((l) => l.trim() === `RESUMED ${sid("keeps")}`), 10000).then(
-    () => check("복원: 세션을 이어서 하기 인자(같은 세션 ID)로 띄움", true),
-    () => check("복원: 세션을 이어서 하기 인자(같은 세션 ID)로 띄움", false, screen(keeps.term).join("|").slice(-200)),
+  // 프롬프트는 세션을 만들 때 저장한 것 (KP1). scripts/selftest.sh가 그 사이 설정의 역할을 KP2로 바꿨다
+  await waitFor("이어서 하기", () => screen(keeps.term).some((l) => l.trim() === `RESUMED ${sid("keeps")} KP1`), 10000).then(
+    () => check("복원: 세션을 이어서 하기 인자(같은 세션 ID, 만들 때 저장한 프롬프트)로 띄움", true),
+    () => check("복원: 세션을 이어서 하기 인자(같은 세션 ID, 만들 때 저장한 프롬프트)로 띄움", false, screen(keeps.term).join("|").slice(-200)),
   );
   // 이어서 하기가 실패하면 새로 시작할지 묻고, y일 때만 처음 인자로 (리뷰 P2: 쓰다가 끝난 것과 구분할 수 없어서)
   const asked = await waitFor("새로 시작할지 묻기", () => screen(fresh.term).find((l) => l.includes("Start a new one? [y/N]")), 10000).catch(() => "");
@@ -2631,6 +2651,11 @@ async function testCorrupt(root: string) {
     "작업그룹: 기본은 claude 개발 + 읽기 전용 codex 리뷰어",
     dev.command === "claude" && reviewer.command === "codex" && reviewer.readOnly && reviewer.args.includes("read-only") && !dev.readOnly,
     JSON.stringify(g.groups[0].sessions.map((x) => [x.name, x.command, x.readOnly])),
+  );
+  check(
+    "작업그룹: 기본 설정의 규약·역할은 필드에, 인자는 {prompt}·{prompt:toml}",
+    !!g.groups[0].rules && !!dev.role && !!reviewer.role && dev.args.includes("{prompt}") && reviewer.args.includes("developer_instructions={prompt:toml}"),
+    JSON.stringify([g.groups[0].rules?.slice(0, 20), dev.role?.slice(0, 20), dev.args.slice(-1), reviewer.args.slice(-1)]),
   );
   check("작업그룹: 명령 없는 세션(셸)", g.groups[1].sessions[0].command === "" && g.groups[1].sessions[0].args.length === 0);
 }

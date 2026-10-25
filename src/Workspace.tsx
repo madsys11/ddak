@@ -1,7 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AddSessionDialog, isWriter } from "./AddSessionDialog";
+import { AddSessionDialog, type PickedSession, isWriter } from "./AddSessionDialog";
 import { ContextMenu, type MenuState } from "./ContextMenu";
 import { EndGroupDialog } from "./EndGroupDialog";
 import { devHooks } from "./devHooks";
@@ -11,7 +11,7 @@ import { ChatIcon, GitIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icon
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { Terminal } from "./Terminal";
 import { useT } from "./prefs";
-import type { Group, Session } from "./useGroups";
+import { type Group, promptOf } from "./useGroups";
 import { type PaneSession, type Setup, type State, type Tab, commandOf, fromSaved, toSaved } from "./workspaceState";
 
 // 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 준비 창에서 돌릴 명령 (복제 + 준비 스크립트)
@@ -36,7 +36,7 @@ type Action =
   | { type: "setupRetry"; tab: number }
   | { type: "setupStart"; tab: number }
   | { type: "resumeTabs"; ids: number[] }
-  | { type: "addSession"; tab: number; session: Session }
+  | { type: "addSession"; tab: number; session: PickedSession }
   | { type: "openGit" }
   | { type: "gitRepo"; tab: number; repo: string };
 
@@ -48,8 +48,8 @@ function addGroupTab(s: State, group: Group | null, cwd: string, made?: Created)
   const sessions: PaneSession[] = group?.sessions ?? [];
   const panes = sessions.length ? sessions.map((_, i) => id + 1 + i) : [id + 1];
   let layout = row(panes);
-  // 창마다 세션 ID를 정한다 (인자의 {session}, 복원할 때 같은 대화를 이어 가게)
-  const added: [number, PaneSession][] = sessions.map((x, i) => [panes[i], { ...x, sid: crypto.randomUUID() }]);
+  // 창마다 세션 ID를 정한다 (인자의 {session}, 복원할 때 같은 대화를 이어 가게). 프롬프트({prompt})도 지금 정해 저장한다.
+  const added: [number, PaneSession][] = sessions.map((x, i) => [panes[i], { ...x, sid: crypto.randomUUID(), prompt: promptOf(group!, x) }]);
   let nextId = id + 1 + panes.length;
   let setup: Setup | undefined;
   if (made?.setup) {

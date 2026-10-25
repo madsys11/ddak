@@ -412,12 +412,60 @@ struct Joined {
     token: String,
 }
 
-// 채팅방에 참여시키고 인자의 {chat}을 그 주소로 바꾼다. 나가기와 토큰을 함께 돌려준다.
+// 인자의 자리표시자를 한 번에 바꾼다: {이름}은 값 그대로, {이름:toml}은 TOML 문자열 리터럴(따옴표 포함, codex -c의 값).
+// 바꿔 넣은 값은 다시 보지 않는다 (값 안의 {chat} 등은 그대로. 차례로 replace하면 프롬프트 본문이 바뀌었다, 설계 리뷰 지적 2).
+// vars에 없는 이름이나 중괄호(JSON 등)는 그대로 둔다.
+pub fn fill_placeholders(arg: &str, vars: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(arg.len());
+    let mut rest = arg;
+    while let Some(i) = rest.find('{') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let hit = tail[1..].find('}').and_then(|j| {
+            let inner = &tail[1..1 + j];
+            let (name, toml) = inner.strip_suffix(":toml").map_or((inner, false), |n| (n, true));
+            vars.get(name).map(|v| (j + 2, if toml { toml_string(v) } else { v.clone() }))
+        });
+        match hit {
+            Some((len, value)) => {
+                out.push_str(&value);
+                rest = &tail[len..];
+            }
+            None => {
+                out.push('{');
+                rest = &tail[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+// TOML 기본 문자열 리터럴 (따옴표로 감싸고 ", \, 제어 문자를 이스케이프)
+fn toml_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+// 채팅방에 참여시키고 인자의 자리표시자를 바꾼다 ({chat}은 그 주소, 나머지는 vars). 나가기와 토큰을 함께 돌려준다.
 fn join_chat(
     chats: Option<Arc<crate::chat::Chats>>,
     chat: Option<ChatJoin>,
     command: Option<Vec<String>>,
     fallback: Option<Vec<String>>,
+    vars: HashMap<String, String>,
 ) -> (Option<Vec<String>>, Option<Vec<String>>, Option<Joined>) {
     let joined = chat.zip(chats).map(|(c, chats)| {
         let project = std::fs::canonicalize(&c.project).unwrap_or_else(|_| PathBuf::from(&c.project));
@@ -425,8 +473,9 @@ fn join_chat(
         let t = token.clone();
         (url, Joined { leave: Box::new(move || chats.leave(&t)), token })
     });
-    let url = joined.as_ref().map_or(String::new(), |(url, _)| url.clone());
-    let fill = |argv: Option<Vec<String>>| argv.map(|a| a.into_iter().map(|x| x.replace("{chat}", &url)).collect::<Vec<_>>());
+    let mut vars = vars;
+    vars.insert("chat".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.clone()));
+    let fill = |argv: Option<Vec<String>>| argv.map(|a| a.iter().map(|x| fill_placeholders(x, &vars)).collect::<Vec<_>>());
     (fill(command), fill(fallback), joined.map(|(_, j)| j))
 }
 
@@ -445,9 +494,10 @@ pub fn pty_spawn(
     command: Option<Vec<String>>,
     fallback: Option<Vec<String>>,
     shell_after: Option<bool>,
+    vars: Option<HashMap<String, String>>,
 ) -> Result<u32, String> {
     let on_exit = on_data.clone();
-    let (command, fallback, joined) = join_chat(chats.0.clone(), chat, command, fallback);
+    let (command, fallback, joined) = join_chat(chats.0.clone(), chat, command, fallback, vars.unwrap_or_default());
     open(
         &ptys,
         &cwd,
@@ -906,7 +956,7 @@ mod tests {
         let chats = crate::chat::Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
         let join = ChatJoin { project: "/".into(), name: "origin/dev".into(), key: "k".into() };
         let argv = |s: &str| Some(vec!["/bin/sh".to_string(), "-c".to_string(), s.to_string()]);
-        let (command, fallback, leave) = join_chat(Some(chats.clone()), Some(join), argv("echo URL={chat}"), argv("echo {chat}"));
+        let (command, fallback, leave) = join_chat(Some(chats.clone()), Some(join), argv("echo URL={chat}"), argv("echo {chat}"), HashMap::new());
         let url = fallback.as_ref().unwrap()[2].strip_prefix("echo ").unwrap().to_string();
         assert!(url.starts_with("http://127.0.0.1:") && url.contains("/mcp/"), "{url}");
         assert_eq!(chats.members(Path::new("/")), ["user", "origin/dev"]);
@@ -922,7 +972,7 @@ mod tests {
         close(&ptys, id);
         assert_eq!(chats.members(Path::new("/")), ["user"], "닫아도 참여자로 남음");
         // 채팅 서버가 없으면 빈 값
-        let (command, _, leave) = join_chat(None, Some(ChatJoin { project: "/".into(), name: "x".into(), key: "x".into() }), argv("{chat}"), None);
+        let (command, _, leave) = join_chat(None, Some(ChatJoin { project: "/".into(), name: "x".into(), key: "x".into() }), argv("{chat}"), None, HashMap::new());
         assert!(command.unwrap()[2].is_empty() && leave.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1012,6 +1062,17 @@ mod tests {
         wake(&ptys, &["tok".into()], "origin/e");
         close(&ptys, id);
         assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "없어진 터미널을 그만두지 않음");
+    }
+
+    // 자리표시자는 한 번에 바꾼다: 넣은 값 안의 {chat}은 그대로, :toml은 TOML 문자열 리터럴, 모르는 이름·JSON 중괄호는 그대로
+    #[test]
+    fn placeholders_fill_once() {
+        let vars: HashMap<String, String> =
+            [("chat", "http://x/mcp/t"), ("prompt", "say \"hi\" {chat}\n\\ end"), ("session", "S")].into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        assert_eq!(fill_placeholders("{prompt}", &vars), "say \"hi\" {chat}\n\\ end");
+        assert_eq!(fill_placeholders("x={prompt:toml}", &vars), r#"x="say \"hi\" {chat}\n\\ end""#);
+        assert_eq!(fill_placeholders(r#"{"url":"{chat}","s":"{session}"} {nope} {x:toml} {"#, &vars), r#"{"url":"http://x/mcp/t","s":"S"} {nope} {x:toml} {"#);
+        assert_eq!(toml_string("a\u{1}b\tc"), r#""a\u0001b\tc""#);
     }
 
     // 감싼 인자를 실제 셸에 넘겨서 그대로 돌아오는지 본다.

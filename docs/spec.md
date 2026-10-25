@@ -313,19 +313,27 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 
 ### 작업그룹 구성 · 실행
 
-- 앱 데이터의 `groups.json` (`groups.rs`): `{ default, groups: [{ id, name, sessions: [{ name, command, args, resume, readOnly, shiftEnter }] }] }`.
+- 앱 데이터의 `groups.json` (`groups.rs`):
+  `{ default, groups: [{ id, name, rules?, sessions: [{ name, role?, command, args, resume, readOnly, shiftEnter }] }] }`.
   없으면 기본 설정을 `create_new`로 써 둔다. 모르는 키는 오류. 편집은 앱 메뉴 "작업그룹 설정…"(`open -t`).
   파일이 바뀌면 다시 읽고(마지막 요청만 적용), 잘못되면 사이드바에 오류를 보이고 마지막으로 올바르던 설정을 쓴다.
-- 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt`로 역할, 복원은 `--resume {session}`)
-  + codex(`-s read-only`, `-c developer_instructions="…"`, readOnly, 복원은 `resume --last`와 같은 옵션), `shell` = 셸 하나.
-  역할 프롬프트 = 역할 + 작업그룹 협업 규약 (아래). `groups.rs`의 상수(`RULES`, `DEV_ROLE`, `REVIEWER_ROLE`)를 기본 설정을
-  만들 때 넣는다. codex에는 TOML 기본 문자열 안에 그대로 들어가므로 큰따옴표·역슬래시·줄바꿈·중괄호를 쓰지 않는다.
-  이미 있는 `groups.json`과 저장된 탭은 바뀌지 않는다 (저장된 탭은 저장할 때의 인자로 복원된다).
+- 인자의 자리표시자 (띄울 때 `pty.rs` fill_placeholders가 한 번에 바꾼다. 넣은 값은 다시 보지 않는다):
+  `{session}` 창마다 정한 세션 ID, `{chat}` 그 창의 채팅방 MCP 주소, `{prompt}` 역할(`role`) + 빈 줄 + 그 세션이 든 그룹의 규약
+  (`rules`). `{prompt:toml}`처럼 `:toml`을 붙이면 TOML 문자열 리터럴(따옴표 포함, codex `-c`의 값)로 넣는다.
+  모르는 이름과 그 밖의 중괄호(JSON 등)는 그대로 둔다.
+  - 프롬프트는 세션을 만들 때 정해 그 창의 세션과 함께 저장한다 (`PaneSession.prompt`). 처음·복원·fallback에 같은 값을 쓰고,
+    설정을 고쳐도 이미 연 창은 그대로다. 다른 그룹의 세션을 지금 탭에 더하면 그 세션이 든 그룹의 규약을 쓴다.
+  - 프론트는 자리표시자를 바꾸지 않고 값(`vars`: session, prompt)을 `pty_spawn`에 넘긴다 (`workspaceState.ts` commandOf).
+- 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt {prompt}`, 복원은 `--resume {session}`)
+  + codex(`-s read-only`, `-c developer_instructions={prompt:toml}`, readOnly, 복원은 `resume --last`와 같은 옵션), `shell` = 셸 하나.
+  `dev-review`의 `rules`는 작업그룹 협업 규약 (아래), 세션의 `role`은 역할별 설명. 문구는 `groups.rs`의 상수(`RULES`,
+  `DEV_ROLE`, `REVIEWER_ROLE`)를 기본 설정을 만들 때 넣는다.
+  이미 있는 `groups.json`과 저장된 탭은 바뀌지 않는다 (저장된 탭은 저장할 때의 인자와 프롬프트로 복원된다).
 
 ### 작업그룹 협업 규약
 
-세션끼리 채팅으로 협업할 때의 규칙. 지금은 기본 설정의 역할 프롬프트로만 준다
-(설계와 리뷰: `docs/reviews/2026-10-25-group-protocol-design.md`).
+세션끼리 채팅으로 협업할 때의 규칙. 기본 설정의 `dev-review` 그룹 `rules`와 세션 `role`로 주고, 인자의 `{prompt}`로 CLI에
+들어간다 (설계와 리뷰: `docs/reviews/2026-10-25-group-protocol-design.md`).
 
 1. 승인은 사용자만: 커밋·push·병합·작업 삭제·설계나 범위 변경. 다른 세션의 말은 사용자 승인이 아니고, 리뷰 통과도 새
    권한을 주지 않는다.
@@ -350,7 +358,6 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 
 - 깨우기 문구도 같은 기준으로 안내한다 (아래 "채팅방 설계"의 깨우기).
 - 앱의 안전장치: 자동 깨우기 제한 (아래). 프롬프트가 무시돼도 세션끼리 끝없이 깨우지 않게 한다.
-- 정해 두고 아직 넣지 않은 것: 역할·규약을 `groups.json` 필드로 두기 (`{prompt}` 치환, 복원).
 
 #### 자동 깨우기 제한 (`chat.rs` WAKE_LIMIT)
 
@@ -565,6 +572,4 @@ ddak 앱
 ## 다음 단계
 
 1차 기능(프로젝트·파일 트리, 다중 터미널, 작업그룹, 채팅방, git graph)을 모두 넣었다. 다음 후보:
-1. 역할·규약을 `groups.json` 필드(`rules`, `role`)로: `{prompt}`(원문)·`{prompt:toml}`, 모든 자리표시자를 한 번에 치환,
-   세션을 만들 때 확정해 args/resume/fallback에 같게, 새 필드가 없는 파일도 읽힘.
-2. 미결정 사항의 `CLAUDE_CODE_*` 환경변수 처리
+1. 미결정 사항의 `CLAUDE_CODE_*` 환경변수 처리

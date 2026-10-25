@@ -28,6 +28,8 @@ type Props = {
   command?: string[];
   // command가 실패하면 대신 띄울 명령 (복원한 세션: 이어서 하기가 안 되면 처음처럼)
   fallback?: string[];
+  // 인자의 자리표시자 값 ({session}, {prompt}. {chat}은 Rust가 넣는다, workspaceState.ts commandOf)
+  vars?: Record<string, string>;
   // Shift+Enter로 보낼 입력 (세션 구성). 없으면 그냥 Enter.
   shiftEnter?: string | null;
   // false면 명령이 끝나도 셸을 띄우지 않는다 (작업그룹 준비: onExit가 그 명령의 종료 코드를 받는다)
@@ -58,13 +60,13 @@ export const isTerminalReply = (data: string) =>
   /^\x1b\][\s\S]*(\x07|\x1b\\)$/.test(data) ||
   /^\x1bP[\s\S]*\x1b\\$/.test(data);
 
-export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake }: Props) {
+export function Terminal({ cwd, command, fallback, vars, shiftEnter, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, shiftEnter, shellAfter, chat });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, shiftEnter, shellAfter, chat };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shellAfter, chat });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shellAfter, chat };
 
   useEffect(() => {
     const el = ref.current!;
@@ -138,8 +140,8 @@ export function Terminal({ cwd, command, fallback, shiftEnter, shellAfter, chat,
       });
     })();
 
-    const { command, fallback, shellAfter, chat } = latest.current;
-    const args = { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, fallback: fallback ?? null, shellAfter: shellAfter ?? null, chat: chat ?? null };
+    const { command, fallback, vars, shellAfter, chat } = latest.current;
+    const args = { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, fallback: fallback ?? null, vars: vars ?? null, shellAfter: shellAfter ?? null, chat: chat ?? null };
     // 등록에 실패해도 터미널은 띄운다 (깨우기 배지만 못 본다)
     wakes.then(
       () => undefined,
