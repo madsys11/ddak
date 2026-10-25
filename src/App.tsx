@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChatPanel } from "./ChatPanel";
 import { Sidebar } from "./Sidebar";
@@ -8,6 +9,7 @@ import { StoreBroken, baseName, useProjects } from "./useProjects";
 import { useGroups } from "./useGroups";
 import type { MessageKey } from "./i18n";
 import { devHooks } from "./devHooks";
+import { projectForClick } from "./notifyClick";
 import { useT } from "./prefs";
 import "./App.css";
 
@@ -69,6 +71,22 @@ function App() {
   useEffect(() => {
     if (active) setOpened((o) => (o.includes(active) ? o : [...o, active]));
   }, [active]);
+  // 알림을 누름 (src-tauri/src/notify.rs): 그 프로젝트로 간다. 터미널이 낸 알림이면 그 창은 Terminal이 보이고 (onReveal),
+  // 아니면 (세션이 사용자에게 보낸 메시지 등) 채팅 패널을 연다
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+  useEffect(() => {
+    const unlisten = listen<{ project: string; pty: number | null }>("notification-click", async ({ payload }) => {
+      const paths = (projectsRef.current ?? []).map((p) => p.path);
+      const project = await projectForClick(paths, payload.project, (path) => invoke<string>("real_path", { path }));
+      if (!project) return;
+      activate(project);
+      if (payload.pty === null) setChatOpen((o) => ({ ...o, [project]: true }));
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [activate]);
 
   async function addProject(path: string) {
     try {

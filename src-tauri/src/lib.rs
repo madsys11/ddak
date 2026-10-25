@@ -33,7 +33,7 @@ pub fn run() {
         .manage(watch::Watches::default())
         .setup(|app| {
             menu::install(app.handle());
-            notify::init();
+            notify::init(app.handle());
             app.manage(chat::install(app.handle()));
             pty::start_waker(app.handle().clone());
             Ok(())
@@ -50,6 +50,8 @@ pub fn run() {
             notify::set_notify_sound,
             notify::set_badge,
             notify::selftest_notifications,
+            notify::selftest_click_notification,
+            notify::real_path,
             notify::selftest_set_focused,
             fs::list_dir,
             fs::fs_create,
@@ -90,6 +92,8 @@ pub fn run() {
             pty::pty_foreground,
             pty::pty_awaiting,
             pty::selftest_pty_awaiting,
+            pty::pty_working,
+            pty::selftest_keep_awake,
             pty::pty_resize,
             pty::pty_kill,
             pty::chat_wake_now,

@@ -646,7 +646,7 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                 // 세션이 사용자에게 보낸 것만 알린다 (질문·결정 요청·작업 완료 보고. 사용자 자신이 보낸 것은 아님).
                 // 화면 갱신·깨우기(터미널 잠금을 기다릴 수 있다)보다 먼저.
                 if message.from != USER && message.to.iter().any(|n| n == USER) {
-                    crate::notify::send(project, crate::notify::Kind::Chat, &format!("{}: {}", message.from, crate::notify::first_line(&message.text)));
+                    crate::notify::send(project, crate::notify::Kind::Chat, &format!("{}: {}", message.from, crate::notify::first_line(&message.text)), None);
                 }
                 let _ = emitter.emit("chat", json!({ "project": project, "message": message }));
                 wake(Some(message), released);
@@ -662,12 +662,15 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                 let _ = emitter.emit("chat", json!({ "project": project }));
             }
             Change::Paused(group) => {
-                crate::notify::send(project, crate::notify::Kind::Chat, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]));
+                crate::notify::send(project, crate::notify::Kind::Chat, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]), None);
             }
             Change::Attention { name, token, kind, hook } => {
-                if hook && !emitter.state::<crate::pty::Ptys>().claim_hook_attention(token, std::time::Instant::now()) {
+                let ptys = emitter.state::<crate::pty::Ptys>();
+                if hook && !ptys.claim_hook_attention(token, std::time::Instant::now()) {
                     return;
                 }
+                // 누르면 그 터미널로
+                let pty = ptys.pty_of_token(token);
                 let key = match kind {
                     "question" => "question",
                     "auth" => "auth",
@@ -675,7 +678,7 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                     "blocked" => "blocked",
                     _ => "attention",
                 };
-                crate::notify::send(project, crate::notify::Kind::Attention, &crate::notify::text(key, &[("name", name)]));
+                crate::notify::send(project, crate::notify::Kind::Attention, &crate::notify::text(key, &[("name", name)]), pty);
             }
         }
     });

@@ -64,6 +64,8 @@ struct Session {
     enter: Option<Enter>,
     // claude 훅으로 "사용자를 기다림"을 알린 때 (뒤따라 켜진 상태의 기다림이 같은 확인인지 본다, set_awaiting)
     hook_attention: Option<Instant>,
+    // 앞에서 도는 프로그램이 작업 중이다 (OSC 7501 working, 프론트가 알린다). 하나라도 있으면 잠자기를 막는다 (keep_awake)
+    working: bool,
 }
 
 // 알림을 쓴 뒤 보낼 Enter. at: 알림을 쓴 때, before: 그때의 사용자 입력, force: 바로 깨우기(사용자가 누름)라 기다려도 보냄,
@@ -139,6 +141,8 @@ pub struct Ptys {
     ending: RwLock<Vec<PathBuf>>,
     // 깨우기를 기다리는 터미널 (wake, wake_tick)
     wakes: Mutex<HashMap<u32, Pending>>,
+    // 작업 중인 터미널이 있는 동안 띄워 두는 caffeinate (keep_awake)
+    awake: Mutex<Option<std::process::Child>>,
     // 깨우기 상태 변경 번호. wakes를 잡은 채 매긴다. 이벤트는 잠금 밖에서 보내 순서가 바뀔 수 있어서, 프론트가 터미널마다
     // 더 오래된 번호를 버린다 (리뷰 P2: 앞 깨우기의 해제가 새 대기를 지웠다).
     wake_seq: AtomicU64,
@@ -272,7 +276,7 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None })
+    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None, working: false })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -741,7 +745,22 @@ pub fn start_waker(app: tauri::AppHandle) {
         for (id, seq) in wake_tick(&app.state::<Ptys>(), Instant::now()) {
             let _ = app.emit("chat-wake", serde_json::json!({ "pty": id, "pending": false, "seq": seq }));
         }
+        app.state::<Ptys>().keep_awake();
     });
+}
+
+// 앞에서 도는 프로그램이 작업 중인지 (프론트 src/Terminal.tsx: OSC 7501 working)
+#[tauri::command]
+pub fn pty_working(ptys: State<'_, Ptys>, id: u32, working: bool) {
+    if let Some(s) = ptys.sessions.lock().unwrap().get_mut(&id) {
+        s.working = working;
+    }
+}
+
+// 자체 테스트: 잠자기를 막고 있는지 (caffeinate가 떠 있는지)
+#[tauri::command]
+pub fn selftest_keep_awake(ptys: State<'_, Ptys>) -> bool {
+    ptys.awake.lock().unwrap().is_some()
 }
 
 // 앞에서 도는 프로그램이 사용자를 기다리는지 (프론트 src/Terminal.tsx: OSC 7501 blocked, 화면의 선택 창)
@@ -788,8 +807,37 @@ impl Ptys {
             return None;
         }
         let hook = s.hook_attention.take();
-        let same = hook.is_some_and(|h| now.saturating_duration_since(h) < ATTENTION_GAP && ended.is_none_or(|e| h > e));
+        // 같은 시각(시계 해상도)도 그 뒤로 본다
+        let same = hook.is_some_and(|h| now.saturating_duration_since(h) < ATTENTION_GAP && ended.is_none_or(|e| h >= e));
         if same { None } else { s.chat_token.clone() }
+    }
+
+    // 작업 중인 터미널이 하나라도 있으면 시스템이 저절로 잠들지 않게 한다 (caffeinate -i. 화면은 꺼질 수 있다). 자리를 비운
+    // 사이 Mac이 잠들면 claude·codex의 작업이 멈춘다. 없어지면 끝낸다. -w로 ddak이 끝나면 caffeinate도 끝난다.
+    // 주기적으로 부른다 (start_waker). 터미널이 닫혀 목록에서 빠지는 것도 여기서 반영된다.
+    pub fn keep_awake(&self) {
+        let any = self.sessions.lock().unwrap().values().any(|s| s.working);
+        let mut awake = self.awake.lock().unwrap();
+        // 누가 끝냈으면 다시 띄운다
+        if awake.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None))) {
+            *awake = None;
+        }
+        if any && awake.is_none() {
+            match std::process::Command::new("/usr/bin/caffeinate").args(["-i", "-w", &std::process::id().to_string()]).spawn() {
+                Ok(child) => *awake = Some(child),
+                Err(e) => eprintln!("caffeinate 실패: {e}"),
+            }
+        } else if !any {
+            if let Some(mut child) = awake.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    // 이 채팅 토큰의 터미널 (알림을 누르면 보일 창)
+    pub fn pty_of_token(&self, token: &str) -> Option<u32> {
+        self.sessions.lock().unwrap().iter().find(|(_, s)| s.chat_token.as_deref() == Some(token)).map(|(id, _)| *id)
     }
 
     // claude 훅의 "사용자를 기다림"을 알려도 되는지: 그 토큰의 터미널이 지금 기다리는 중이면 상태로 이미 알린 확인이라 false.
@@ -1366,6 +1414,39 @@ mod tests {
         assert_eq!(wake_tick(&ptys, Instant::now()).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "바로 깨우기를 막음");
         wait(&notice("origin/d"));
         close(&ptys, id);
+    }
+
+    // 작업 중인 터미널이 있으면 caffeinate -i -w <ddak>를 띄워 두고, 없어지면 (작업이 끝나거나 터미널이 닫히면) 끝낸다.
+    // 누가 caffeinate를 끝냈으면 다시 띄운다
+    #[test]
+    fn keeps_awake_while_working() {
+        let ptys = Ptys::default();
+        let argv: Vec<String> = ["/bin/sh", "-c", "sleep 30"].iter().map(|a| a.to_string()).collect();
+        let id = open(&ptys, "/", Some(&argv), None, false, SIZE, |_| true, |_| (), None).unwrap();
+        let set = |w: bool| ptys.sessions.lock().unwrap().get_mut(&id).unwrap().working = w;
+        let held = || ptys.awake.lock().unwrap().as_ref().map(|c| c.id());
+        ptys.keep_awake();
+        assert_eq!(held(), None);
+        set(true);
+        ptys.keep_awake();
+        let pid = held().expect("작업 중인데 caffeinate가 없음");
+        let args = std::process::Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().unwrap();
+        assert!(String::from_utf8_lossy(&args.stdout).contains(&format!("caffeinate -i -w {}", std::process::id())));
+        ptys.keep_awake();
+        assert_eq!(held(), Some(pid), "작업 중에 다시 띄움");
+        // 누가 끝내면 다시 띄운다
+        ptys.awake.lock().unwrap().as_mut().unwrap().kill().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        ptys.keep_awake();
+        assert!(held().is_some_and(|p| p != pid), "끝난 caffeinate를 다시 띄우지 않음");
+        set(false);
+        ptys.keep_awake();
+        assert_eq!(held(), None, "작업이 끝났는데 잠자기를 막음");
+        set(true);
+        ptys.keep_awake();
+        close(&ptys, id);
+        ptys.keep_awake();
+        assert_eq!(held(), None, "터미널을 닫았는데 잠자기를 막음");
     }
 
     // claude 세션 표시는 터미널에 넘기지 않고, 같은 접두사의 사용자 설정과 그 밖의 CLAUDE 변수는 그대로 둔다 (리뷰 R1).

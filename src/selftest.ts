@@ -7,6 +7,7 @@ import { devHooks, liveTerms } from "./devHooks";
 import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
+import { projectForClick } from "./notifyClick";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus } from "./programStatus";
 import { LOCALES } from "./i18n";
 import { en } from "./i18n/en";
@@ -1505,6 +1506,19 @@ async function testTerminalSearch(term: Terminal) {
   await waitFor("B 닫힘", () => visiblePanes().length === panes, 5000).catch(() => null);
 }
 
+// 알림을 누르면 갈 프로젝트 (src/notifyClick.ts): 알림은 실제 경로, 등록은 링크 경로일 수 있다 (리뷰 R1)
+async function testNotifyClickUnit() {
+  const real = async (p: string) => ({ "/tmp/a": "/private/tmp/a", "/l/b": "/r/b" })[p] ?? p;
+  const got = [
+    await projectForClick(["/tmp/a", "/r/b"], "/r/b", real),
+    await projectForClick(["/tmp/a", "/r/b"], "/private/tmp/a", real),
+    await projectForClick(["/l/b"], "/r/b", real),
+    await projectForClick(["/tmp/a"], "/nope", real),
+    await projectForClick(["/x"], "/y", async () => Promise.reject(new Error("no"))),
+  ];
+  check("알림 누르기: 등록 경로와 같거나 등록 경로의 실제 경로가 같은 프로젝트 (등록 경로로)", JSON.stringify(got) === JSON.stringify(["/r/b", "/tmp/a", "/l/b", null, null]), JSON.stringify(got));
+}
+
 // 앞에서 도는 프로그램의 상태 (src/programStatus.ts): OSC 7501 해석과 화면의 선택 창 판단
 function testProgramStatusUnit() {
   const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
@@ -1552,7 +1566,7 @@ function testProgramStatusUnit() {
 
 // 앞에서 도는 프로그램의 상태 (src/programStatus.ts, Terminal.tsx): 물음에 답하고, 보고와 화면의 선택 창으로 이름표의 상태와
 // Rust의 "기다림"(깨우기를 미룸, pty_awaiting)이 바뀐다
-async function testProgramStatus(term: Terminal) {
+async function testProgramStatus(root: string, term: Terminal) {
   const pane = visiblePanes().find((p) => p.term === term)!;
   const ptyId = Number(pane.el.querySelector<HTMLElement>(".terminal")?.dataset.pty);
   const awaiting = () => invoke<boolean | null>("selftest_pty_awaiting", { id: ptyId });
@@ -1573,6 +1587,10 @@ async function testProgramStatus(term: Terminal) {
   await report("state=working");
   const working = await waitAsync("작업 중 표시", shows("working", false), 3000).then(() => true, () => false);
   check("프로그램 상태: working이면 작업 중, 깨우기 미루지 않음", working, `${badge()?.textContent} ${await awaiting()}`);
+  // 작업 중인 터미널이 있으면 잠자기를 막는다 (caffeinate, src-tauri/src/pty.rs keep_awake. 0.25초마다 맞춘다)
+  const awake = () => invoke<boolean>("selftest_keep_awake");
+  const kept = await waitAsync("잠자기 막음", async () => await awake(), 3000).then(() => true, () => false);
+  check("잠자기 막기: 작업 중인 터미널이 있으면 caffeinate", kept);
   // 하위 기록(id)은 보지 않는다
   await report("state=blocked:id=sub1");
   await sleep(300);
@@ -1581,12 +1599,32 @@ async function testProgramStatus(term: Terminal) {
   await run(term, String.raw`printf 'Allow this?\n\342\235\257 1. Yes\n  2. No\nEnter to confirm \302\267 Esc to cancel\n'`);
   const dialog = await waitAsync("선택 대기 표시", shows("waiting for a choice", true), 3000).then(() => true, () => false);
   check("프로그램 상태: 화면에 선택 창이 보이면 선택 대기, 깨우기 미룸", dialog, `${badge()?.textContent} ${await awaiting()}`);
+  // 선택 창을 기다리는 동안은 작업 중이 아니다 (리뷰 R2)
+  const dialogSleeps = await waitAsync("선택 창 동안 잠자기 허용", async () => !(await awake()), 3000).then(() => true, () => false);
   term.input("clear\r");
   const cleared = await waitAsync("선택 창 사라짐", shows("working", false), 5000).then(() => true, () => false);
   check("프로그램 상태: 선택 창이 사라지면 풀림", cleared, `${badge()?.textContent} ${await awaiting()}`);
+  const keptAgain = await waitAsync("다시 잠자기 막음", async () => await awake(), 3000).then(() => true, () => false);
+  check("잠자기 막기: 선택 창을 기다리는 동안 풀고, 닫혀 작업이 이어지면 다시 막음", dialogSleeps && keptAgain, `${dialogSleeps} ${keptAgain}`);
   await report("state=idle");
   const idle = await waitAsync("상태 없음", async () => !badge() && (await awaiting()) === false, 3000).then(() => true, () => false);
   check("프로그램 상태: idle이면 이름표에 상태 없음", idle, `${badge()?.textContent}`);
+  const released = await waitAsync("잠자기 막기 풂", async () => !(await awake()), 3000).then(() => true, () => false);
+  check("잠자기 막기: 작업 중인 터미널이 없어지면 풂", released);
+  // 보낸 순서대로 도착한다: 먼저 보낸 "작업 중"을 늦게 보내도 뒤의 "작업 끝"이 남는다 (리뷰 R3)
+  devHooks.statusDelay = (cmd, args) => (cmd === "pty_working" && args.working === true ? 800 : 0);
+  await report("state=working");
+  await report("state=idle");
+  await sleep(1800);
+  const ordered = !(await awake());
+  devHooks.statusDelay = undefined;
+  check("잠자기 막기: 상태는 보낸 순서대로 (먼저 보낸 것이 늦어도 마지막 상태)", ordered);
+  // 링크의 실제 경로 (알림의 프로젝트와 등록한 링크 경로를 맞춘다, 리뷰 R1)
+  const link = `${root}-ddak-link`;
+  await run(term, `ln -sfn "${root}" "${link}"`);
+  const resolved = await invoke<string>("real_path", { path: link });
+  await run(term, `rm -f "${link}"`);
+  check("알림 누르기: 링크 경로의 실제 경로", resolved === root && (await invoke<string>("real_path", { path: "/no/such/ddak" })) === "/no/such/ddak", resolved);
 }
 
 function testTerminalReplyUnit() {
@@ -2502,7 +2540,35 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   await waitAsync("상태로 온 알림", async () => (asked.push(...(await notes())[0]), asked.some(([, b]) => /^origin\/asker(-\d)? is waiting for your answer$/.test(b))), 10000).catch(() => null);
   await sleep(2500); // 훅 신호(1초 뒤)가 오고 처리될 때까지
   asked.push(...(await notes())[0]);
+  // 알림을 누르면 그 세션의 탭과 창으로 (src-tauri/src/notify.rs clicked → Terminal onReveal): 새 탭으로 옮겨 갔다가 누른다
+  const wsTabs = () => [...document.querySelectorAll<HTMLElement>(".project-workspace:not([style*='none']) .tab")];
+  const askerPane = () => paneEls().find((el) => el.querySelector(".pane-label")?.firstChild?.textContent?.startsWith("asker"));
+  const tabAt = activeTabIndex();
+  const tabsBefore = wsTabs().length;
+  await menu("new_tab");
+  await waitFor("새 탭", () => wsTabs().length === tabsBefore + 1 && !askerPane(), 5000).catch(() => null);
+  // 새 탭은 지금 탭 바로 뒤에 생긴다
+  const newAt = activeTabIndex();
+  const clickedOk = await invoke<boolean>("selftest_click_notification", { prefix: "origin/asker" });
+  const revealed = await waitFor("알림 누름", () => activeTabIndex() === tabAt && askerPane()?.classList.contains("focused"), 3000).then(() => true, () => false);
+  check("알림: 누르면 그 세션의 탭으로 가서 그 창을 고름", clickedOk && revealed, `${clickedOk} tab=${activeTabIndex()}/${tabAt} focused=${askerPane()?.className}`);
+  // 누르면 창을 앞으로 가져와 "창이 앞에 있음"이 켜진다. 뒤 검사는 다른 앱을 보는 중이어야 알림이 나온다
+  await invoke("selftest_set_focused", { focused: false });
+  // 새 탭을 그 탭의 ×로 닫는다 (탭은 포인터를 누를 때 골라져서 click()으로는 고르지 못한다). 지금 탭은 그대로
+  wsTabs()[newAt]?.querySelector<HTMLElement>(".tab-close")?.click();
+  await waitFor("새 탭 닫힘", () => wsTabs().length === tabsBefore && activeTabIndex() === tabAt, 5000).catch(() => null);
+  check("알림 누르기 검사 뒤 정리: 새 탭 닫힘, 원래 탭", wsTabs().length === tabsBefore && activeTabIndex() === tabAt && !!askerPane()?.classList.contains("focused"), `${wsTabs().length}/${tabsBefore} ${activeTabIndex()}/${tabAt}`);
   await closeAdded();
+  // 터미널이 없는 알림(세션이 사용자에게 보낸 메시지)을 누르면 그 프로젝트의 채팅 패널을 연다
+  const wasShown = shown();
+  if (wasShown) toggle().click();
+  await waitFor("채팅 닫기", () => !shown(), 2000).catch(() => null);
+  const chatClicked = await invoke<boolean>("selftest_click_notification", { prefix: "origin/poster" });
+  const chatOpened = await waitFor("채팅 열림", shown, 3000).then(() => true, () => false);
+  check("알림: 메시지 알림을 누르면 채팅 패널을 엶", chatClicked && chatOpened, `${chatClicked} ${chatOpened}`);
+  await invoke("selftest_set_focused", { focused: false });
+  if (!wasShown) toggle().click();
+  await waitFor("채팅 원래대로", () => shown() === wasShown, 2000).catch(() => null);
   const askerNotes = asked.filter(([, b]) => b.startsWith("origin/asker"));
   check("알림: 프로그램 상태로 기다림을 알리면 알림, 뒤따른 훅 신호는 한 번 더 알리지 않음", askerNotes.length === 1 && /is waiting for your answer$/.test(askerNotes[0][1]), JSON.stringify(askerNotes));
   // 훅이 먼저 와도 한 번 (리뷰 R3)
@@ -3299,7 +3365,8 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
     ["terminalSearch", () => testTerminalSearch(t())],
     ["programStatusUnit", testProgramStatusUnit],
-    ["programStatus", () => testProgramStatus(t())],
+    ["notifyClickUnit", testNotifyClickUnit],
+    ["programStatus", () => testProgramStatus(root, t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],
     ["webglLoss", () => testWebglLoss(t())],
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다

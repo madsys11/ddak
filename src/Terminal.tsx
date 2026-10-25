@@ -60,6 +60,8 @@ type Props = {
   onWake?: (pending: boolean, wakeNow: () => void) => void;
   // 앞에서 도는 프로그램의 상태(OSC 7501)와 사용자를 기다리는지(그 상태나 화면의 선택 창)가 바뀔 때 (src/programStatus.ts)
   onStatus?: (status: ProgramStatus | undefined, awaiting: boolean) => void;
+  // 이 터미널이 낸 알림을 눌렀다: 이 창을 보이고 고른다 (src-tauri/src/notify.rs "notification-click")
+  onReveal?: () => void;
 };
 
 // xterm이 프로그램의 질의에 스스로 보내는 응답 (xterm 6.0 InputHandler·CoreBrowserTerminal의 triggerDataEvent 전부):
@@ -74,7 +76,7 @@ export const isTerminalReply = (data: string) =>
   /^\x1b\][\s\S]*(\x07|\x1b\\)$/.test(data) ||
   /^\x1bP[\s\S]*\x1b\\$/.test(data);
 
-export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake, onStatus }: Props) {
+export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, onReveal }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
@@ -84,8 +86,8 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, onReveal, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, onReveal, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
 
   useEffect(() => {
     const el = ref.current!;
@@ -161,6 +163,10 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       const target = id!;
       latest.current.onWake?.(w.pending, () => invoke("chat_wake_now", { id: target }));
     };
+    // 이 터미널이 낸 알림을 눌렀다
+    const clicks = listen<{ project: string; pty: number | null }>("notification-click", ({ payload }) => {
+      if (!disposed && id !== undefined && payload.pty === id) latest.current.onReveal?.();
+    });
     const wakes = (async () => {
       if (import.meta.env.DEV && devHooks.wakeListenDelay) await new Promise((r) => setTimeout(r, devHooks.wakeListenDelay));
       return listen<Wake>("chat-wake", ({ payload }) => {
@@ -189,7 +195,6 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
         id = newId;
         gotId(newId);
         if (import.meta.env.DEV) el.dataset.pty = String(newId);
-        if (awaiting) invoke("pty_awaiting", { id: newId, awaiting, kind: awaitKind() });
         if (early.has(newId)) wake(early.get(newId)!);
         early.clear();
       },
@@ -244,6 +249,20 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     let dialogSince: number | undefined;
     let dialogCap: ReturnType<typeof setTimeout> | undefined;
     let awaiting = false;
+    // 작업 중인지 (Rust가 하나라도 있으면 잠자기를 막는다, pty_working). 사용자를 기다리는 동안(선택 창 포함)은 작업 중이 아니다
+    let working = false;
+    // 상태는 보낸 순서대로 도착해야 한다 (invoke는 호출마다 따로 가서 순서가 보장되지 않는다. 늦게 온 오래된 값이 남으면 잠자기
+    // 막기가 반대로 굳는다, 리뷰 R3). 한 줄로 세우고, PTY가 생기기 전에 바뀐 것은 생길 때까지 기다렸다 보낸다
+    let statusSends: Promise<unknown> = Promise.resolve();
+    const sendStatus = (cmd: "pty_awaiting" | "pty_working", args: Record<string, unknown>) => {
+      statusSends = statusSends
+        .then(() => idReady)
+        .then(async (target) => {
+          if (import.meta.env.DEV && devHooks.statusDelay) await new Promise((r) => setTimeout(r, devHooks.statusDelay!(cmd, args)));
+          await invoke(cmd, { id: target, ...args });
+        })
+        .catch(() => {});
+    };
     let shown: { status?: ProgramStatus; awaiting: boolean } = { awaiting: false };
     // 무엇을 기다리는지 (Rust가 알림 문구를 고른다): OSC 7501 blocked의 종류, 종류가 없으면 blocked, 화면의 선택 창이면 dialog
     const awaitKind = () => (status?.state === "blocked" ? (status.kind ?? "blocked") : "dialog");
@@ -251,7 +270,12 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       const next = awaitingUser(status, dialogSince, Date.now());
       if (next !== awaiting) {
         awaiting = next;
-        if (id !== undefined) invoke("pty_awaiting", { id, awaiting: next, kind: awaitKind() }).catch(() => {});
+        sendStatus("pty_awaiting", { awaiting: next, kind: awaitKind() });
+      }
+      const nowWorking = status?.state === "working" && !next;
+      if (nowWorking !== working) {
+        working = nowWorking;
+        sendStatus("pty_working", { working });
       }
       if (shown.status !== status || shown.awaiting !== next) {
         shown = { status, awaiting: next };
@@ -308,6 +332,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     return () => {
       disposed = true;
       wakes.then((f) => f(), () => {});
+      clicks.then((f) => f(), () => {});
       userEvents.forEach((e) => term.textarea?.removeEventListener(e, userEvent, true));
       el.removeEventListener("dragover", onDragOver);
       el.removeEventListener("drop", onDrop);

@@ -241,6 +241,13 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   (작업그룹 끝내기가 기다린다).
 - 작업 폴더가 없으면 띄우지 않는다 (portable-pty는 없는 폴더면 홈 폴더에서 띄운다).
 - WebGL 렌더러. 컨텍스트를 잃으면 DOM 렌더러로 바꾼다 (터미널 20개 남짓에서 실제로 잃는다).
+- 잠자기 막기 (`pty.rs` keep_awake): 앞에서 도는 프로그램이 작업 중(OSC 7501 `working`이고 사용자를 기다리지 않음 — 화면의
+  선택 창도 기다림. 프론트가 `pty_working`으로 알림)인
+  터미널이 하나라도 있으면 `caffeinate -i -w <ddak pid>`를 띄워 둔다 (시스템이 저절로 잠들지 않음. 화면은 꺼질 수 있다).
+  없어지면 (작업이 끝나거나 기다림·대기로 바뀌거나 터미널이 닫히면) 끝낸다. ddak이 끝나면 caffeinate도 끝난다 (-w).
+  0.25초마다 맞춘다 (깨우기 확인과 같은 주기). 누가 caffeinate를 끝냈으면 다시 띄운다.
+  터미널은 상태(`pty_awaiting`·`pty_working`)를 한 줄로 세워 보낸 순서대로 보낸다 (invoke는 순서가 보장되지 않아 늦게 온 오래된
+  값이 남을 수 있다). PTY가 생기기 전에 바뀐 것은 생길 때까지 기다렸다 보낸다.
 - 한글 입력 (`src/hangul.ts`): macOS WebKit은 composition 이벤트 없이 `insertText` → `insertReplacementText`로 보낸다.
   입력기 글자는 xterm에 넘기지 않고 직접 보낸다 (바꾸기 = 바뀐 코드 포인트 수만큼 DEL + 새 글자).
   xterm이 이미 보낸 키는 건너뛰고(`onKey`로 셈), keyCode 229 keydown은 xterm에 넘기지 않는다.
@@ -626,7 +633,13 @@ ddak 앱
 - 보내는 곳: macOS 알림 센터 배너 + 소리 (`UNUserNotificationCenter`). 제목 `ddak · <프로젝트 폴더 이름>`.
   설치한 앱(.app 번들)에서만 보낸다 (번들 없는 실행 파일은 쓸 수 없다). 번들은 앱 식별자로 서명되어 있어야 한다 (배포 계획의
   임시 서명). 권한은 앱을 켤 때 묻는다 (처음 한 번 macOS가 묻는다).
-  누르면 ddak이 앞으로 온다 (어느 프로젝트로 옮겨 가지는 않는다).
+  누르면 ddak이 앞으로 오고 그 알림의 프로젝트로 간다. 터미널이 낸 알림(사용자를 기다림)이면 그 창의 탭을 보이고 그 창을
+  고른다 (`Terminal` onReveal, Workspace `reveal`). 터미널이 없는 알림(세션이 사용자에게 보낸 메시지, 자동 깨우기 멈춤)이면
+  그 프로젝트의 채팅 패널을 연다. 알림 ID → 갈 곳을 최근 200개 기억하고 (`notify.rs` TARGETS), 위임자의
+  `didReceiveNotificationResponse`에서 프론트에 `notification-click`({ project, pty })으로 알린다. 앱을 다시 켜면 이전 알림은
+  앞으로 가져오기만 한다. 자체 테스트는 `selftest_click_notification`으로 누르기를 흉내 낸다.
+  알림의 프로젝트는 채팅방이 쓰는 실제 경로라서, 등록 경로와 글자가 다르면 등록 경로들의 실제 경로(`real_path`)로 찾아
+  등록 경로로 간다 (`src/notifyClick.ts`. 링크 경로로 등록한 프로젝트).
   ddak이 앞에 있을 때의 표시는 알림 센터 위임자 `willPresentNotification`이 배너·목록·소리로 정한다. 보낼지는 아래
   "보고 있으면 보내지 않는다"가 정한다.
 - 보고 있으면 보내지 않는다: 창이 앞에 있고 (Tauri 창 이벤트) 그 프로젝트를 보고 있으며, 채팅 알림은 그 프로젝트의 채팅

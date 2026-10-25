@@ -6,6 +6,9 @@
 // - 자체 테스트(DDAK_SELFTEST)는 보내지 않고 기록만 한다 (selftest_notifications).
 // - 문구는 프론트 사전에서 받는다 (set_notify_texts, 메뉴와 같은 방식). 받기 전에는 영어 기본 문구.
 // - Dock 아이콘 배지: 사용자에게 온 안 읽은 메시지 수 (프론트가 센다, set_badge).
+// - 누르면: 그 알림의 프로젝트로 가서, 터미널(pty)이 있으면 그 창을 보이고 포커스, 없으면 (채팅 메시지 등) 그 프로젝트의 채팅
+//   패널을 연다. 알림 ID → 갈 곳을 기억해 두고 (최근 MAX_TARGETS개), 위임자의 didReceiveNotificationResponse에서 프론트에
+//   "notification-click"({ project, pty })으로 알린다. 앱을 다시 켜면 이전 알림은 앞으로 가져오기만 한다.
 // - 소리: 앱 메뉴 "알림 소리"에서 고른 시스템 소리 이름, "default"면 macOS 기본 소리 (set_notify_sound).
 //   UNNotificationSound는 앱 번들과 앱 컨테이너의 Library/Sounds에서만 파일을 찾는다 (Apple 문서. 시스템 소리 이름을 찾는
 //   NSSound와 다르다). 샌드박스가 없는 앱의 컨테이너는 홈이라, 고른 시스템 소리를 ~/Library/Sounds/ddak-<이름>.aiff로
@@ -13,7 +16,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 #[derive(Default)]
 struct View {
@@ -29,6 +33,18 @@ static TEXTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 // 알림 소리: 고른 이름과 알림에 넘길 파일 이름 (프론트가 받기 전이나 준비하지 못하면 None = macOS 기본)
 static SOUND: Mutex<Option<String>> = Mutex::new(None);
 static SOUND_FILE: Mutex<Option<String>> = Mutex::new(None);
+// 알림을 누르면 갈 곳. pty: 그 알림을 낸 터미널 (사용자를 기다림), 없으면 채팅 패널
+#[derive(Clone, serde::Serialize)]
+pub struct Target {
+    project: String,
+    pty: Option<u32>,
+}
+const MAX_TARGETS: usize = 200;
+static TARGETS: Mutex<Vec<(String, Target)>> = Mutex::new(Vec::new());
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+// 자체 테스트: 보낸 알림의 (ID, 본문) (누르기를 흉내 낸다, selftest_click_notification)
+static SENT_IDS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 // 자체 테스트가 본 알림 (제목, 본문)과 마지막 배지 수
 static SENT: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 static BADGE: Mutex<u32> = Mutex::new(0);
@@ -73,20 +89,44 @@ pub fn text(key: &str, vars: &[(&str, &str)]) -> String {
     s
 }
 
-// 알린다 (보고 있으면 생략). 제목은 "ddak · <프로젝트 폴더 이름>".
-pub fn send(project: &Path, kind: Kind, body: &str) {
+// 알린다 (보고 있으면 생략). 제목은 "ddak · <프로젝트 폴더 이름>". pty: 누르면 보일 터미널 (없으면 채팅 패널)
+pub fn send(project: &Path, kind: Kind, body: &str, pty: Option<u32>) {
     if watching(project, &kind) {
         return;
     }
     let name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    post(&format!("ddak · {name}"), body);
+    post(&format!("ddak · {name}"), body, Some(Target { project: project.to_string_lossy().into_owned(), pty }));
 }
 
-// 보고 있는지 보지 않고 보낸다 (자체 테스트는 기록, 번들이 아니면 로그)
-fn post(title: &str, body: &str) {
+// 알림을 눌렀다: 창을 앞으로 가져오고 갈 곳을 프론트에 알린다 (모르는 ID면 앞으로 가져오기만)
+pub fn clicked(id: &str) {
+    use tauri::{Emitter, Manager};
+    let Some(app) = APP.get() else { return };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    let target = TARGETS.lock().unwrap().iter().rev().find(|(i, _)| i == id).map(|(_, t)| t.clone());
+    if let Some(target) = target {
+        let _ = app.emit("notification-click", target);
+    }
+}
+
+// 보고 있는지 보지 않고 보낸다 (자체 테스트는 기록, 번들이 아니면 로그). target: 누르면 갈 곳
+fn post(title: &str, body: &str, target: Option<Target>) {
     let title = title.to_string();
+    let id = format!("ddak-{}-{}", std::process::id(), NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    if let Some(target) = target {
+        let mut targets = TARGETS.lock().unwrap();
+        targets.push((id.clone(), target));
+        if targets.len() > MAX_TARGETS {
+            targets.remove(0);
+        }
+    }
     if selftest() {
         SENT.lock().unwrap().push((title, body.to_string()));
+        SENT_IDS.lock().unwrap().push((id, body.to_string()));
         return;
     }
     if !bundled() {
@@ -95,7 +135,7 @@ fn post(title: &str, body: &str) {
     }
     let sound = SOUND_FILE.lock().unwrap().clone();
     #[cfg(target_os = "macos")]
-    mac::deliver(&title, body, sound.as_deref());
+    mac::deliver(&id, &title, body, sound.as_deref());
     #[cfg(not(target_os = "macos"))]
     let _ = sound;
 }
@@ -137,7 +177,8 @@ fn bundled() -> bool {
 }
 
 // 앱이 뜰 때: 알림 권한을 묻고 (처음 한 번만 macOS가 묻고, 그 뒤로는 저장된 답을 쓴다), 앞에 있을 때도 보이게 한다
-pub fn init() {
+pub fn init(app: &tauri::AppHandle) {
+    let _ = APP.set(app.clone());
     if bundled() && !selftest() {
         #[cfg(target_os = "macos")]
         {
@@ -156,7 +197,7 @@ mod mac {
     use objc2_foundation::{NSError, NSString};
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationPresentationOptions, UNNotificationRequest,
-        UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
 
     // 앱이 앞에 있을 때 알림을 어떻게 보일지 위임자의 willPresent로 정한다: 배너·목록·소리. 보낼지는 send가 이미 정했으므로
@@ -174,6 +215,13 @@ mod mac {
             #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
             fn will_present(&self, _center: &UNUserNotificationCenter, _notification: &UNNotification, handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>) {
                 handler.call((UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List | UNNotificationPresentationOptions::Sound,));
+            }
+
+            // 알림을 눌렀다 (super::clicked)
+            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+            fn did_receive(&self, _center: &UNUserNotificationCenter, response: &UNNotificationResponse, handler: &DynBlock<dyn Fn()>) {
+                super::clicked(&response.notification().request().identifier().to_string());
+                handler.call(());
             }
         }
     );
@@ -195,8 +243,8 @@ mod mac {
         UNUserNotificationCenter::currentNotificationCenter().requestAuthorizationWithOptions_completionHandler(options, &handler);
     }
 
-    // sound: ~/Library/Sounds에 준비한 파일 이름 (prepare_sound), 없으면 기본 소리
-    pub fn deliver(title: &str, body: &str, sound: Option<&str>) {
+    // id: 알림 ID (누르면 이것으로 갈 곳을 찾는다). sound: ~/Library/Sounds에 준비한 파일 이름 (prepare_sound), 없으면 기본 소리
+    pub fn deliver(id: &str, title: &str, body: &str, sound: Option<&str>) {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
@@ -205,8 +253,7 @@ mod mac {
             None => UNNotificationSound::defaultSound(),
         };
         content.setSound(Some(&sound));
-        let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(&format!("ddak-{id}")), &content, None);
+        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(id), &content, None);
         UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, None);
     }
 }
@@ -240,7 +287,7 @@ pub fn set_notify_sound(sound: String, preview: Option<String>) {
     *SOUND_FILE.lock().unwrap() = file;
     *SOUND.lock().unwrap() = Some(sound);
     if let Some(body) = preview {
-        post("ddak", &body);
+        post("ddak", &body, None);
     }
 }
 
@@ -270,6 +317,25 @@ pub fn set_badge(app: tauri::AppHandle, count: u32) {
 #[tauri::command]
 pub fn selftest_notifications() -> (Vec<(String, String)>, u32, Option<String>) {
     (std::mem::take(&mut *SENT.lock().unwrap()), *BADGE.lock().unwrap(), SOUND.lock().unwrap().clone())
+}
+
+// 실제 경로 (링크를 따라감. 없는 경로면 그대로). 알림의 프로젝트(실제 경로)를 등록한 프로젝트와 맞춘다 (src/notifyClick.ts)
+#[tauri::command]
+pub fn real_path(path: String) -> String {
+    std::fs::canonicalize(&path).map_or(path, |p| p.to_string_lossy().into_owned())
+}
+
+// 자체 테스트: 본문이 prefix로 시작하는 마지막 알림을 누른 것처럼 한다 (있었으면 true)
+#[tauri::command]
+pub fn selftest_click_notification(prefix: String) -> bool {
+    let id = SENT_IDS.lock().unwrap().iter().rev().find(|(_, b)| b.starts_with(&prefix)).map(|(i, _)| i.clone());
+    match id {
+        Some(id) if selftest() => {
+            clicked(&id);
+            true
+        }
+        _ => false,
+    }
 }
 
 #[tauri::command]

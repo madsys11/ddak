@@ -30,6 +30,7 @@ type Action =
   | { type: "split"; dir: "row" | "col" }
   | { type: "closePane"; pane?: number }
   | { type: "focus"; pane: number }
+  | { type: "reveal"; pane: number }
   | { type: "ratio"; tab: number; path: Path; ratio: number }
   | { type: "title"; pane: number; title: string }
   | { type: "renameTab"; id: number; name: string }
@@ -177,6 +178,11 @@ function step(s: State, a: Action): State {
     case "focus": {
       const owner = s.tabs.find((t) => paneIds(t.layout).includes(a.pane));
       return owner && owner.focus !== a.pane ? update(owner.id, (t) => ({ ...t, focus: a.pane })) : s;
+    }
+    // 그 창의 탭을 보이고 그 창을 고른다 (알림을 누름)
+    case "reveal": {
+      const owner = s.tabs.find((t) => paneIds(t.layout).includes(a.pane));
+      return owner ? { ...update(owner.id, (t) => ({ ...t, focus: a.pane })), active: owner.id } : s;
     }
     case "ratio":
       return update(a.tab, (t) => ({ ...t, layout: setRatio(t.layout, a.path, a.ratio) }));
@@ -755,6 +761,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                     chat={session?.command && !session.setup ? { project: s.root, name: `${tab.worktree ?? "origin"}/${session.name}`, key: session.sid ?? String(id) } : undefined}
                     focused={visible && active && tab.focus === id}
                     onFocus={() => dispatch({ type: "focus", pane: id })}
+                    onReveal={() => dispatch({ type: "reveal", pane: id })}
                     onTitle={(title) => dispatch({ type: "title", pane: id, title })}
                     // 준비 창은 끝나도 출력을 볼 수 있게 남긴다 (닫기는 ⌘W)
                     onExit={(code) =>

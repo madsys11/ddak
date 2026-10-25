@@ -33,6 +33,8 @@ export const devHooks: {
   chatPausedExtra?: string[];
   // 터미널의 깨우기 이벤트 등록을 이만큼(ms) 늦춘다 (터미널은 등록이 끝난 뒤 뜬다)
   wakeListenDelay?: number;
+  // 터미널이 프로그램 상태(pty_awaiting·pty_working)를 보낼 때마다 불러서 그만큼(ms) 늦게 보낸다 (보낸 순서, 자체 테스트)
+  statusDelay?: (cmd: string, args: Record<string, unknown>) => number;
   // Git Graph (자체 테스트): 커밋 상세 응답을 돌려준 값만큼 늦추거나(ms) 실패시킨다 / 그래프 읽기를 부를 때마다 물어 true면 실패
   gitDetailDelay?: (sha: string) => number;
   gitDetailFail?: (sha: string) => boolean;
