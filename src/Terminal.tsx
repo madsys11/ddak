@@ -7,6 +7,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
+import { draggedPath, isPathDrag, shellQuote } from "./dragPath";
 import { fixImeInput, passesImeKey } from "./hangul";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
@@ -176,6 +177,22 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shellAfter,
     const userEvent = () => (userAt = performance.now());
     const userEvents = ["keydown", "keypress", "beforeinput", "input", "paste", "compositionstart", "compositionupdate", "compositionend"];
     userEvents.forEach((e) => term.textarea?.addEventListener(e, userEvent, true));
+    // 파일 트리에서 끌어다 놓으면 셸에 쓸 수 있게 감싼 절대 경로를 붙여넣는다 (iTerm·터미널 앱과 같음). 사용자 입력이다.
+    const onDragOver = (e: DragEvent) => {
+      if (!isPathDrag(e.dataTransfer)) return;
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = "copy";
+    };
+    const onDrop = (e: DragEvent) => {
+      const dropped = draggedPath(e.dataTransfer);
+      if (!dropped) return;
+      e.preventDefault();
+      userEvent();
+      term.paste(`${shellQuote(dropped.path)} `);
+      term.focus();
+    };
+    el.addEventListener("dragover", onDragOver);
+    el.addEventListener("drop", onDrop);
     const input = term.onData((data) => {
       if (id === undefined) return;
       const target = id;
@@ -196,6 +213,8 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shellAfter,
       disposed = true;
       wakes.then((f) => f(), () => {});
       userEvents.forEach((e) => term.textarea?.removeEventListener(e, userEvent, true));
+      el.removeEventListener("dragover", onDragOver);
+      el.removeEventListener("drop", onDrop);
       observer.disconnect();
       input.dispose();
       unfixIme();

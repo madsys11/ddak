@@ -87,6 +87,40 @@ pub fn fs_rename(path: String, name: String) -> Result<String, CodeError> {
     Ok(dest.to_string_lossy().into_owned())
 }
 
+// 휴지통으로 옮기기 (파일 트리). 지우지 않고 macOS 휴지통으로 보내서 되살릴 수 있다 (NSFileManager trashItemAtURL).
+// 자체 테스트(DDAK_SELFTEST)에서는 사용자의 휴지통 대신 DDAK_DATA_DIR/trash로 옮긴다 (실행마다 휴지통이 쌓이지 않게).
+#[tauri::command]
+pub fn fs_trash(path: String) -> Result<(), CodeError> {
+    let src = Path::new(&path);
+    if src.symlink_metadata().is_err() {
+        return Err(code_err("io", format!("{path}: not found")));
+    }
+    if let (Some(_), Some(data)) = (std::env::var_os("DDAK_SELFTEST"), std::env::var_os("DDAK_DATA_DIR")) {
+        let trash = Path::new(&data).join("trash");
+        std::fs::create_dir_all(&trash).map_err(|e| code_err("io", e))?;
+        let name = src.file_name().ok_or_else(|| code_err("io", &path))?;
+        let dest = trash.join(format!("{}-{}", now_nanos(), name.to_string_lossy()));
+        return std::fs::rename(src, &dest).map_err(|e| code_err("io", e));
+    }
+    move_to_trash(src).map_err(|e| code_err("io", e))
+}
+
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
+}
+
+#[cfg(target_os = "macos")]
+fn move_to_trash(path: &Path) -> Result<(), String> {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None).map_err(|e| e.localizedDescription().to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn move_to_trash(path: &Path) -> Result<(), String> {
+    Err(format!("{}: trash is only supported on macOS", path.display()))
+}
+
 #[derive(serde::Serialize)]
 pub struct Entry {
     name: String,
@@ -158,6 +192,21 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(names, ["A_dir", "b_dir", "a.txt", "z.txt"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // 실제 휴지통으로 옮긴다 (사용자의 휴지통에 시험 파일이 남아서 기본으로는 돌리지 않는다)
+    #[test]
+    #[ignore]
+    fn trash_moves_to_macos_trash() {
+        let dir = std::env::temp_dir().join(format!("ddak-fs-trash-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ddak-trash-test.txt");
+        std::fs::write(&file, "x").unwrap();
+        move_to_trash(&file).unwrap();
+        assert!(!file.exists());
+        assert!(move_to_trash(&file).is_err(), "없는 파일");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

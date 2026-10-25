@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { devHooks } from "./devHooks";
+import { draggedPath, isPathDrag } from "./dragPath";
 import { usePrefs } from "./prefs";
 
 // src-tauri/src/chat.rs Message
@@ -154,6 +155,12 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
     }
   }
 
+  // 대화를 모두 지운다 (확인을 받고. 지운 내용은 앱 데이터에 남는다, src-tauri/src/chat.rs clear). 목록은 "chat" 이벤트로 바뀐다.
+  async function clear() {
+    const ok = await devHooks.confirm(t("chat.clearConfirm"), { okLabel: t("chat.clearOk"), cancelLabel: t("common.cancel") });
+    if (ok) invoke("chat_clear", { project }).catch((e) => setError(String(e)));
+  }
+
   const mention = (name: string) => {
     setDraft((d) => `${d}${d && !d.endsWith(" ") ? " " : ""}@${name} `);
     input.current?.focus();
@@ -165,6 +172,9 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
     <aside className="chat-panel" style={{ display: open ? undefined : "none" }}>
       <div className="chat-head">
         <span className="chat-title">{t("chat.title")}</span>
+        <button className="chat-clear" data-action="chat-clear" title={t("chat.clear")} disabled={messages.length === 0} onClick={clear}>
+          {t("chat.clear")}
+        </button>
         <button className="chat-close" title={t("chat.close")} onClick={onClose}>
           ×
         </button>
@@ -232,6 +242,23 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
         value={draft}
         placeholder={t("chat.placeholder")}
         onChange={(e) => setDraft(e.target.value)}
+        // 파일 트리에서 끌어다 놓으면 트리 루트 기준 상대 경로를 커서 자리에 넣는다 (루트 밖이면 절대 경로)
+        onDragOver={(e) => {
+          if (!isPathDrag(e.dataTransfer)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }}
+        onDrop={(e) => {
+          const dropped = draggedPath(e.dataTransfer);
+          if (!dropped) return;
+          e.preventDefault();
+          const el = e.currentTarget;
+          const [start, end] = [el.selectionStart, el.selectionEnd];
+          const text = `${dropped.rel ?? dropped.path} `;
+          setDraft((d) => d.slice(0, start) + text + d.slice(end));
+          el.focus();
+          requestAnimationFrame(() => el.setSelectionRange(start + text.length, start + text.length));
+        }}
         onKeyDown={(e) => {
           // 한글 조합을 확정하는 Enter는 보내지 않는다
           if (e.nativeEvent.isComposing || e.keyCode === 229) return;

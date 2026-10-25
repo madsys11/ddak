@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MenuItem } from "./ContextMenu";
+import { devHooks } from "./devHooks";
+import { setDraggedPath } from "./dragPath";
 import { codeError } from "./errors";
 import { ChevronIcon, RepoIcon, WorktreeIcon } from "./icons";
 import { useT } from "./prefs";
@@ -61,8 +63,8 @@ function useEntries(path: string) {
   return { entries, error };
 }
 
-// 폴더 하나의 내용. 프로젝트 목록(Sidebar)이 프로젝트 아래에 이것을 놓는다.
-export function Children({ path, depth }: { path: string; depth: number }) {
+// 폴더 하나의 내용. 프로젝트 목록(Sidebar)이 프로젝트 아래에 이것을 놓는다. root: 트리 루트 (끌어 놓을 때 상대 경로의 기준).
+export function Children({ path, depth, root = path }: { path: string; depth: number; root?: string }) {
   const { entries, error } = useEntries(path);
   const { creating } = useTree();
   if (error) return <div className="tree-error" style={{ paddingLeft: indent(depth) }}>{error}</div>;
@@ -71,7 +73,7 @@ export function Children({ path, depth }: { path: string; depth: number }) {
     <>
       {creating?.dir === path && <NewEntry dir={path} kind={creating.kind} depth={depth} />}
       {entries.map((e) => (
-        <Node key={e.path} entry={e} dir={path} depth={depth} />
+        <Node key={e.path} entry={e} dir={path} depth={depth} root={root} />
       ))}
     </>
   );
@@ -160,20 +162,38 @@ function RenameInput({ entry }: { entry: Entry }) {
   );
 }
 
-function Node({ entry, dir, depth }: { entry: Entry; dir: string; depth: number }) {
+function Node({ entry, dir, depth, root }: { entry: Entry; dir: string; depth: number; root: string }) {
   const t = useT();
   const tree = useTree();
   const folderMenu = useFolderMenu();
   const [open, setOpen] = useState(false);
+  const [trashError, setTrashError] = useState<string | null>(null);
   useOpenWhenCreating(entry.path, setOpen);
+  // 휴지통으로 (확인을 받고. 되살릴 수 있다). 목록은 폴더 감시로 바뀐다.
+  async function trash() {
+    const ok = await devHooks.confirm(t("tree.trashConfirm", { name: entry.name }), { okLabel: t("tree.trash"), cancelLabel: t("common.cancel") });
+    if (!ok) return;
+    invoke("fs_trash", { path: entry.path }).then(
+      () => setTrashError(null),
+      (e) => setTrashError(t("tree.trashFailed", { detail: codeError(e).detail })),
+    );
+  }
   return (
     <>
       <div
         className="tree-row"
         style={{ paddingLeft: indent(depth) }}
         onClick={() => entry.is_dir && setOpen(!open)}
+        // 터미널이나 채팅 입력란에 끌어다 놓으면 경로가 들어간다 (Terminal.tsx, ChatPanel.tsx)
+        draggable={tree.renaming !== entry.path}
+        onDragStart={(e) => setDraggedPath(e.dataTransfer, entry.path, root)}
         onContextMenu={(e) =>
-          tree.openMenu(e, [...folderMenu(entry.is_dir ? entry.path : dir), "separator", { label: t("tree.rename"), action: () => tree.startRename(entry.path) }])
+          tree.openMenu(e, [
+            ...folderMenu(entry.is_dir ? entry.path : dir),
+            "separator",
+            { label: t("tree.rename"), action: () => tree.startRename(entry.path) },
+            { label: t("tree.trash"), action: trash },
+          ])
         }
         title={entry.link ? t("tree.link", { path: entry.path, target: entry.link }) : entry.path}
         data-git={entry.git ?? undefined}
@@ -185,8 +205,9 @@ function Node({ entry, dir, depth }: { entry: Entry; dir: string; depth: number 
         {tree.renaming === entry.path ? <RenameInput entry={entry} /> : <span className="tree-name">{entry.name}</span>}
         {entry.link && <span className="tree-link">↗</span>}
       </div>
+      {nameError(trashError, depth)}
       {/* 펼칠 때 처음으로 읽는다. 큰 폴더(node_modules 등)를 미리 읽지 않기 위해서다. */}
-      {open && <Children path={entry.path} depth={depth + 1} />}
+      {open && <Children path={entry.path} depth={depth + 1} root={root} />}
     </>
   );
 }

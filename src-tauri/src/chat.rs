@@ -57,6 +57,8 @@ struct Inner {
     members: HashMap<String, Member>,
     // 프로젝트(실제 경로) → 메시지 (처음 쓸 때 파일에서 읽는다. 읽기에 실패하면 넣지 않고 다음에 다시 읽는다)
     rooms: HashMap<PathBuf, Vec<Message>>,
+    // 프로젝트 → 지운 지점의 번호 (새 번호는 이것과 남은 메시지 중 큰 것 + 1)
+    floors: HashMap<PathBuf, u64>,
     names: HashMap<PathBuf, Names>,
     // (프로젝트, 작업그룹) → 자동 깨우기 셈 (WAKE_LIMIT). 메모리에만 둔다: 앱을 다시 켜면 처음부터 센다.
     limits: HashMap<(PathBuf, String), Limit>,
@@ -93,6 +95,8 @@ pub enum Change<'a> {
     Limits,
     // 재개 버튼으로 풀려 보류됐던 알림: (받는 사람, 보낸 사람)
     Released(&'a [(String, String)]),
+    // 대화를 모두 지움 (chat_clear)
+    Cleared,
 }
 
 type OnMessage = Box<dyn Fn(&Path, Change) + Send + Sync>;
@@ -134,14 +138,29 @@ fn mentions(text: &str, names: &[String]) -> Vec<String> {
     found
 }
 
+// 대화를 지운 지점 (지운 뒤 새 파일의 첫 줄): 그때의 마지막 번호. 번호는 이 뒤로 이어서 매긴다.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Cleared {
+    cleared: u64,
+}
+
 // 메시지 파일을 읽는다. 없으면 빈 방, 그 밖에 읽지 못하면 오류. 줄마다 따로 읽어 깨진 줄(UTF-8·JSON)만 건너뛴다.
-fn load_messages(path: &Path) -> Result<Vec<Message>, String> {
+// 지운 지점 줄이 있으면 그 번호도 돌려준다 (없으면 0).
+fn load_messages(path: &Path) -> Result<(Vec<Message>, u64), String> {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    Ok(bytes.split(|b| *b == b'\n').filter_map(|l| std::str::from_utf8(l).ok()).filter_map(|l| serde_json::from_str(l).ok()).collect())
+    let (mut messages, mut floor) = (Vec::new(), 0);
+    for line in bytes.split(|b| *b == b'\n').filter_map(|l| std::str::from_utf8(l).ok()) {
+        if let Ok(m) = serde_json::from_str::<Message>(line) {
+            messages.push(m);
+        } else if let Ok(c) = serde_json::from_str::<Cleared>(line) {
+            floor = floor.max(c.cleared);
+        }
+    }
+    Ok((messages, floor))
 }
 
 // 한 줄을 붙인다. 마지막 줄이 줄바꿈 없이 끊겨 있으면 (쓰다 멈춤) 먼저 줄을 바꾼다 (안 그러면 새 줄이 깨진 줄에 붙는다).
@@ -185,8 +204,9 @@ impl Chats {
 
     fn room<'a>(&self, inner: &'a mut Inner, project: &Path) -> Result<&'a mut Vec<Message>, String> {
         if !inner.rooms.contains_key(project) {
-            let loaded = load_messages(&self.file(project))?;
+            let (loaded, floor) = load_messages(&self.file(project))?;
             inner.rooms.insert(project.to_path_buf(), loaded);
+            inner.floors.insert(project.to_path_buf(), floor);
         }
         Ok(inner.rooms.get_mut(project).unwrap())
     }
@@ -319,8 +339,11 @@ impl Chats {
             let counted = (from != USER && to.iter().any(|n| n != USER)).then(|| group_of(from)).flatten().map(|g| (project.to_path_buf(), g.to_string()));
             let held = counted.as_ref().is_some_and(|k| inner.limits.get(k).is_some_and(|l| l.count >= WAKE_LIMIT));
             let file = self.file(project);
-            let room = self.room(&mut inner, project)?;
-            let id = room.iter().map(|m| m.id).max().map_or(1, |n| n + 1);
+            // 처음이면 파일에서 읽는다 (지운 지점도)
+            self.room(&mut inner, project)?;
+            let floor = inner.floors.get(project).copied().unwrap_or(0);
+            let room = inner.rooms.get_mut(project).unwrap();
+            let id = room.iter().map(|m| m.id).max().unwrap_or(0).max(floor) + 1;
             let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held };
             let line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&self.dir).and_then(|()| append_line(&file, &line)).map_err(|e| e.to_string())?;
@@ -356,6 +379,42 @@ impl Chats {
             (self.on_message)(project, Change::Limits);
         }
         Ok(message)
+    }
+
+    // 대화를 모두 지운다 (채팅 패널). 지운 파일은 chats/cleared/<이름>-<시각>.jsonl로 옮겨 두고 (되살릴 수 있게), 새 파일의
+    // 첫 줄에 지운 지점 {"cleared": 마지막 번호}를 남긴다. 번호는 그 뒤로 이어서 매긴다: 세션이 읽은 위치를 번호로 기억해서,
+    // 1부터 다시 쓰면 새 메시지를 놓친다. 새 파일을 먼저 만들고 바꿔 넣으며, 바꿔 넣지 못하면 옮긴 파일을 되돌린다.
+    pub fn clear(&self, project: &Path) -> Result<(), String> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            self.room(&mut inner, project)?;
+            let floor = inner.floors.get(project).copied().unwrap_or(0);
+            let room = inner.rooms.get_mut(project).unwrap();
+            let last = room.iter().map(|m| m.id).max().unwrap_or(0).max(floor);
+            if room.is_empty() {
+                return Ok(());
+            }
+            let file = self.file(project);
+            let name = file.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let archive = self.dir.join("cleared");
+            let kept = archive.join(format!("{name}-{}.jsonl", now_ms()));
+            let fresh = self.dir.join(format!("{name}.jsonl.new"));
+            let line = serde_json::to_string(&Cleared { cleared: last }).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&archive).map_err(|e| e.to_string())?;
+            std::fs::write(&fresh, format!("{line}\n")).map_err(|e| e.to_string())?;
+            if let Err(e) = std::fs::rename(&file, &kept) {
+                let _ = std::fs::remove_file(&fresh);
+                return Err(e.to_string());
+            }
+            if let Err(e) = std::fs::rename(&fresh, &file) {
+                let _ = std::fs::rename(&kept, &file);
+                return Err(e.to_string());
+            }
+            room.clear();
+            inner.floors.insert(project.to_path_buf(), last);
+        }
+        (self.on_message)(project, Change::Cleared);
+        Ok(())
     }
 
     // 자동 깨우기가 멈춘 작업그룹 (WAKE_LIMIT에 닿음)
@@ -547,6 +606,9 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                 let _ = emitter.emit("chat-limit", json!({ "project": project }));
             }
             Change::Released(released) => wake(None, released),
+            Change::Cleared => {
+                let _ = emitter.emit("chat", json!({ "project": project }));
+            }
         }
     });
     match Chats::start(dir, on_message) {
@@ -575,6 +637,12 @@ pub fn chat_messages(state: tauri::State<'_, ChatsState>, project: String) -> Re
 #[tauri::command]
 pub fn chat_post(state: tauri::State<'_, ChatsState>, project: String, text: String) -> Result<Message, String> {
     chats_of(&state)?.post(&real(&project), USER, &text)
+}
+
+// 대화를 모두 지운다 (사용자. 채팅 패널에서 확인을 받은 뒤)
+#[tauri::command]
+pub fn chat_clear(state: tauri::State<'_, ChatsState>, project: String) -> Result<(), String> {
+    chats_of(&state)?.clear(&real(&project))
 }
 
 // 자동 깨우기가 멈춘 작업그룹 (채팅 패널의 알림). 바뀌면 "chat-limit" 이벤트가 온다.
@@ -697,6 +765,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // 대화 지우기: 지운 파일은 cleared/로 옮겨 두고, 번호는 이어서 매긴다 (다시 켜도). 빈 방은 그대로. 읽은 위치가 번호라서
+    // 지운 뒤 새 메시지는 since 없이 읽어도 보인다.
+    #[test]
+    fn clear_archives_and_keeps_numbering() {
+        let dir = temp("clear");
+        let p = Path::new("/p/c");
+        let cleared = Arc::new(Mutex::new(0));
+        let count = cleared.clone();
+        let chats = Chats::new(dir.clone(), Box::new(move |_, c| if let Change::Cleared = c { *count.lock().unwrap() += 1 }), 0);
+        chats.clear(p).unwrap();
+        assert_eq!(*cleared.lock().unwrap(), 0, "빈 방을 지움");
+        for t in ["one", "two", "three"] {
+            chats.post(p, USER, t).unwrap();
+        }
+        chats.clear(p).unwrap();
+        assert!(chats.messages(p).unwrap().is_empty());
+        assert_eq!(*cleared.lock().unwrap(), 1);
+        let kept: Vec<_> = std::fs::read_dir(dir.join("cleared")).unwrap().filter_map(|e| e.ok()).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(load_messages(&kept[0].path()).unwrap().0.len(), 3);
+        assert_eq!(chats.post(p, USER, "four").unwrap().id, 4);
+        let again = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
+        assert_eq!(again.messages(p).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(), [4]);
+        // 다시 켠 뒤 또 지워도 이어서
+        again.clear(p).unwrap();
+        assert_eq!(again.post(p, USER, "five").unwrap().id, 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // 자동 깨우기 제한: 작업그룹마다 세션이 다른 세션에게 보낸 메시지를 세고 (@all도 1개, 사용자에게만 보낸 것·멘션 없는
     // 것은 세지 않음) WAKE_LIMIT개 뒤부터는 저장만 하고 깨우지 않는다 (held, to는 그대로). 다른 작업그룹·프로젝트는 따로 센다.
     // 사용자 메시지가 그 작업그룹에 닿거나 재개하면 다시 세고, 보류된 알림을 (받는 사람, 보낸 사람)마다 한 번 알린다.
@@ -707,7 +804,7 @@ mod tests {
         let sink = log.clone();
         let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
             let entry = match c {
-                Change::Message(_, []) | Change::Members => return,
+                Change::Message(_, []) | Change::Members | Change::Cleared => return,
                 Change::Message(m, r) => format!("message {} released {r:?}", m.from),
                 Change::Limits => "limits".to_string(),
                 Change::Released(r) => format!("released {r:?}"),

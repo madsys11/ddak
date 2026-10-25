@@ -1322,6 +1322,56 @@ async function testImeUnit() {
 }
 
 // 오른쪽 클릭 → 이름 바꾸기
+// 휴지통·끌어 놓기 (FileTree.tsx, dragPath.ts): 오른쪽 클릭 "Move to Trash"는 확인을 받고 휴지통으로 옮긴다 (자체 테스트는
+// 앱 데이터의 trash 폴더, src-tauri/src/fs.rs fs_trash). 취소하면 그대로. 트리 항목을 터미널에 놓으면 셸용으로 감싼 절대 경로,
+// 채팅 입력란에는 트리 루트 기준 상대 경로. 끌기는 합성 DragEvent라 실제 마우스 끌기는 직접 확인해야 한다.
+async function testTrashAndDrag(root: string, term: Terminal) {
+  await run(term, `printf x > "${root}/trash me.txt" && printf y > "${root}/keep.txt" && printf z > "${root}/d d's.txt"`);
+  await waitFor("새 파일", () => fileRow("trash me.txt") && fileRow("keep.txt") && fileRow("d d's.txt"), 3000);
+  const realConfirm = devHooks.confirm;
+  let asked = "";
+  devHooks.confirm = async (m) => ((asked = m), false);
+  rightClick(fileRow("keep.txt")!);
+  await waitFor("메뉴", contextMenu);
+  await pickMenu("Move to Trash");
+  await sleep(500);
+  const kept = !!fileRow("keep.txt") && asked.includes("keep.txt");
+  devHooks.confirm = async () => true;
+  rightClick(fileRow("trash me.txt")!);
+  await waitFor("메뉴", contextMenu);
+  await pickMenu("Move to Trash");
+  const gone = await waitFor("휴지통으로", () => !fileRow("trash me.txt"), 3000).then(() => true, () => false);
+  devHooks.confirm = realConfirm;
+  const dataDir = await invoke<string>("groups_dir");
+  const inTrash = (await run(term, `ls "${dataDir}/trash" | grep -c "trash me.txt"`)).some((l) => l.trim() === "1");
+  check("휴지통: 취소하면 그대로, 확인하면 트리와 디스크에서 사라져 휴지통으로 (시험에서는 앱 데이터 trash)", kept && gone && inTrash, `${kept} ${gone} ${inTrash} ${asked}`);
+
+  const drag = (name: string, target: Element) => {
+    const dt = new DataTransfer();
+    fileRow(name)!.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: dt }));
+    const over = new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt });
+    target.dispatchEvent(over);
+    target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    return over.defaultPrevented;
+  };
+  const termEl = [...liveTerms].find(([, x]) => x === term)![0];
+  const accepted = drag("d d's.txt", termEl);
+  const quoted = `'${root}/d d'\\''s.txt'`;
+  const line = await waitFor("놓은 경로", () => screen(term).find((l) => l.includes(quoted)), 3000).catch(() => screen(term).at(-1) ?? "");
+  term.input("\x15");
+  const chatInput = document.querySelector<HTMLTextAreaElement>(".project-workspace:not([style*='none']) .chat-input")!;
+  drag("keep.txt", chatInput);
+  const relDropped = await waitFor("채팅에 놓은 경로", () => chatInput.value === "keep.txt " && chatInput.value, 3000).catch(() => chatInput.value);
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(chatInput, "");
+  chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+  check(
+    "끌어 놓기: 터미널에는 셸용으로 감싼 절대 경로, 채팅 입력란에는 트리 루트 기준 상대 경로",
+    accepted && line.includes(quoted) && relDropped === "keep.txt ",
+    `${accepted} ${line} | ${JSON.stringify(relDropped)}`,
+  );
+  await run(term, `rm -f "${root}/keep.txt" "${root}/d d's.txt"`);
+}
+
 async function testRename(root: string, term: Terminal) {
   const input = () => document.querySelector<HTMLInputElement>("input[data-rename]");
   const error = () => document.querySelector(".tree-input-error")?.textContent ?? "";
@@ -1335,7 +1385,7 @@ async function testRename(root: string, term: Terminal) {
 
   rightClick(fileRow("a.txt")!);
   await waitFor("메뉴", contextMenu);
-  check("이름 바꾸기: 파일 메뉴에 항목", menuLabels().join(",") === "New File…,New Folder…,-,Rename…", menuLabels().join(","));
+  check("이름 바꾸기: 파일 메뉴에 항목", menuLabels().join(",") === "New File…,New Folder…,-,Rename…,Move to Trash", menuLabels().join(","));
   await pickMenu("Rename…");
   const a = await waitFor("이름 입력란", input);
   check("이름 바꾸기: 그 자리에 입력란, 포커스, 확장자 앞까지 선택", document.activeElement === a && a.value === "a.txt" && a.selectionStart === 0 && a.selectionEnd === 1, `${a.value} ${a.selectionStart}-${a.selectionEnd}`);
@@ -2173,6 +2223,28 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   devHooks.chatPausedExtra = undefined;
   await emit("chat-limit", { project: root });
   await waitFor("가짜 멈춤 지움", () => !panel()!.querySelector("[data-paused]"), 3000).catch(() => null);
+
+  // 대화 지우기: 확인을 받고 모두 지운다 (취소하면 그대로). 번호는 이어서 매긴다 (세션이 읽은 위치를 번호로 기억한다)
+  const all = () => invoke<{ id: number }[]>("chat_messages", { project: root });
+  const maxId = Math.max(...(await all()).map((m) => m.id));
+  const clearBtn = () => panel()!.querySelector<HTMLButtonElement>("[data-action=chat-clear]")!;
+  const realConfirm = devHooks.confirm;
+  devHooks.confirm = async () => false;
+  clearBtn().click();
+  await sleep(300);
+  const keptAll = (await all()).length > 0 && panel()!.querySelectorAll(".chat-msg").length > 0;
+  devHooks.confirm = async () => true;
+  clearBtn().click();
+  const emptied = await waitFor("대화 지움", () => panel()!.querySelectorAll(".chat-msg").length === 0 && clearBtn().disabled, 3000).then(() => true, () => false);
+  devHooks.confirm = realConfirm;
+  const next = await invoke<{ id: number }>("chat_post", { project: root, text: "@origin/listener after clear" });
+  const shownAgain = await waitFor("지운 뒤 새 메시지", () => panel()!.querySelectorAll(".chat-msg").length === 1, 3000).then(() => true, () => false);
+  check(
+    "대화 지우기: 취소하면 그대로, 확인하면 모두 지우고 (버튼 끔), 번호는 이어서",
+    keptAll && emptied && next.id === maxId + 1 && shownAgain,
+    `${keptAll} ${emptied} ${maxId}→${next.id} ${shownAgain}`,
+  );
+
   toggle().click();
   await waitFor("채팅 닫기", () => !shown(), 2000);
   await menu("close_pane");
@@ -2720,6 +2792,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["repos", () => testRepos(root, t())],
     ["create", () => testCreate(root, t())],
     ["rename", () => testRename(root, t())],
+    ["trashDrag", () => testTrashAndDrag(root, t())],
     ["imeUnit", testImeUnit],
     ["terminalReplyUnit", testTerminalReplyUnit],
     ["workspaceStateUnit", testWorkspaceStateUnit],
