@@ -38,6 +38,19 @@ for b in A B C D E; do mkapp "$T/builds/$b.app" io.github.madsys11.ddak "$b"; do
 sh "$S" --replace "$T/builds/A.app" >/dev/null 2>&1
 [ "$(marker)" = A ] && ok "새로 설치" || bad "새로 설치" "$(marker)"
 
+# 1-1. claude 안에서 돌려도 다시 여는 앱에 claude 세션 표시를 넘기지 않는다 (같은 접두사의 사용자 설정과 다른 CLAUDE 변수는 넘긴다)
+printf '#!/bin/sh\nenv >"%s"\n' "$T/open.env" >"$T/open.sh"
+chmod +x "$T/open.sh"
+CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=x CLAUDE_CODE_SESSION_ID=y CLAUDE_CODE_MESSAGING_SOCKET=z CLAUDE_CODE_USE_BEDROCK=1 CLAUDE_CONFIG_DIR=keep \
+  DDAK_INSTALL_OPEN="$T/open.sh" \
+  sh "$S" --replace "$T/builds/A.app" >/dev/null 2>&1
+if [ -s "$T/open.env" ] && ! grep -qE '^(CLAUDECODE|CLAUDE_CODE_CHILD_SESSION|CLAUDE_CODE_SESSION_ID|CLAUDE_CODE_MESSAGING_SOCKET)=' "$T/open.env" &&
+  grep -q '^CLAUDE_CODE_USE_BEDROCK=1$' "$T/open.env" && grep -q '^CLAUDE_CONFIG_DIR=keep$' "$T/open.env"; then
+  ok "다시 여는 앱에 claude 세션 표시를 넘기지 않음"
+else
+  bad "다시 여는 앱의 환경" "$(grep '^CLAUDE' "$T/open.env" 2>/dev/null | tr '\n' ' ')"
+fi
+
 # 2. 동시에 둘 (리뷰 P2: 같은 준비 폴더를 서로 지워 앱이 사라졌다). 잠금으로 하나씩, 준비 폴더는 실행마다 따로
 sh "$S" --replace "$T/builds/B.app" >"$T/b.log" 2>&1 &
 sh "$S" --replace "$T/builds/C.app" >"$T/c.log" 2>&1 &

@@ -374,6 +374,12 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 - 프론트: 멈춘 작업그룹은 `chat_paused`, 바뀌면 `chat-limit` 이벤트 (`{ project }`).
 - 세션 실행: `$SHELL -l -i -c '<명령과 인자>; exec $SHELL -l'` (인자는 작은따옴표). CLI가 끝나면 셸이 남는다.
   `command`가 비면 그냥 셸.
+- 터미널 환경에서 claude 세션 표시는 뺀다 (`pty.rs` CLAUDE_SESSION_VARS: `CLAUDECODE`, `CLAUDE_PID`,
+  `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_ENTRYPOINT`,
+  `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`). ddak이 claude 안에서 떴으면 (개발,
+  claude 안에서 돌린 `install.sh`가 다시 연 앱) 이것을 물려받아 터미널의 claude가 하위 세션으로 보고 대화 기록을 저장하지 않는다.
+  이름으로 고른다: 같은 접두사의 사용자 설정(`CLAUDE_CODE_USE_BEDROCK` 등)과 그 밖의 `CLAUDE_*`(`CLAUDE_EFFORT`, 설정 폴더 등)는
+  넘긴다. `install.sh`도 같은 목록을 지운다 (테스트가 두 목록을 맞춰 본다).
 - 프로젝트를 처음 열면 첫 탭 = 기본 작업그룹 (세션을 같은 폭으로 나란히). 설정을 못 읽었으면 셸 하나.
 - 세션 추가 (Terminal 메뉴 "세션 추가…", 탭 오른쪽 클릭. 단축키 없음, `AddSessionDialog.tsx`):
   - 창에 설정의 모든 그룹의 세션을 보인다 (이름, 그룹, 읽기 전용, 명령).
@@ -442,9 +448,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   - 실행 중이면 그 앱의 식별자로 종료를 요청하고 30초까지 기다린다. 실행 중인지 조회하지 못하면(`pgrep` 오류) 바꾸지 않는다.
   - 실행마다 따로 만든 준비 폴더(같은 볼륨)에 새 앱을 복사하고, 기존 앱은 지우지 않고 옆으로 옮긴 뒤 새 앱을 옮긴다.
     옮기지 못하면 기존 앱을 되돌린다. 되돌리기도 실패하면 백업을 지우지 않고 위치를 알린다.
-  - 다시 연다.
+  - 다시 연다. claude 세션 표시는 빼고 연다 (`open`은 부른 쪽의 환경을 앱에 넘긴다).
 - `scripts/test-install.sh`: 설치된 앱을 건드리지 않고 임시 폴더의 가짜 앱으로 교체 단계(새로 설치, 동시 설치, 옮기기 실패
-  되돌리기, 되돌리기도 실패할 때 백업 보존, 다른 앱 거부, 예전 식별자 종료, 조회 오류면 멈춤)와 세션 분리(그룹 리더에서
+  되돌리기, 되돌리기도 실패할 때 백업 보존, 다른 앱 거부, 예전 식별자 종료, 조회 오류면 멈춤, 다시 여는 앱의 환경)와 세션 분리(그룹 리더에서
   시작)를 시험한다.
 - 상태는 바뀔 때마다 저장되고, 다시 열면 세션은 이어서 하기로 복원된다.
 
@@ -548,8 +554,7 @@ ddak 앱
 
 ## 미결정 사항
 
-- [ ] ddak 터미널에 `CLAUDE_CODE_*` 환경변수를 넘길지 (claude 안에서 띄운 ddak이면 터미널의 claude가
-  `CLAUDE_CODE_CHILD_SESSION`을 물려받아 대화 기록을 저장하지 않는다)
+(없음)
 
 ## 알려진 문제
 
@@ -572,4 +577,6 @@ ddak 앱
 ## 다음 단계
 
 1차 기능(프로젝트·파일 트리, 다중 터미널, 작업그룹, 채팅방, git graph)을 모두 넣었다. 다음 후보:
-1. 미결정 사항의 `CLAUDE_CODE_*` 환경변수 처리
+1. 깨우기의 알려진 한계: 이미 대기 중인 알림은 자동 깨우기 제한으로 막지 않는다. 새 worktree에서 CLI가 폴더 신뢰를 묻는
+   동안 깨우면 알림의 Enter가 기본 선택을 고를 수 있다.
+2. 알려진 문제의 간헐 실패 정리

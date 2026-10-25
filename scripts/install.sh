@@ -102,6 +102,10 @@ replace() {
     exit 1
   fi
   echo "설치함: $APP"
+  # claude 안에서 돌렸어도 claude 세션 표시는 빼고 연다. open은 이 환경을 앱에 넘겨서, 다시 연 앱의 터미널 claude가 하위
+  # 세션으로 보고 대화 기록을 저장하지 않았다 (2026-10-25). pty.rs도 터미널에 넘기지 않지만 앱에도 남기지 않는다.
+  # 이름으로 고른다 (같은 접두사의 CLAUDE_CODE_USE_BEDROCK 등 사용자 설정은 남긴다). 목록은 pty.rs CLAUDE_SESSION_VARS와 같다.
+  for k in CLAUDECODE CLAUDE_PID CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SESSION_ATTENDED CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN; do unset "$k"; done
   ${DDAK_INSTALL_OPEN:-open} "$APP"
 }
 

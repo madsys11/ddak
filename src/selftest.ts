@@ -203,6 +203,17 @@ async function testTerminal(root: string) {
   const pwd = await run(term, "pwd");
   check("터미널: 작업 폴더가 루트", pwd.some((l) => l.trim() === root), pwd.join("|"));
 
+  // 앱이 claude 안에서 떴어도 (scripts/selftest.sh가 표시를 넣는다) 터미널은 claude 세션 표시를 물려받지 않는다.
+  // 물려받으면 그 터미널의 claude가 하위 세션으로 보고 대화 기록을 저장하지 않는다. 그 밖의 CLAUDE 변수는 넘긴다.
+  // 넘기는 쪽 예는 세션 표시와 접두사가 같은 이름으로 둔다 (리뷰 R1: 접두사로 지우면 사용자 설정도 지웠다). 아무도 읽지 않는
+  // 이름이어야 한다 (CLAUDE_CONFIG_DIR 같은 실제 설정이면 claude 검사의 claude가 첫 실행 화면을 띄웠다).
+  const env = await run(term, `echo "ENV:[$CLAUDECODE][$CLAUDE_CODE_CHILD_SESSION][$CLAUDE_CODE_DDAK_SELFTEST]"`);
+  check(
+    "터미널: claude 세션 표시는 물려받지 않고 같은 접두사의 다른 변수는 넘김",
+    env.some((l) => l.trim() === "ENV:[][][keep]"),
+    env.filter((l) => l.includes("ENV:")).join("|"),
+  );
+
   const korean = await run(term, "echo 한글테스트");
   const row = korean.find((l) => l.includes("한글테스트"));
   check("터미널: 한글 출력", row !== undefined, korean.join("|"));

@@ -32,6 +32,8 @@ config="{\"build\":{\"devUrl\":\"http://localhost:$port\",\"beforeDevCommand\":\
 run() {
   local scenario=$1 dirs=${2:-$1}
   echo "--- $scenario" >&2
+  # claude 세션 표시(CLAUDE_CODE_CHILD_SESSION 등)는 터미널에 넘기지 않는지, 다른 CLAUDE 변수는 넘기는지 본다 (testTerminal)
+  CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=selftest CLAUDE_CODE_DDAK_SELFTEST=keep \
   DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_SELFTEST_ONLY="${SELFTEST_ONLY:-}" DDAK_DATA_DIR="$base/data-$dirs" DDAK_HOME="$base/home-$dirs" \
     npx tauri dev --no-watch --config "$config" 2>&1 \
     | sed -n '/=== DDAK SELFTEST BEGIN ===/,/=== DDAK SELFTEST \(PASS\|FAIL\) ===/p' \

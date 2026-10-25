@@ -126,6 +126,34 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+// claude 세션이 자기 하위 프로세스에 넣는 표시 (대화 기록 저장을 끄는 CLAUDE_CODE_CHILD_SESSION, 그 세션의 ID·메시지 소켓 등).
+// ddak이 claude 안에서 떴으면 (개발, claude 안에서 돌린 install.sh가 다시 연 앱) 이것을 물려받아 터미널의 claude까지 하위 세션으로
+// 보고 기록을 저장하지 않았다 (2026-10-25 실제로 남). 터미널에는 넘기지 않는다.
+// 이름으로 고른다: 같은 접두사에 사용자 설정(CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_MAX_OUTPUT_TOKENS 등)이 있다 (리뷰 R1: 접두사로
+// 지웠더니 설정도 지웠다). 목록은 그때 claude 안에서 띄운 앱의 환경에서 본 것. CLAUDE_EFFORT도 있었지만 사용자 설정일 수 있어
+// 남긴다. scripts/install.sh의 목록과 같아야 한다 (테스트가 확인).
+pub const CLAUDE_SESSION_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+];
+
+fn is_claude_session_var(key: &str) -> bool {
+    CLAUDE_SESSION_VARS.contains(&key)
+}
+
+fn strip_claude_session_vars(cmd: &mut CommandBuilder, keys: impl Iterator<Item = String>) {
+    for key in keys.filter(|k| is_claude_session_var(k)) {
+        cmd.env_remove(key);
+    }
+}
+
 // command가 있으면 (작업그룹 세션) 셸 안에서 그 명령을 실행하고, 끝나면 그 자리에 셸을 띄운다.
 // 셸을 거쳐야 .zshrc 등에서 잡는 PATH로 claude·codex를 찾는다. CLI를 끝내도 창이 닫히지 않고 셸이 남는다.
 // shell_after가 false면 (작업그룹 준비 스크립트) 셸을 띄우지 않아서 PTY의 종료 코드가 그 명령의 종료 코드다.
@@ -148,6 +176,7 @@ fn shell_command(cwd: &str, command: Option<&[String]>, fallback: Option<&[Strin
         cmd.args(["-i", "-c", &script]);
     }
     cmd.cwd(cwd);
+    strip_claude_session_vars(&mut cmd, std::env::vars_os().filter_map(|(k, _)| k.into_string().ok()));
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     // Finder/Dock에서 실행한 앱은 LANG이 없어서 한글이 깨진다.
@@ -1062,6 +1091,25 @@ mod tests {
         wake(&ptys, &["tok".into()], "origin/e");
         close(&ptys, id);
         assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "없어진 터미널을 그만두지 않음");
+    }
+
+    // claude 세션 표시는 터미널에 넘기지 않고, 같은 접두사의 사용자 설정과 그 밖의 CLAUDE 변수는 그대로 둔다 (리뷰 R1).
+    // install.sh도 같은 목록을 지운다.
+    #[test]
+    fn claude_session_vars_are_not_inherited() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        let kept = ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_EFFORT", "CLAUDE_CONFIG_DIR", "PATH"];
+        let keys: Vec<&str> = CLAUDE_SESSION_VARS.iter().copied().chain(kept).collect();
+        for k in &keys {
+            cmd.env(k, "x");
+        }
+        strip_claude_session_vars(&mut cmd, keys.iter().map(|k| k.to_string()));
+        let left: Vec<&str> = keys.into_iter().filter(|k| cmd.get_env(k).is_some()).collect();
+        assert_eq!(left, kept);
+        let install = include_str!("../../scripts/install.sh");
+        let line = install.lines().find(|l| l.trim_start().starts_with("for k in CLAUDECODE ")).expect("install.sh의 목록");
+        let listed: Vec<&str> = line.trim_start().trim_start_matches("for k in ").split("; do").next().unwrap().split_whitespace().collect();
+        assert_eq!(listed, CLAUDE_SESSION_VARS, "install.sh와 목록이 다름");
     }
 
     // 자리표시자는 한 번에 바꾼다: 넣은 값 안의 {chat}은 그대로, :toml은 TOML 문자열 리터럴, 모르는 이름·JSON 중괄호는 그대로
