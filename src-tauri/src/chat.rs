@@ -223,6 +223,12 @@ impl Chats {
         inner.members.iter().filter(|(_, m)| m.project == project && names.contains(&m.name)).map(|(t, _)| t.clone()).collect()
     }
 
+    // 참여한 토큰과 이름 (깨우기를 기다리는 참여자를 찾는다)
+    pub fn member_tokens(&self, project: &Path) -> Vec<(String, String)> {
+        let inner = self.inner.lock().unwrap();
+        inner.members.iter().filter(|(_, m)| m.project == project).map(|(t, m)| (t.clone(), m.name.clone())).collect()
+    }
+
     pub fn leave(&self, token: &str) {
         let left = self.inner.lock().unwrap().members.remove(token);
         if let Some(m) = left {
@@ -460,6 +466,25 @@ pub fn chat_messages(state: tauri::State<'_, ChatsState>, project: String) -> Re
 #[tauri::command]
 pub fn chat_post(state: tauri::State<'_, ChatsState>, project: String, text: String) -> Result<Message, String> {
     chats_of(&state)?.post(&real(&project), USER, &text)
+}
+
+// 깨우기를 기다리는 참여자 (채팅 패널의 대기 표시). 대기가 바뀌면 "chat-wake" 이벤트가 온다.
+#[tauri::command]
+pub fn chat_waiting(state: tauri::State<'_, ChatsState>, ptys: tauri::State<'_, crate::pty::Ptys>, project: String) -> Result<Vec<String>, String> {
+    let members = chats_of(&state)?.member_tokens(&real(&project));
+    let waiting = ptys.waiting_tokens();
+    let mut names: Vec<String> = members.into_iter().filter(|(t, _)| waiting.contains(t)).map(|(_, n)| n).collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+// 그 참여자를 기다리지 않고 바로 깨운다 (채팅 패널의 대기 표시를 누름)
+#[tauri::command]
+pub fn chat_wake_member(state: tauri::State<'_, ChatsState>, ptys: tauri::State<'_, crate::pty::Ptys>, project: String, name: String) -> Result<(), String> {
+    let tokens = chats_of(&state)?.tokens_named(&real(&project), &[name]);
+    ptys.wake_now_tokens(&tokens);
+    Ok(())
 }
 
 #[tauri::command]

@@ -316,22 +316,30 @@ button:hover {
   height: 100%;
 }
 /* 작업그룹 세션 창: 위에 역할 이름 줄. 이름 줄은 띄워 두고 창의 위 여백만 늘려서, 터미널 쪽 구조는
-   일반 창과 똑같이 둔다 (터미널을 flex·calc 높이로 줄였을 때 xterm 요소가 이름 줄만큼 덜 차서 아래가 비었다). */
+   일반 창과 똑같이 둔다 (터미널을 flex·calc 높이로 줄였을 때 xterm 요소가 이름 줄만큼 덜 차서 아래가 비었다).
+   이름 줄은 창 폭 전체에 다른 배경과 아래 경계선을 둬서 터미널 화면과 구분한다 (터미널 첫 줄과 섞여 보였다). */
 .pane.session {
-  padding-top: 22px;
+  padding-top: 27px;
 }
 .pane-label {
   position: absolute;
-  top: 3px;
-  left: 8px;
-  right: 8px;
+  top: 0;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 18px;
+  height: 23px;
+  padding: 0 8px;
   font-size: 11px;
   color: var(--fg-dim);
+  background: var(--sidebar-bg);
+  border-bottom: 1px solid var(--border);
   user-select: none;
+}
+.pane.focused .pane-label {
+  color: var(--fg);
 }
 .pane-badge {
   padding: 0 5px;
@@ -714,6 +722,24 @@ button.secondary {
   background: var(--input-bg);
   border: 1px solid var(--input-border);
   border-radius: 10px;
+}
+/* 깨우기를 기다리는 참여자: 칩 테두리를 강조색으로, 옆에 "대기" (누르면 바로 깨움) */
+.chat-member-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.chat-member.waiting {
+  border-color: var(--accent);
+}
+.chat-member-wake {
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--accent);
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  cursor: pointer;
 }
 .chat-none {
   color: var(--fg-dim);

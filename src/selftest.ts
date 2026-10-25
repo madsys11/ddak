@@ -702,7 +702,16 @@ async function testWebglLoss(term: Terminal) {
     return;
   }
   check("WebGL: 처음에는 WebGL 렌더러 사용", true);
-  before.gl.getExtension("WEBGL_lose_context")!.loseContext();
+  // 이미 컨텍스트를 잃었으면 (WebKit이 페이지당 컨텍스트 수 제한으로 오래된 것을 거둔다) getExtension이 null이다
+  // (WebGL 규격). 그때는 강제로 잃게 하지 않고 그 손실로 전환을 본다. 확장이 정말 없으면 예외 대신 진단을 남긴다.
+  const alreadyLost = before.gl.isContextLost();
+  const lose = alreadyLost ? null : before.gl.getExtension("WEBGL_lose_context");
+  if (!alreadyLost && !lose) {
+    check("WebGL: 컨텍스트를 강제로 잃게 하는 확장", false, `terms=${liveTerms.size}`);
+    return;
+  }
+  lose?.loseContext();
+  if (alreadyLost) log.push(`INFO  WebGL: 컨텍스트를 이미 잃은 상태라 강제 손실을 건너뜀 (terms=${liveTerms.size})`);
   // xterm은 3초 동안 복구를 기다린 뒤 onContextLoss를 보낸다.
   await waitFor("기본 렌더러 전환", () => webglState(term).dom, 8000).then(
     () => check("WebGL: 컨텍스트를 잃으면 기본 렌더러로 전환", true),
@@ -1987,21 +1996,66 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   const afterEnter = await waitFor("Enter 뒤 깨움", () => got().length > beforeEnter && got().at(-1)!.includes("[ddak] New chat message from user"), WAKE_IDLE_MS + 4000).catch(() => null);
   check("깨우기: Enter 직후 온 터미널 응답(ESC[0n, ESC[?…R)은 입력 중으로 보지 않음", enterTyped === "hi\r" && !!afterEnter, `${JSON.stringify(enterTyped)} ${got().slice(-2).join(" | ")}`);
 
+  // 치는 중이면 배지를 띄우고 기다린다. 누르면 3초를 기다리지 않고 바로 깨운다
   const typed = typeKeys(listenerPane.term, "abc");
+  const typedAt = performance.now();
   const beforeDraft = got().length;
-  await sleep(200);
   await invoke("chat_post", { project: root, text: "@origin/listener again" });
   const badge = () => listenerPane.el.querySelector<HTMLElement>("[data-wake]");
-  await waitFor("알림 대기 배지", badge, 3000).catch(() => null);
-  await sleep(WAKE_IDLE_MS + 1000);
+  await waitFor("알림 대기 배지", badge, 2000).catch(() => null);
   const waited = !!badge() && got().length === beforeDraft;
   badge()?.click();
   const forced = await waitFor("바로 깨움", () => got().find((l) => l.startsWith("GOT:abc[ddak] New chat message")), 5000).catch(() => null);
+  const forcedIn = performance.now() - typedAt;
   await waitFor("배지 사라짐", () => !badge(), 3000).catch(() => null);
   check(
-    "깨우기: 초안이 있으면 배지만 띄우고 기다림, 누르면 바로 깨우고 배지가 사라짐",
-    typed === "abc" && waited && !!forced && !badge(),
-    `${JSON.stringify(typed)} ${waited} ${forced} ${!!badge()} | ${got().join(" | ")}`,
+    "깨우기: 치는 중이면 배지만 띄우고 기다림, 누르면 바로 깨우고 배지가 사라짐",
+    typed === "abc" && waited && !!forced && forcedIn < WAKE_IDLE_MS && !badge(),
+    `${JSON.stringify(typed)} ${waited} ${forced} ${Math.round(forcedIn)}ms ${!!badge()} | ${got().join(" | ")}`,
+  );
+
+  // 쓰다 남긴 초안(마지막 키가 Enter가 아님)이 있어도 3초 동안 입력이 없으면 스스로 깨운다 (쓰다가 지운 창도 영원히
+  // 기다리지 않게). 알림은 초안 뒤에 붙는다
+  const left = typeKeys(listenerPane.term, "ghi");
+  const leftAt = performance.now();
+  await invoke("chat_post", { project: root, text: "@origin/listener left draft" });
+  await sleep(1000);
+  const heldWhileTyping = got().every((l) => !l.startsWith("GOT:ghi"));
+  const selfWoke = await waitFor("남긴 초안 뒤 깨움", () => got().find((l) => l.startsWith("GOT:ghi[ddak] New chat message")), WAKE_IDLE_MS + 4000).catch(() => null);
+  const selfIn = performance.now() - leftAt;
+  check(
+    "깨우기: 남긴 초안이 있어도 3초 동안 입력이 없으면 스스로 깨움",
+    left === "ghi" && heldWhileTyping && !!selfWoke && selfIn >= WAKE_IDLE_MS - 300,
+    `${heldWhileTyping} ${selfWoke} ${Math.round(selfIn)}ms`,
+  );
+
+  // 채팅 패널에도 대기를 보인다 (참여자 칩 옆 "대기"). 누르면 바로 깨우고 표시가 사라진다
+  const waitingMark = () => panel()!.querySelector<HTMLElement>("[data-waiting='origin/listener']");
+  const typedAgain = typeKeys(listenerPane.term, "def");
+  const typedAgainAt = performance.now();
+  const beforePanel = got().length;
+  await invoke("chat_post", { project: root, text: "@origin/listener from panel" });
+  await waitFor("패널 대기 표시", waitingMark, 2000).catch(() => null);
+  const marked = !!waitingMark() && !!panel()!.querySelector(".chat-member.waiting[data-member='origin/listener']") && got().length === beforePanel;
+  waitingMark()?.click();
+  const fromPanel = await waitFor("패널에서 바로 깨움", () => got().find((l) => l.startsWith("GOT:def[ddak] New chat message")), 5000).catch(() => null);
+  const fromPanelIn = performance.now() - typedAgainAt;
+  await waitFor("패널 대기 표시 사라짐", () => !waitingMark(), 3000).catch(() => null);
+  check(
+    "채팅 패널: 깨우기를 기다리는 참여자는 칩 옆에 대기 표시, 누르면 바로 깨우고 사라짐",
+    typedAgain === "def" && marked && !!fromPanel && fromPanelIn < WAKE_IDLE_MS && !waitingMark(),
+    `${marked} ${fromPanel} ${Math.round(fromPanelIn)}ms ${!!waitingMark()}`,
+  );
+
+  // 세션 창의 이름 줄은 터미널 화면과 구분된다: 다른 배경, 아래 경계선, 터미널보다 위
+  const label = listenerPane.el.querySelector<HTMLElement>(".pane-label")!;
+  const labelStyle = getComputedStyle(label);
+  const termBg = getComputedStyle(listenerPane.el.querySelector<HTMLElement>(".xterm-viewport") ?? listenerPane.el).backgroundColor;
+  const termTop = listenerPane.el.querySelector(".terminal")!.getBoundingClientRect().top;
+  check(
+    "세션 창: 이름 줄은 터미널과 다른 배경·아래 경계선으로 구분",
+    labelStyle.backgroundColor !== termBg && labelStyle.borderBottomWidth === "1px" && label.getBoundingClientRect().bottom <= termTop,
+    `${labelStyle.backgroundColor} / ${termBg} ${labelStyle.borderBottomWidth} ${label.getBoundingClientRect().bottom} ${termTop}`,
   );
 
   // 변경 번호가 더 오래된 상태는 버린다 (리뷰 P2: 앞 깨우기의 해제가 새 대기를 지웠다). 순서가 바뀐 이벤트를 직접 보낸다.

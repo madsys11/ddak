@@ -56,25 +56,23 @@ struct Session {
     input: Input,
 }
 
-// 사용자 입력 (pty_write). 깨우기는 쓰는 중인 초안과 섞이지 않게, 마지막으로 친 것이 Enter(제출)이고 IDLE 동안 입력이
-// 없을 때만 알림을 입력한다. 한 번도 치지 않았으면 비어 있는 것으로 본다.
+// 사용자 입력 (pty_write). 깨우기는 치는 중(선택지를 고르는 중 포함)에 끼어들지 않게, IDLE 동안 입력이 없을 때만 알림을
+// 입력한다. 마지막 키가 Enter인지는 보지 않는다: 쓰다가 지운 경우 영원히 기다렸다. 쓰다 남긴 초안이 있으면 알림이 그 뒤에
+// 붙는다 (사용자는 채팅으로 명령하는 것을 기본으로 한다).
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct Input {
     last: Option<Instant>,
-    submitted: bool,
 }
 
 impl Input {
-    const NONE: Input = Input { last: None, submitted: true };
+    const NONE: Input = Input { last: None };
 
-    fn typed(&mut self, data: &str, now: Instant) {
+    fn typed(&mut self, now: Instant) {
         self.last = Some(now);
-        // ⇧Enter(ESC CR)는 줄바꿈이라 제출이 아니다 (claude·codex 기본 설정)
-        self.submitted = data.ends_with('\r') && !data.ends_with("\u{1b}\r");
     }
 
     fn quiet(&self, now: Instant) -> bool {
-        self.submitted && self.last.is_none_or(|t| now.duration_since(t) >= WAKE_IDLE)
+        self.last.is_none_or(|t| now.duration_since(t) >= WAKE_IDLE)
     }
 }
 
@@ -476,7 +474,7 @@ fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<(), Strin
     let mut sessions = ptys.sessions.lock().unwrap();
     let session = sessions.get_mut(&id).ok_or("no such pty")?;
     if user {
-        session.input.typed(data, Instant::now());
+        session.input.typed(Instant::now());
     }
     session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())
 }
@@ -552,6 +550,26 @@ pub fn start_waker(app: tauri::AppHandle) {
 pub fn chat_wake_now(ptys: State<'_, Ptys>, id: u32) {
     if let Some(p) = ptys.wakes.lock().unwrap().get_mut(&id) {
         p.now = true;
+    }
+}
+
+impl Ptys {
+    // 깨우기를 기다리는 터미널의 채팅 토큰 (채팅 패널의 대기 표시, chat.rs chat_waiting)
+    pub fn waiting_tokens(&self) -> Vec<String> {
+        let sessions = self.sessions.lock().unwrap();
+        let wakes = self.wakes.lock().unwrap();
+        wakes.keys().filter_map(|id| sessions.get(id)?.chat_token.clone()).collect()
+    }
+
+    // 이 토큰의 터미널 중 깨우기를 기다리는 것을 바로 깨운다 (다음 확인 때. 채팅 패널에서 누름)
+    pub fn wake_now_tokens(&self, tokens: &[String]) {
+        let sessions = self.sessions.lock().unwrap();
+        let mut wakes = self.wakes.lock().unwrap();
+        for (id, p) in wakes.iter_mut() {
+            if sessions.get(id).and_then(|s| s.chat_token.as_ref()).is_some_and(|t| tokens.contains(t)) {
+                p.now = true;
+            }
+        }
     }
 }
 
@@ -898,19 +916,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // 입력 중인지: 한 번도 안 쳤거나, 마지막으로 친 것이 Enter이고 WAKE_IDLE이 지났을 때만 깨울 수 있다. ⇧Enter(ESC CR)는
-    // 줄바꿈이다.
+    // 입력 중인지: 한 번도 안 쳤거나 WAKE_IDLE 동안 입력이 없으면 깨울 수 있다 (마지막 키가 Enter가 아니어도).
     #[test]
-    fn input_quiet_only_after_submit_and_idle() {
+    fn input_quiet_after_idle() {
         let t = Instant::now();
         let mut i = Input::NONE;
         assert!(i.quiet(t));
-        i.typed("abc", t);
-        assert!(!i.quiet(t + WAKE_IDLE * 2), "초안이 있는데 깨움");
-        i.typed("\r", t);
-        assert!(!i.quiet(t + Duration::from_secs(1)) && i.quiet(t + WAKE_IDLE));
-        i.typed("\u{1b}\r", t);
-        assert!(!i.quiet(t + WAKE_IDLE * 2), "⇧Enter를 제출로 봄");
+        i.typed(t);
+        assert!(!i.quiet(t + Duration::from_secs(1)), "치는 중에 깨움");
+        assert!(i.quiet(t + WAKE_IDLE), "초안이 남았다고 계속 기다림");
     }
 
     // 깨우기: 멘션된 참여자의 터미널에 알림을 쓰고 잠시 뒤 Enter를 따로 보낸다. 보낸 사람은 모아서 한 번에. 초안이 있거나
@@ -936,23 +950,21 @@ mod tests {
         assert_eq!(first.iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
         wake(&ptys, &["tok".into()], "origin/b");
         wake(&ptys, &["tok".into()], "origin/a");
-        // 초안이 있으면 오래 지나도 기다린다
+        // 막 쳤으면 기다린다
         write_input(&ptys, id, "draft", true).unwrap();
-        assert!(wake_tick(&ptys, Instant::now() + WAKE_IDLE * 2).is_empty());
-        // 터미널이 스스로 보낸 응답(커서 위치)은 입력 상태에 넣지 않는다 (리뷰 P2)
+        let typed_at = Instant::now();
+        assert!(wake_tick(&ptys, typed_at).is_empty(), "치는 중에 깨움");
+        // 터미널이 스스로 보낸 응답(커서 위치)은 입력으로 보지 않는다 (리뷰 P2). 친 때부터 IDLE이 지나면 깨운다
+        // (초안이 남아 있어도. 알림은 초안 뒤에 붙는다)
+        std::thread::sleep(Duration::from_millis(50));
         write_input(&ptys, id, "\u{1b}[1;1R", false).unwrap();
-        assert!(wake_tick(&ptys, Instant::now() + WAKE_IDLE * 2).is_empty(), "응답이 초안을 지움");
-        write_input(&ptys, id, "\r", true).unwrap();
-        wait("GOT:draft");
-        // 막 제출했으면 기다리고, 조용해지면 깨운다
-        assert!(wake_tick(&ptys, Instant::now()).is_empty());
-        write_input(&ptys, id, "\u{1b}[5;1R", false).unwrap();
-        let done = wake_tick(&ptys, Instant::now() + WAKE_IDLE);
+        let done = wake_tick(&ptys, typed_at + WAKE_IDLE);
         assert_eq!(done.iter().map(|w| w.0).collect::<Vec<_>>(), [id], "응답 때문에 깨우지 않음");
         // 변경 번호는 늘어난다 (프론트가 오래된 상태를 버린다)
         assert!(done[0].1 > first[0].1);
-        // (가짜 응답 바이트도 PTY로 가서 read의 줄 앞에 붙는다)
+        // (초안과 가짜 응답 바이트도 PTY로 가서 read의 줄 앞에 붙는다)
         wait("[ddak] New chat message from origin/a, origin/b. Read it with the ddak read_messages tool");
+        assert!(text().contains("GOT:draft"), "{:?}", text());
         assert!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).is_empty(), "한 번 깨운 뒤에도 또 깨움");
 
         // 알림과 Enter 사이에 온 자동 응답(사용자 입력 아님)은 Enter를 막지 않는다 (리뷰 후속 P2)
@@ -970,11 +982,16 @@ mod tests {
         write_input(&ptys, id, "\r", true).unwrap();
         wait("from origin/c. Read it with the ddak read_messages tool, then reply with post_message and @mention whoever should get the reply.y");
 
-        // 바로 깨우기는 초안이 있어도 깨운다. 터미널이 없어지면 그만둔다
+        // 바로 깨우기는 초안이 있어도 깨운다 (채팅 패널: 토큰으로 대기를 보고 누른다). 터미널이 없어지면 그만둔다
+        assert!(ptys.waiting_tokens().is_empty());
         wake(&ptys, &["tok".into()], "origin/d");
         write_input(&ptys, id, "z", true).unwrap();
-        ptys.wakes.lock().unwrap().get_mut(&id).unwrap().now = true;
+        assert_eq!(ptys.waiting_tokens(), ["tok"]);
+        ptys.wake_now_tokens(&["other".into()]);
+        assert!(wake_tick(&ptys, Instant::now()).is_empty(), "다른 토큰을 깨움");
+        ptys.wake_now_tokens(&["tok".into()]);
         assert_eq!(wake_tick(&ptys, Instant::now()).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        assert!(ptys.waiting_tokens().is_empty());
         wake(&ptys, &["tok".into()], "origin/e");
         close(&ptys, id);
         assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "없어진 터미널을 그만두지 않음");

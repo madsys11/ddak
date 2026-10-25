@@ -65,6 +65,8 @@ pub fn run() {
             chat::chat_messages,
             chat::chat_post,
             chat::chat_members,
+            chat::chat_waiting,
+            chat::chat_wake_member,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,

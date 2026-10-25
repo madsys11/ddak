@@ -23,6 +23,8 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
   const { t, locale } = usePrefs();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<string[]>([]);
+  // 깨우기를 기다리는 참여자 (터미널 이름 줄의 배지와 같은 상태. 채팅을 보는 동안에도 보이게)
+  const [waiting, setWaiting] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   // 이벤트를 등록하지 못함: 새 메시지를 스스로 다시 읽지 못한다
   const [listenError, setListenError] = useState<string | null>(null);
@@ -66,6 +68,16 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
         })
         .then((m) => alive && mine === nm && setMembers(m), () => {});
     };
+    // 대기도 마지막 요청만. "chat-wake"(대기가 바뀜)와 "chat-members"(나가면 대기도 빠짐) 때 다시 읽는다.
+    let nw = 0;
+    const loadWaiting = () => {
+      const mine = ++nw;
+      invoke<string[]>("chat_waiting", { project }).then((w) => alive && mine === nw && setWaiting(w), () => {});
+    };
+    const onMembers = () => {
+      loadMembers();
+      loadWaiting();
+    };
     const offs: (() => void)[] = [];
     (async () => {
       const delay = dev ? (devHooks.chatListenDelay ?? 0) : 0;
@@ -77,7 +89,7 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
           if (alive) offs.push(off);
           else off();
         });
-      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", loadMembers)]);
+      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", onMembers), register("chat-wake", loadWaiting)]);
       if (!alive) return;
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) {
@@ -86,6 +98,7 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
       }
       loadMessages();
       loadMembers();
+      loadWaiting();
     })();
     return () => {
       alive = false;
@@ -170,9 +183,16 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
         {members
           .filter((m) => m !== USER)
           .map((m) => (
-            <button key={m} className="chat-member" data-member={m} onClick={() => mention(m)}>
-              {m}
-            </button>
+            <span key={m} className="chat-member-wrap">
+              <button className={`chat-member${waiting.includes(m) ? " waiting" : ""}`} data-member={m} onClick={() => mention(m)}>
+                {m}
+              </button>
+              {waiting.includes(m) && (
+                <button className="chat-member-wake" data-waiting={m} title={t("chat.wakeHint")} onClick={() => invoke("chat_wake_member", { project, name: m }).catch(() => {})}>
+                  {t("chat.waiting")}
+                </button>
+              )}
+            </span>
           ))}
         {members.length <= 1 && <span className="chat-none">{t("chat.noMembers")}</span>}
       </div>
