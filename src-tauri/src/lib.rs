@@ -105,6 +105,15 @@ mod tests {
     // 창의 네이티브 끌어 놓기 처리기를 끈다. 켜 두면 Tauri가 모든 끌기를 가로채(처리기가 늘 true) 웹뷰의 HTML 끌어 놓기
     // (파일 트리 → 터미널·채팅 입력란, src/dragPath.ts)가 dragover·drop을 받지 못한다 (tauri-runtime-wry, wry drag_drop.rs).
     // 자체 테스트는 합성 이벤트라 이것을 잡지 못해서 설정을 직접 본다.
+    // 설치한 앱은 번들 전체를 임시(ad-hoc) 서명한다 ("-"). 링커가 실행 파일만 서명하면 서명 식별자가 앱 식별자가 아니고
+    // Info.plist도 묶이지 않아, macOS 알림 센터가 앱으로 알아보지 못해 알림 권한을 묻지도 보내지도 못했다
+    // (src-tauri/src/notify.rs, docs/reviews/2026-10-25-notify.md). 배포 때 Developer ID로 바꾼다 (docs/spec.md "배포 계획").
+    #[test]
+    fn bundle_is_signed_ad_hoc() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["bundle"]["macOS"]["signingIdentity"], "-");
+    }
+
     #[test]
     fn native_drag_drop_is_off() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
