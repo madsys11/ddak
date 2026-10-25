@@ -704,8 +704,8 @@ button.secondary {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border);
+  padding: 6px 8px 0;
+  border-top: 1px solid var(--border);
 }
 .chat-member {
   padding: 1px 6px;
@@ -763,7 +763,7 @@ button.secondary {
   word-break: break-word;
 }
 .chat-input {
-  margin: 8px;
+  margin: 6px 8px 8px;
   resize: none;
   font: inherit;
   color: var(--fg);

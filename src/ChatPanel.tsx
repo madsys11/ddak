@@ -143,16 +143,6 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
           ×
         </button>
       </div>
-      <div className="chat-members" title={t("chat.membersHint")}>
-        {members
-          .filter((m) => m !== USER)
-          .map((m) => (
-            <button key={m} className="chat-member" data-member={m} onClick={() => mention(m)}>
-              {m}
-            </button>
-          ))}
-        {members.length <= 1 && <span className="chat-none">{t("chat.noMembers")}</span>}
-      </div>
       <div
         ref={list}
         className="chat-list"
@@ -175,6 +165,17 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
       </div>
       {error && <div className="chat-error">{error}</div>}
       {listenError && <div className="chat-error" data-listen-error>{t("chat.listenError", { detail: listenError })}</div>}
+      {/* 참여자 칩은 입력란 바로 위에 둔다 (누르면 멘션을 넣으므로 쓰는 곳 가까이) */}
+      <div className="chat-members" title={t("chat.membersHint")}>
+        {members
+          .filter((m) => m !== USER)
+          .map((m) => (
+            <button key={m} className="chat-member" data-member={m} onClick={() => mention(m)}>
+              {m}
+            </button>
+          ))}
+        {members.length <= 1 && <span className="chat-none">{t("chat.noMembers")}</span>}
+      </div>
       <textarea
         ref={input}
         className="chat-input"

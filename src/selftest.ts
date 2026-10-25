@@ -1885,6 +1885,14 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
       chips === "origin/poster,origin/reviewer,origin/writer,origin/writer-2" && document.activeElement === input(),
     `${first.textContent} | ${chips}`,
   );
+  // 참여자 칩은 메시지 목록 아래, 입력란 바로 위에 있다 (멘션을 넣는 곳 가까이)
+  const chipRow = panel()!.querySelector<HTMLElement>(".chat-members")!;
+  const [listBox, chipBox, inputBox] = [panel()!.querySelector(".chat-list")!, chipRow, input()].map((el) => el.getBoundingClientRect());
+  check(
+    "채팅 패널: 참여자 칩은 입력란 바로 위",
+    chipRow.nextElementSibling === input() && listBox.bottom <= chipBox.top && chipBox.bottom <= inputBox.top,
+    `${listBox.bottom} ${chipBox.top}-${chipBox.bottom} ${inputBox.top}`,
+  );
 
   panel()!.querySelector<HTMLElement>("[data-member='origin/poster']")!.click();
   await waitFor("멘션 넣기", () => input().value === "@origin/poster ", 2000);
@@ -1912,6 +1920,9 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   await sleep(200);
   devHooks.chatPostDelay = undefined;
   check("채팅 패널: 보내는 동안 새로 쓴 초안은 남음", input().value === "next draft", input().value);
+  // 아무도 멘션하지 않은 사용자 메시지는 모두에게 (매번 @all을 치지 않게)
+  const slow = (await stored()).find((m) => m.text === "slow one");
+  check("채팅 패널: 멘션 없는 메시지는 모두에게", slow?.to.join(",") === chips, `${slow?.to.join(",")} / ${chips}`);
   type("");
 
   // 닫으면 선택된 터미널로 포커스가 돌아간다 (리뷰 P2: 숨은 입력란에 남았다)

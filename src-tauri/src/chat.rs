@@ -5,7 +5,8 @@
 //   누가 보냈는지 안다. 터미널을 닫으면 참여자에서 빠진다. ddak은 CLI를 해석하지 않는다: MCP를 붙이는 인자는 설정에 있다.
 // - 참여자 이름은 `작업그룹/역할` (원본 작업그룹은 origin). 사용자는 `user`. 창마다 고정인 키(창의 세션 ID)에 이름을
 //   정해 두고 (<slug>.names.json, 앱을 다시 켜도 같다) 다른 키에는 주지 않는다: 겹치면 `-2`를 붙인다.
-// - 메시지는 일반 텍스트. @이름·@all로 멘션하고, 멘션된 참여자만 알림을 받는다 (깨우기는 다음 단계). 스레드는 없다.
+// - 메시지는 일반 텍스트. @이름·@all로 멘션하고, 멘션된 참여자만 알림을 받는다. 사용자가 아무도 멘션하지 않으면 @all과
+//   같다 (매번 @all을 치지 않게). 스레드는 없다.
 //   이름에 공백·문장부호가 있어도 그대로 멘션한다 (지금 참여자 이름 중 @ 뒤에 가장 길게 맞는 것).
 // - 앱 데이터 chats/<프로젝트 이름>-<경로 해시>.jsonl에 한 줄씩 붙인다. 깨진 줄(JSON·UTF-8)은 건너뛰고, 끊긴 마지막 줄
 //   뒤에는 줄을 바꾼 뒤 붙인다. 파일을 읽지 못하면 (없음 말고) 그 방은 읽기·쓰기를 모두 멈춘다 (번호가 겹치지 않게).
@@ -26,7 +27,7 @@ pub struct Message {
     pub time: u64,
     pub from: String,
     pub text: String,
-    // 멘션된 참여자 (보낼 때 있던 참여자 중에서. @all이면 보낸 사람 말고 모두)
+    // 멘션된 참여자 (보낼 때 있던 참여자 중에서. @all이거나 사용자가 아무도 멘션하지 않았으면 보낸 사람 말고 모두)
     pub to: Vec<String>,
 }
 
@@ -252,8 +253,13 @@ impl Chats {
         let message = {
             let mut inner = self.inner.lock().unwrap();
             let present: Vec<String> = inner.members.values().filter(|m| m.project == project).map(|m| m.name.clone()).chain([USER.to_string()]).collect();
-            let said = mentions(text, &present);
-            let mut to: Vec<String> = if said.iter().any(|m| m == "all") {
+            // 멘션은 지금 없는 창의 이름(.names.json)까지 알아본다. 받는 사람은 지금 있는 참여자 중에서만.
+            // (리뷰 P2: 칩으로 고른 세션이 보내기 전에 나가면 멘션이 없는 것으로 보여 모두를 깨웠다)
+            let mut known = present.clone();
+            known.extend(self.names(&mut inner, project).by_key.values().cloned());
+            let said = mentions(text, &known);
+            // 사용자 메시지에 멘션이 없으면 모두에게 (모르는 이름만 멘션했어도). 세션의 메시지는 멘션된 참여자에게만.
+            let mut to: Vec<String> = if said.iter().any(|m| m == "all") || (from == USER && said.is_empty()) {
                 present.into_iter().filter(|n| n != from).collect()
             } else {
                 present.into_iter().filter(|n| said.contains(n) && n != from).collect()
@@ -501,7 +507,7 @@ mod tests {
         dir
     }
 
-    // 이름은 키마다 정해 두고 다른 키에는 주지 않는다 (-2). 멘션된 참여자(보낸 사람 빼고, @all은 모두)만 to에 들어가고
+    // 이름은 키마다 정해 두고 다른 키에는 주지 않는다 (-2). 멘션된 참여자(보낸 사람 빼고, @all·멘션 없는 사용자 메시지는 모두)만 to에 들어가고
     // 모르는 이름은 무시한다. 파일에 붙여서 다시 켜도 그대로 읽는다. 포트 없이 돈다.
     #[test]
     fn names_mentions_and_file() {
@@ -525,10 +531,15 @@ mod tests {
         assert_eq!((m1.id, m1.to.clone()), (1, vec!["origin/dev".to_string()]));
         assert_eq!(m2.to, ["origin/dev-2", "user", "user-2"]);
         assert!(chats.post(a, USER, "   ").is_err());
-        assert_eq!(*seen.lock().unwrap(), [1, 2]);
+        // 사용자가 아무도 멘션하지 않으면 모두에게, 세션이 멘션하지 않으면 아무에게도
+        let m3 = chats.post(a, USER, "everyone, mail me at a@b.c").unwrap();
+        let m4 = chats.post(a, "origin/dev", "note to self").unwrap();
+        assert_eq!(m3.to, ["origin/dev", "origin/dev-2", "user-2"]);
+        assert!(m4.to.is_empty());
+        assert_eq!(*seen.lock().unwrap(), [1, 2, 3, 4]);
         assert!(chats.messages(b).unwrap().is_empty());
         let again = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
-        assert_eq!(again.messages(a).unwrap(), [m1, m2]);
+        assert_eq!(again.messages(a).unwrap(), [m1, m2, m3, m4]);
         // 참여자가 바뀌면 알린다 (들어옴·나감, 모르는 토큰은 알리지 않음)
         let changes = Arc::new(Mutex::new(0));
         let count = changes.clone();
@@ -537,6 +548,21 @@ mod tests {
         watched.leave(&t);
         watched.leave(&t);
         assert_eq!(*changes.lock().unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 리뷰 P2: 사용자가 멘션한 세션이 보내기 전에 나갔으면 아무도 깨우지 않는다 (멘션이 없는 것으로 보고 모두에게 보내지 않게).
+    // 한 번도 없던 이름만 멘션했으면 멘션이 없는 것과 같다.
+    #[test]
+    fn mention_of_left_session_is_not_broadcast() {
+        let dir = temp("left");
+        let p = Path::new("/p/l");
+        let chats = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
+        chats.join(p, "origin/dev", "k1");
+        let (t, _, _) = chats.join(p, "origin/reviewer", "k2");
+        chats.leave(&t);
+        assert!(chats.post(p, USER, "@origin/reviewer 확인해 줘").unwrap().to.is_empty());
+        assert_eq!(chats.post(p, USER, "@origin/nobody hi").unwrap().to, ["origin/dev"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -676,7 +702,8 @@ mod tests {
         assert!(first.contains("#1 user → origin/dev: @origin/dev first") && first.contains("#2 origin/dev → user: @user ok"), "{first}");
         assert_eq!(call("read_messages", json!({})), "No new messages.");
         chats.post(project, USER, "third").unwrap();
-        assert_eq!(call("read_messages", json!({})), "#3 user: third");
+        // 사용자가 아무도 멘션하지 않으면 모두에게
+        assert_eq!(call("read_messages", json!({})), "#3 user → origin/dev: third");
         assert!(call("read_messages", json!({ "since": 1 })).starts_with("#2 "));
         assert!(call("list_members", json!({})).contains("origin/dev (you)"));
         assert_eq!(rpc(json!({ "jsonrpc": "2.0", "id": 3, "method": "nope" })).1["error"]["code"], -32601);
