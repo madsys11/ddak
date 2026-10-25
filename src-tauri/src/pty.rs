@@ -559,13 +559,23 @@ pub fn pty_write(ptys: State<'_, Ptys>, chats: State<'_, crate::chat::ChatsState
 // 터미널 앞에서 지금 도는 프로그램 이름 (포그라운드 프로세스 그룹의 대표, macOS proc_name). ⇧↩을 그 프로그램에 맞게
 // 보내려고 쓴다 (src/Terminal.tsx, groups.json shiftEnterFor). 알 수 없으면 None (그러면 Enter).
 #[tauri::command]
-pub fn pty_foreground(ptys: State<'_, Ptys>, id: u32) -> Option<String> {
+pub fn pty_foreground(ptys: State<'_, Ptys>, id: u32) -> Vec<String> {
     foreground(&ptys, id)
 }
 
-fn foreground(ptys: &Ptys, id: u32) -> Option<String> {
-    let pid = ptys.sessions.lock().unwrap().get(&id)?.master.process_group_leader()?;
-    process_name(pid)
+// 앞에서 도는 프로그램의 이름 후보: 띄울 때 쓴 이름(argv[0]의 마지막 부분), 커널이 기록한 실행 파일 이름 순.
+// 둘이 다를 수 있다: claude는 versions/2.1.310을 가리키는 링크라 커널 이름은 "2.1.310"이다 (2026-10-25).
+fn foreground(ptys: &Ptys, id: u32) -> Vec<String> {
+    let Some(pid) = ptys.sessions.lock().unwrap().get(&id).and_then(|s| s.master.process_group_leader()) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for name in [invoked_name(pid), process_name(pid)].into_iter().flatten() {
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 #[cfg(target_os = "macos")]
@@ -575,8 +585,40 @@ fn process_name(pid: libc::pid_t) -> Option<String> {
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
+// argv[0]의 마지막 부분. 로그인 셸의 "-zsh"는 "zsh"로.
+// KERN_PROCARGS2: argc(int), 실행 파일 경로, NUL 채움, argv[0], ... 순이다.
+#[cfg(target_os = "macos")]
+fn invoked_name(pid: libc::pid_t) -> Option<String> {
+    let mut max: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 2, (&mut max as *mut libc::c_int).cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; max.max(0) as usize];
+    let mut size = buf.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    let rest = buf.get(std::mem::size_of::<libc::c_int>()..size)?;
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    let rest = &rest[path_end..];
+    let start = rest.iter().position(|&b| b != 0)?;
+    let rest = &rest[start..];
+    let arg0 = &rest[..rest.iter().position(|&b| b == 0).unwrap_or(rest.len())];
+    let arg0 = String::from_utf8_lossy(arg0);
+    let base = arg0.rsplit('/').next().unwrap_or(&arg0);
+    Some(base.trim_start_matches('-').to_string())
+}
+
 #[cfg(not(target_os = "macos"))]
 fn process_name(_pid: libc::pid_t) -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn invoked_name(_pid: libc::pid_t) -> Option<String> {
     None
 }
 
@@ -1163,12 +1205,33 @@ mod tests {
         let argv: Vec<String> = ["/bin/sh", "-c", "exec cat"].iter().map(|a| a.to_string()).collect();
         let id = open(&ptys, "/", Some(&argv), None, false, SIZE, |_| true, |_| (), None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while foreground(&ptys, id).as_deref() != Some("cat") {
+        while foreground(&ptys, id) != ["cat"] {
             assert!(Instant::now() < deadline, "{:?}", foreground(&ptys, id));
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert_eq!(foreground(&ptys, 9999), None);
+        assert!(foreground(&ptys, 9999).is_empty());
         close(&ptys, id);
+    }
+
+    // 링크로 띄운 프로그램: 커널 이름은 링크가 가리키는 파일 이름이라, 띄운 이름(argv[0])을 먼저 준다.
+    // (claude → versions/2.1.310. 커널 이름만 보면 shiftEnterFor의 claude와 맞지 않았다)
+    #[test]
+    fn foreground_names_a_linked_program_by_its_invoked_name() {
+        let dir = std::env::temp_dir().join(format!("ddak-fg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("claude");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/bin/cat", &link).unwrap();
+        let ptys = Ptys::default();
+        let argv = vec!["/bin/sh".to_string(), "-c".to_string(), format!("exec '{}'", link.display())];
+        let id = open(&ptys, "/", Some(&argv), None, false, SIZE, |_| true, |_| (), None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while foreground(&ptys, id) != ["claude", "cat"] {
+            assert!(Instant::now() < deadline, "{:?}", foreground(&ptys, id));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        close(&ptys, id);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // 감싼 인자를 실제 셸에 넘겨서 그대로 돌아오는지 본다.

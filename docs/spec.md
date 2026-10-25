@@ -327,7 +327,8 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   없으면 기본 설정을 `create_new`로 써 둔다. 모르는 키는 오류. 편집은 앱 메뉴 "작업그룹 설정…"(`open -t`).
   파일이 바뀌면 다시 읽고(마지막 요청만 적용), 잘못되면 사이드바에 오류를 보이고 마지막으로 올바르던 설정을 쓴다.
 - ⇧↩: 세션의 `shiftEnter`가 있으면 그것을 보낸다. 없는 터미널(그냥 셸 탭 등)은 누를 때 터미널 앞에서 도는 프로그램 이름
-  (포그라운드 프로세스 그룹 대표, macOS `proc_name`, `pty_foreground`)으로 `shiftEnterFor`에서 찾고, 없으면 Enter.
+  (포그라운드 프로세스 그룹 대표의 띄운 이름(argv[0] 마지막 부분)과 실행 파일 이름(macOS `proc_name`) 순, `pty_foreground`)으로
+  `shiftEnterFor`에서 먼저 맞는 것을 쓰고, 없으면 Enter. claude는 버전 파일(`versions/2.1.310`)을 가리키는 링크라 실행 파일 이름만으로는 못 찾는다.
   그냥 셸에서 claude·codex를 직접 띄워도 ⇧↩이 줄바꿈이 되게 한다. 모든 창에 ESC CR을 걸면 Vim 삽입 모드가 끝나서 프로그램별로
   둔다. `shiftEnterFor`가 파일에 없으면 기본값 `{ claude, codex: ESC CR }`. 다른 입력과 같은 차례로 보낸다 (사용자 입력).
 - 인자의 자리표시자 (띄울 때 `pty.rs` fill_placeholders가 한 번에 바꾼다. 넣은 값은 다시 보지 않는다):

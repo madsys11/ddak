@@ -214,8 +214,9 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       userEvent();
       sending = sending
         .then(async () => {
-          const name = await invoke<string | null>("pty_foreground", { id: target }).catch(() => null);
-          const data = (name && latest.current.shiftEnterFor?.[name]) || "\r";
+          // 이름 후보(띄운 이름, 실행 파일 이름) 중 먼저 설정에 있는 것
+          const names = await invoke<string[]>("pty_foreground", { id: target }).catch(() => [] as string[]);
+          const data = names.map((n) => latest.current.shiftEnterFor?.[n]).find(Boolean) || "\r";
           await invoke("pty_write", { id: target, data, user: true });
         })
         .catch(() => {});

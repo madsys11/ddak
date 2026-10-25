@@ -43,3 +43,17 @@
 **확인**: selftest shiftEnterProgram — 그냥 셸 탭에서 keyCode 229·isComposing인 ⇧↩은 명령을 실행하지 않고, 조합이 끝난 ⇧↩은
 실행한다. 세션 구성이 있는 첫 터미널에서 keyCode 229인 ⇧↩은 아무것도 보내지 않는다. 검사를 끄면 둘 다 실패한다 (명령 실행,
 ESC CR 전송). 실제 한글 입력기로는 확인하지 않았다.
+
+## 설치 후 사용자 확인: 그냥 셸에서 띄운 claude의 ⇧↩이 Enter로 감
+
+**현상**: 새 터미널 탭에서 `claude`를 띄우고 ⇧↩을 누르면 줄바꿈이 아니라 실행됐다.
+
+**원인**: claude 실행 파일은 `versions/<버전>`을 가리키는 링크다. macOS 커널이 기록한 프로세스 이름(`proc_name`, ps의 UCOMM)은
+링크를 따라간 파일 이름 `2.1.310`이라 `shiftEnterFor`의 `claude`와 맞지 않았다. ps의 COMM(argv[0])은 `claude`였다.
+selftest는 `cat`(링크 아님)만 봐서 놓쳤다.
+
+**수정**: `pty_foreground`가 이름 후보 목록을 준다: 띄운 이름(KERN_PROCARGS2의 argv[0] 마지막 부분, 로그인 셸의 `-` 뗌),
+실행 파일 이름(`proc_name`) 순, 중복 없이. Terminal.tsx는 후보 중 먼저 `shiftEnterFor`에 있는 것을 보낸다.
+
+**확인**: Rust 테스트 foreground_names_a_linked_program_by_its_invoked_name — `/bin/cat`을 가리키는 `claude` 링크를 띄우면
+`["claude", "cat"]`. argv[0]을 빼면 `["cat"]`만 나와 실패한다. selftest shiftEnterProgram 통과 (cat → ESC CR, 셸 → Enter).
