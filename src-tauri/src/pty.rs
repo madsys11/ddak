@@ -556,6 +556,30 @@ pub fn pty_write(ptys: State<'_, Ptys>, chats: State<'_, crate::chat::ChatsState
     Ok(())
 }
 
+// 터미널 앞에서 지금 도는 프로그램 이름 (포그라운드 프로세스 그룹의 대표, macOS proc_name). ⇧↩을 그 프로그램에 맞게
+// 보내려고 쓴다 (src/Terminal.tsx, groups.json shiftEnterFor). 알 수 없으면 None (그러면 Enter).
+#[tauri::command]
+pub fn pty_foreground(ptys: State<'_, Ptys>, id: u32) -> Option<String> {
+    foreground(&ptys, id)
+}
+
+fn foreground(ptys: &Ptys, id: u32) -> Option<String> {
+    let pid = ptys.sessions.lock().unwrap().get(&id)?.master.process_group_leader()?;
+    process_name(pid)
+}
+
+#[cfg(target_os = "macos")]
+fn process_name(pid: libc::pid_t) -> Option<String> {
+    let mut buf = [0u8; 256];
+    let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_name(_pid: libc::pid_t) -> Option<String> {
+    None
+}
+
 // 쓴다. 사용자 입력이면 입력 상태를 바꾸고, 채팅방에 참여한 터미널이면 그 토큰을 돌려준다.
 fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<Option<String>, String> {
     let mut sessions = ptys.sessions.lock().unwrap();
@@ -1130,6 +1154,21 @@ mod tests {
         assert_eq!(fill_placeholders("x={prompt:toml}", &vars), r#"x="say \"hi\" {chat}\n\\ end""#);
         assert_eq!(fill_placeholders(r#"{"url":"{chat}","s":"{session}"} {nope} {x:toml} {"#, &vars), r#"{"url":"http://x/mcp/t","s":"S"} {nope} {x:toml} {"#);
         assert_eq!(toml_string("a\u{1}b\tc"), r#""a\u0001b\tc""#);
+    }
+
+    // 앞에서 도는 프로그램 이름: 셸이 exec한 cat이면 "cat"
+    #[test]
+    fn foreground_names_the_running_program() {
+        let ptys = Ptys::default();
+        let argv: Vec<String> = ["/bin/sh", "-c", "exec cat"].iter().map(|a| a.to_string()).collect();
+        let id = open(&ptys, "/", Some(&argv), None, false, SIZE, |_| true, |_| (), None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while foreground(&ptys, id).as_deref() != Some("cat") {
+            assert!(Instant::now() < deadline, "{:?}", foreground(&ptys, id));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(foreground(&ptys, 9999), None);
+        close(&ptys, id);
     }
 
     // 감싼 인자를 실제 셸에 넘겨서 그대로 돌아오는지 본다.

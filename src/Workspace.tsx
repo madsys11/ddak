@@ -258,6 +258,8 @@ type Props = {
   group: Group | null;
   // 작업그룹 설정 전체 (세션 추가에서 고른다). 못 읽었으면 null.
   groups: Group[] | null;
+  // 세션 구성에 shiftEnter가 없는 터미널의 ⇧↩: 앞에서 도는 프로그램 이름 → 보낼 입력 (groups.json shiftEnterFor, Terminal.tsx)
+  shiftEnterFor: Record<string, string>;
   // 보고 있는 탭의 폴더가 바뀌면 알린다 (파일 트리가 그 폴더를 보여 준다). worktree: 작업그룹 이름 또는 null(원본)
   onTreeRoot: (cwd: string, worktree: string | null) => void;
   onError: (message: string) => void;
@@ -268,7 +270,7 @@ type Props = {
 };
 
 // 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
-export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, chatOpen, chatUnread, onToggleChat }: Props) {
+export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRoot, onError, chatOpen, chatUnread, onToggleChat }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
@@ -700,6 +702,7 @@ export function Workspace({ cwd, visible, group, groups, onTreeRoot, onError, ch
                     cwd={tab.cwd}
                     {...commandOf(session)}
                     shiftEnter={session?.shiftEnter}
+                    shiftEnterFor={shiftEnterFor}
                     shellAfter={session?.setup ? false : undefined}
                     onWake={(pending, wakeNow) =>
                       setWaking((w) => {

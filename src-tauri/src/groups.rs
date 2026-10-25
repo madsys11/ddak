@@ -12,7 +12,7 @@
 
 use crate::fs::{code_err, CodeError};
 use crate::projects::data_dir;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tauri::{AppHandle, Runtime};
 
@@ -54,7 +54,16 @@ pub struct Group {
 #[serde(deny_unknown_fields)]
 pub struct Groups {
     default: String,
+    // 세션 설정에 shiftEnter가 없는 터미널(그냥 셸 등)에서 ⇧↩을 누르면, 그때 터미널 앞에서 도는 프로그램 이름으로 보낼 입력을
+    // 찾는다 (없으면 Enter. src/Terminal.tsx, pty.rs pty_foreground). 그냥 셸에서 claude·codex를 직접 띄워도 ⇧↩이 줄바꿈이
+    // 되게. 모든 창에 ESC CR을 걸면 Vim 삽입 모드가 끝나서 프로그램별로 둔다. 파일에 없으면 기본값 (claude·codex는 ESC CR).
+    #[serde(default = "default_shift_enter_for", rename = "shiftEnterFor")]
+    shift_enter_for: HashMap<String, String>,
     groups: Vec<Group>,
+}
+
+fn default_shift_enter_for() -> HashMap<String, String> {
+    ["claude", "codex"].into_iter().map(|p| (p.to_string(), "\u{1b}\r".to_string())).collect()
 }
 
 // 사용자가 처음 받는 설정. 기획/개발 claude + 읽기 전용 리뷰어 codex, 그리고 셸 하나짜리.
@@ -74,6 +83,7 @@ pub struct Groups {
 // 인자에서는 {prompt}(claude)·{prompt:toml}(codex의 TOML 값)으로 쓴다.
 const TEMPLATE: &str = r#"{
   "default": "dev-review",
+  "shiftEnterFor": { "claude": "\u001b\r", "codex": "\u001b\r" },
   "groups": [
     {
       "id": "dev-review",
@@ -222,11 +232,14 @@ mod tests {
         assert!(["@RULES@", "@DEV_ROLE@", "@REVIEWER_ROLE@"].iter().all(|p| !default_config().contains(p)), "자리표시자가 남음");
     }
 
-    // 규약·역할이 없는 예전 파일도 읽힌다
+    // 규약·역할·shiftEnterFor가 없는 예전 파일도 읽힌다 (shiftEnterFor는 기본값: claude·codex는 ESC CR)
     #[test]
     fn rules_and_role_are_optional() {
         let g = parse(br#"{"default":"a","groups":[{"id":"a","name":"A","sessions":[{"name":"s","command":"x"}]}]}"#).unwrap();
         assert_eq!((g.groups[0].rules.as_deref(), g.groups[0].sessions[0].role.as_deref()), (None, None));
+        assert_eq!(g.shift_enter_for, default_shift_enter_for());
+        assert_eq!(parse(default_config().as_bytes()).unwrap().shift_enter_for, default_shift_enter_for());
+        assert_eq!(default_shift_enter_for()["claude"], "\x1b\r");
     }
 
     #[test]

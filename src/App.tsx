@@ -132,6 +132,7 @@ function App() {
                 visible={path === active}
                 group={defaultGroup}
                 groups={groups?.groups ?? null}
+                shiftEnterFor={groups?.shiftEnterFor ?? {}}
                 onTreeRoot={(cwd, worktree) =>
                   setTreeRoots((r) => (r[path]?.cwd === cwd && r[path]?.worktree === worktree ? r : { ...r, [path]: { cwd, worktree } }))
                 }

@@ -593,9 +593,10 @@ async function testTabsAndSplits(root: string, first: Terminal) {
   await ready(second.term);
   const pwd = await run(second.term, "pwd");
   check("탭: 새 탭도 루트에서 시작", pwd.some((l) => l.trim() === root), pwd.join("|"));
-  // 세션이 아닌 창은 Shift+Enter를 바꾸지 않는다 (Vim 등에서 ESC가 모드를 바꿔서. 리뷰 지적 7)
+  // 세션이 아닌 창은 Shift+Enter를 xterm이 바로 보내지 않고, 앞에서 도는 프로그램을 보고 고른다 (셸이면 Enter, Vim 등도 그대로.
+  // 리뷰 지적 7). 실제로 무엇이 가는지는 testProgramShiftEnter가 본다.
   const se = keySends(second.term, { key: "Enter", shiftKey: true });
-  check("탭: 세션이 아닌 창의 ⇧↩는 그냥 Enter", se === "\r", JSON.stringify(se));
+  check("탭: 세션이 아닌 창의 ⇧↩는 앞의 프로그램을 보고 따로 보냄 (xterm이 바로 보내지 않음)", se === "", JSON.stringify(se));
 
   // 오른쪽 분할
   await menu("split_right");
@@ -1175,7 +1176,8 @@ async function testCreate(root: string, term: Terminal) {
 }
 
 // scripts/selftest.sh가 main에 넣은 테스트 설정 (설정을 바꾸는 검사가 끝나면 되돌린다)
-const TEST_GROUPS = `{"default":"test","groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\\u001b\\r"}]}]}`;
+// shiftEnterFor: 세션 구성이 없는 터미널에서 cat이 앞이면 ⇧↩을 ESC CR로 (testProgramShiftEnter)
+const TEST_GROUPS = `{"default":"test","shiftEnterFor":{"cat":"\\u001b\\r"},"groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\\u001b\\r"}]}]}`;
 const groupsFile = async () => `${await invoke<string>("groups_dir")}/groups.json`;
 
 // 작업그룹 설정 파일: 고치면 다시 읽기, 잘못되면 오류 표시 + 마지막 올바른 설정 유지.
@@ -1229,6 +1231,58 @@ async function testGroups(term: Terminal) {
     await write(testConfig);
     await waitFor("테스트 설정 복귀", () => devHooks.groups?.default === "test", 3000);
   }
+}
+
+// ⇧↩ (Terminal.tsx): 세션 구성에 shiftEnter가 없는 터미널(그냥 셸 탭)은 누를 때 앞에서 도는 프로그램을 보고 groups.json
+// shiftEnterFor에서 찾는다 (테스트 설정: cat → ESC CR, src-tauri/src/pty.rs pty_foreground). 셸이 앞이면 그냥 Enter.
+async function testProgramShiftEnter(first: Terminal) {
+  const before = tabCount();
+  await menu("new_tab");
+  await waitFor("새 탭", () => tabCount() === before + 1 && visiblePanes().length === 1);
+  const term = visiblePanes()[0].term;
+  await ready(term);
+  const shiftEnter = () => term.textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
+  term.input("echo SE-SHELL");
+  await sleep(200);
+  shiftEnter();
+  const shellRan = await waitFor("셸에서 ⇧↩ = Enter", () => screen(term).some((l) => l.trim() === "SE-SHELL"), 3000).then(() => true, () => false);
+  term.input("cat -v\r");
+  await sleep(700);
+  shiftEnter();
+  const escaped = await waitFor("cat 앞에서 ⇧↩ = ESC CR", () => screen(term).some((l) => l.trim() === "^["), 3000).then(() => true, () => false);
+  term.input("\x03");
+  await sleep(300);
+  check("⇧↩: 세션 구성이 없는 터미널은 앞에서 도는 프로그램으로 고른다 (cat → ESC CR, 셸 → Enter)", shellRan && escaped, `${shellRan} ${escaped} | ${screen(term).filter((l) => l.trim()).slice(-4).join(" ⏎ ")}`);
+  // 입력기 조합 중의 ⇧↩ (keyCode 229, isComposing)은 조합 확정이라 보내지 않는다 (리뷰 R1). 세션 구성이 있는 창(첫 터미널)도 같다
+  const composing = (init: { keyCode?: number; isComposing?: boolean }) => {
+    const ev = new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true, isComposing: !!init.isComposing });
+    if (init.keyCode) Object.defineProperty(ev, "keyCode", { get: () => init.keyCode });
+    term.textarea!.dispatchEvent(ev);
+  };
+  term.input("echo SE-IME");
+  await sleep(200);
+  composing({ keyCode: 229 });
+  composing({ isComposing: true });
+  await sleep(1000);
+  const imeHeld = !screen(term).some((l) => l.trim() === "SE-IME");
+  shiftEnter();
+  const thenRan = await waitFor("조합이 끝난 ⇧↩", () => screen(term).some((l) => l.trim() === "SE-IME"), 3000).then(() => true, () => false);
+  // 세션 구성(ESC CR)이 있는 창: WebKit은 조합 중 keydown에 keyCode 229를 준다
+  const sessionGot: string[] = [];
+  const sub = first.onData((x) => sessionGot.push(x));
+  const imeEv = new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true });
+  Object.defineProperty(imeEv, "keyCode", { get: () => 229 });
+  first.textarea!.dispatchEvent(imeEv);
+  sub.dispose();
+  const sessionIme = sessionGot.join("");
+  check(
+    "⇧↩: 입력기 조합 중이면 보내지 않음 (프로그램 조회도, 세션 구성의 ESC CR도), 조합이 끝난 ⇧↩은 보냄",
+    imeHeld && thenRan && sessionIme === "",
+    `${imeHeld} ${thenRan} ${JSON.stringify(sessionIme)}`,
+  );
+  const n = tabCount();
+  await menu("close_pane");
+  await waitFor("탭 닫기", () => tabCount() === n - 1, 5000);
 }
 
 // 패널 크기·파일 트리 숨기기 (src/Resizer.tsx, prefs.tsx): 파일 트리 오른쪽 끝·채팅 패널 왼쪽 끝을 끌어 폭을 바꾸고 (최소·최대로
@@ -2990,6 +3044,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],
+    ["shiftEnterProgram", () => testProgramShiftEnter(t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],
     ["webglLoss", () => testWebglLoss(t())],
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다

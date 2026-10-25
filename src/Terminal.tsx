@@ -16,12 +16,18 @@ import { THEMES } from "./themes";
 // - ⌘⌫ → Ctrl+U (커서 앞 지우기, zsh는 줄 전체). VS Code 터미널과 같은 값.
 // - ⇧↩ → 세션 구성의 shiftEnter (기본 설정의 claude·codex는 ESC CR). xterm 6은 Shift+Enter를 그냥 Enter로
 //   보낸다 (kitty 키보드 프로토콜 없음). 모든 창에 ESC CR을 걸면 Vim 삽입 모드가 끝나서 (리뷰 지적 7) 세션별로 둔다.
-//   없으면 xterm 기본 (Enter).
+//   세션 구성이 없으면 (그냥 셸에서 claude를 직접 띄움 등) 누를 때 앞에서 도는 프로그램을 보고 groups.json shiftEnterFor에서
+//   찾는다 (Terminal 안의 sendShiftEnter). 거기도 없으면 Enter.
 export function terminalKey(ev: KeyboardEvent, shiftEnter?: string | null): string | undefined {
   const only = (meta: boolean, shift: boolean) => ev.metaKey === meta && ev.shiftKey === shift && !ev.ctrlKey && !ev.altKey;
   if (ev.key === "Backspace" && only(true, false)) return "\x15";
-  if (ev.key === "Enter" && only(false, true) && shiftEnter) return shiftEnter;
+  if (isShiftEnter(ev) && shiftEnter) return shiftEnter;
 }
+
+// 조합이 끝난 ⇧↩인지. 입력기 조합 중(isComposing, WebKit의 keyCode 229)의 Enter는 조합 확정이라 입력기 경로(passesImeKey,
+// xterm CompositionHelper)에 맡긴다 (리뷰 R1: 한글 조합을 확정하는 ⇧↩이 명령을 실행했다).
+export const isShiftEnter = (ev: KeyboardEvent) =>
+  ev.key === "Enter" && ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.isComposing && ev.keyCode !== 229;
 
 type Props = {
   cwd: string;
@@ -29,6 +35,8 @@ type Props = {
   command?: string[];
   // command가 실패하면 대신 띄울 명령 (복원한 세션: 이어서 하기가 안 되면 처음처럼)
   fallback?: string[];
+  // shiftEnter가 없을 때 ⇧↩: 앞에서 도는 프로그램 이름 → 보낼 입력 (groups.json shiftEnterFor)
+  shiftEnterFor?: Record<string, string>;
   // 인자의 자리표시자 값 ({session}, {prompt}. {chat}은 Rust가 넣는다, workspaceState.ts commandOf)
   vars?: Record<string, string>;
   // Shift+Enter로 보낼 입력 (세션 구성). 없으면 그냥 Enter.
@@ -61,13 +69,13 @@ export const isTerminalReply = (data: string) =>
   /^\x1b\][\s\S]*(\x07|\x1b\\)$/.test(data) ||
   /^\x1bP[\s\S]*\x1b\\$/.test(data);
 
-export function Terminal({ cwd, command, fallback, vars, shiftEnter, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake }: Props) {
+export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shellAfter, chat });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shellAfter, chat };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
 
   useEffect(() => {
     const el = ref.current!;
@@ -104,6 +112,12 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shellAfter,
       if (seq) {
         ev.preventDefault(); // 입력란 자체의 줄 지우기 등 기본 동작은 막는다
         term.input(seq, true);
+        return false;
+      }
+      // 세션 구성에 shiftEnter가 없는 ⇧↩: 앞에서 도는 프로그램을 보고 보낸다 (shiftEnterFor에 아무것도 없으면 xterm 기본 Enter)
+      if (ev.type === "keydown" && isShiftEnter(ev) && Object.keys(latest.current.shiftEnterFor ?? {}).length) {
+        ev.preventDefault();
+        sendShiftEnter();
         return false;
       }
       return passesImeKey(ev);
@@ -193,6 +207,19 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shellAfter,
     };
     el.addEventListener("dragover", onDragOver);
     el.addEventListener("drop", onDrop);
+    // 앞에서 도는 프로그램을 물어 보낼 입력을 고르고, 다른 입력과 같은 차례로 보낸다 (사용자 입력)
+    const sendShiftEnter = () => {
+      if (id === undefined) return;
+      const target = id;
+      userEvent();
+      sending = sending
+        .then(async () => {
+          const name = await invoke<string | null>("pty_foreground", { id: target }).catch(() => null);
+          const data = (name && latest.current.shiftEnterFor?.[name]) || "\r";
+          await invoke("pty_write", { id: target, data, user: true });
+        })
+        .catch(() => {});
+    };
     const input = term.onData((data) => {
       if (id === undefined) return;
       const target = id;

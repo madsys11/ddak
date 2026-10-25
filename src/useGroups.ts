@@ -8,7 +8,8 @@ import { watchDir } from "./watchDir";
 // 띄울 때 Rust가 한 번에 바꾼다 (pty.rs fill_placeholders). role: 세션의 역할, rules: 그룹의 공통 규약 (합쳐 {prompt}).
 export type Session = { name: string; command: string; args: string[]; resume: string[] | null; readOnly: boolean; shiftEnter: string | null; role?: string | null };
 export type Group = { id: string; name: string; rules?: string | null; sessions: Session[] };
-export type Groups = { default: string; groups: Group[] };
+// shiftEnterFor: 세션 설정에 shiftEnter가 없는 터미널에서 ⇧↩을 누를 때, 앞에서 도는 프로그램 이름 → 보낼 입력 (Terminal.tsx)
+export type Groups = { default: string; shiftEnterFor?: Record<string, string>; groups: Group[] };
 
 // 세션의 프롬프트 (인자의 {prompt}) = 역할 + 그 세션이 든 작업그룹의 규약. 세션을 만들 때 정해 함께 저장한다
 // (설정을 고쳐도 이미 연 창과 복원은 그때의 것을 쓴다. 다른 탭에 더해도 그 세션이 든 그룹의 규약).

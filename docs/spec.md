@@ -323,9 +323,13 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 ### 작업그룹 구성 · 실행
 
 - 앱 데이터의 `groups.json` (`groups.rs`):
-  `{ default, groups: [{ id, name, rules?, sessions: [{ name, role?, command, args, resume, readOnly, shiftEnter }] }] }`.
+  `{ default, shiftEnterFor?, groups: [{ id, name, rules?, sessions: [{ name, role?, command, args, resume, readOnly, shiftEnter }] }] }`.
   없으면 기본 설정을 `create_new`로 써 둔다. 모르는 키는 오류. 편집은 앱 메뉴 "작업그룹 설정…"(`open -t`).
   파일이 바뀌면 다시 읽고(마지막 요청만 적용), 잘못되면 사이드바에 오류를 보이고 마지막으로 올바르던 설정을 쓴다.
+- ⇧↩: 세션의 `shiftEnter`가 있으면 그것을 보낸다. 없는 터미널(그냥 셸 탭 등)은 누를 때 터미널 앞에서 도는 프로그램 이름
+  (포그라운드 프로세스 그룹 대표, macOS `proc_name`, `pty_foreground`)으로 `shiftEnterFor`에서 찾고, 없으면 Enter.
+  그냥 셸에서 claude·codex를 직접 띄워도 ⇧↩이 줄바꿈이 되게 한다. 모든 창에 ESC CR을 걸면 Vim 삽입 모드가 끝나서 프로그램별로
+  둔다. `shiftEnterFor`가 파일에 없으면 기본값 `{ claude, codex: ESC CR }`. 다른 입력과 같은 차례로 보낸다 (사용자 입력).
 - 인자의 자리표시자 (띄울 때 `pty.rs` fill_placeholders가 한 번에 바꾼다. 넣은 값은 다시 보지 않는다):
   `{session}` 창마다 정한 세션 ID, `{chat}` 그 창의 채팅방 MCP 주소, `{attention}` 그 창이 사용자를 기다린다고 알리는 주소
   (아래 "알림"), `{prompt}` 역할(`role`) + 빈 줄 + 그 세션이 든 그룹의 규약 (`rules`). `{prompt:toml}`처럼 `:toml`을 붙이면 TOML 문자열 리터럴(따옴표 포함, codex `-c`의 값)로 넣는다.

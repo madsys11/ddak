@@ -48,7 +48,7 @@ printf '{"projects": [' > "$base/data-corrupt/projects.json"
 # 작업그룹 설정. 진짜 claude·codex를 띄우지 않도록 테스트용 그룹을 기본으로 둔다 (corrupt는 기본 설정 생성을 본다).
 # main: 셸 하나 (기존 시나리오가 터미널 하나로 시작한다고 가정)
 # (shiftEnter: 셸에서 ⇧↩ 동작을 보려고 켠다)
-printf '%s' '{"default":"test","groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\u001b\r"}]}]}' > "$base/data-main/groups.json"
+printf '%s' '{"default":"test","shiftEnterFor":{"cat":"\u001b\r"},"groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\u001b\r"}]}]}' > "$base/data-main/groups.json"
 # restart: 세 세션 — 인자 전달(작은따옴표, 공백), 읽기 전용 표시, 없는 명령
 cat > "$base/data-restart/groups.json" <<'JSON'
 {"default":"trio","groups":[{"id":"trio","name":"Trio","sessions":[
