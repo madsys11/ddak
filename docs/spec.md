@@ -356,18 +356,42 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 - 직접 확인이 필요한 것: 실제 키 입력의 메뉴 단축키(⌘W, ⌘+), ⌘C/⌘V, codex의 Alt+Enter.
   터미널 입력 처리를 바꾼 뒤에는 dev 앱을 새로 띄워 확인한다 (HMR로 떠 있던 터미널에는 반영이 불확실).
 
-## 배포 계획 (나중에 하나의 단계로)
+## 배포 계획
 
 - 공개 GitHub 저장소(madsys11/ddak). 사용자가 먼저 쓰고 이후 팀원(모두 macOS)에게 배포한다.
-  그 전까지는 `npm run tauri build`로 만든 앱을 쓴다 (직접 빌드한 앱은 quarantine이 없어 서명 없이 실행된다).
 - 저장소에 개인정보를 넣지 않는다. 커밋 작성자는 GitHub noreply 주소 (이 저장소의 로컬 git 설정).
+- 앱 식별자: `io.github.madsys11.ddak` (GitHub 계정 도메인을 거꾸로 쓴 것). 앱 데이터는
+  `~/Library/Application Support/<식별자>`에 있어서 식별자를 바꾸면 이어 쓰지 못한다.
+- 개발 빌드는 따로 지정하지 않으면(`DDAK_DATA_DIR`) 설치한 앱의 폴더 옆 `<식별자>-dev`를 쓴다. 설치한 ddak 안에서 개발 빌드를
+  띄워도 두 앱이 같은 상태 파일을 서로 덮어쓰지 않는다. `~/.ddak`(작업그룹 worktree)은 같이 쓴다.
+- 테마·언어·배율(localStorage)은 출처(origin)별이라 개발 빌드(`http://localhost:1420`)와 설치한 앱(`tauri://localhost`)이 따로다.
+
+### 1단계: 혼자 쓰기 (지금)
+
+- `scripts/install.sh`: 릴리스 빌드(`.app`만)를 만들어 `/Applications/ddak.app`으로 바꿔 넣고 다시 연다. 직접 빌드한 앱은
+  quarantine이 없어 서명 없이 실행된다.
+- ddak 안의 터미널에서 돌려도 된다. 빌드가 끝나면 교체 단계를 ddak 세션 밖의 프로세스로 띄운다 (먼저 fork해서 그룹 리더가
+  아닌 자식이 setsid. setsid의 반환값을 직접 확인한다). 기록은 `$TMPDIR/ddak-install.log`.
+- 교체 단계:
+  - 한 번에 하나만 돈다 (`lockf`로 잠금을 쥔 채. 끝나면 OS가 푼다).
+  - 있는 앱의 식별자가 ddak(지금 값이나 예전 `dev.ddak.desktop`)이 아니면 바꾸지 않는다.
+  - 실행 중이면 그 앱의 식별자로 종료를 요청하고 30초까지 기다린다. 실행 중인지 조회하지 못하면(`pgrep` 오류) 바꾸지 않는다.
+  - 실행마다 따로 만든 준비 폴더(같은 볼륨)에 새 앱을 복사하고, 기존 앱은 지우지 않고 옆으로 옮긴 뒤 새 앱을 옮긴다.
+    옮기지 못하면 기존 앱을 되돌린다. 되돌리기도 실패하면 백업을 지우지 않고 위치를 알린다.
+  - 다시 연다.
+- `scripts/test-install.sh`: 설치된 앱을 건드리지 않고 임시 폴더의 가짜 앱으로 교체 단계(새로 설치, 동시 설치, 옮기기 실패
+  되돌리기, 되돌리기도 실패할 때 백업 보존, 다른 앱 거부, 예전 식별자 종료, 조회 오류면 멈춤)와 세션 분리(그룹 리더에서
+  시작)를 시험한다.
+- 상태는 바뀔 때마다 저장되고, 다시 열면 세션은 이어서 하기로 복원된다.
+
+### 2단계: 팀 배포 (Apple Developer 계정이 준비되면)
+
 - `tauri-plugin-updater` + GitHub Actions(`tauri-action`) + GitHub Releases(`latest.json`).
-  태그 push → 빌드·서명·공증 → 릴리스 → 앱이 업데이트 확인 후 설치.
+  태그 push → 빌드·서명·공증 → 릴리스 → 앱이 업데이트 확인 후 설치. 필요하면 Homebrew tap도 둔다.
 - 업데이트 서명 개인 키는 GitHub Secrets + 별도 백업 (잃으면 기존 설치본에 업데이트 불가).
 - Developer ID 서명 + 공증. 준비물: Developer ID Application 인증서(조직 계정이면 Account Holder만 발급),
   공증용 앱 암호 또는 App Store Connect API 키 → GitHub Secrets.
-- 앱 식별자 `dev.ddak.desktop`은 임시값. 배포 전에 확정한다 (배포 뒤에는 바꾸기 어렵다).
-- 라이선스는 팀 배포 전에 정한다. 버전 번호(`package.json`, `Cargo.toml`, `tauri.conf.json`)는 배포 단계에서 한 곳으로.
+- 라이선스는 팀 배포 전에 정한다. 버전 번호(`package.json`, `Cargo.toml`, `tauri.conf.json`)는 이때 한 곳으로.
 
 ## 채팅방 설계
 

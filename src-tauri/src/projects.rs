@@ -18,13 +18,22 @@ pub struct Project {
     path: String,
 }
 
-// 앱 데이터 폴더 (프로젝트 목록, 작업그룹 설정).
+// 앱 데이터 폴더 (프로젝트 목록, 작업그룹 설정, 탭 상태, 채팅).
 // DDAK_DATA_DIR이 있으면 그 폴더를 쓴다 (자체 테스트가 실제 목록을 건드리지 않게).
+// 개발 빌드는 설치한 앱의 폴더 옆 `<식별자>-dev`를 쓴다. 설치한 ddak 안에서 개발 빌드를 띄워도 두 앱이 같은 상태 파일을
+// 서로 덮어쓰지 않게 (docs/spec.md "배포 계획").
 pub fn data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     match std::env::var_os("DDAK_DATA_DIR") {
         Some(dir) => Ok(PathBuf::from(dir)),
         None if std::env::var_os("DDAK_SELFTEST").is_some() => Err("자체 테스트에는 DDAK_DATA_DIR이 필요하다".into()),
-        None => app.path().app_data_dir().map_err(|e| e.to_string()),
+        None => {
+            let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            if cfg!(debug_assertions) {
+                let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                return Ok(dir.with_file_name(format!("{name}-dev")));
+            }
+            Ok(dir)
+        }
     }
 }
 
