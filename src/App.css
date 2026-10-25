@@ -709,9 +709,12 @@ button.secondary {
   background: var(--hover);
 }
 .chat-members {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  max-height: 76px;
+  overflow: auto;
   padding: 6px 8px 0;
   border-top: 1px solid var(--border);
 }
@@ -782,6 +785,32 @@ button.secondary {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* 자동 깨우기를 멈춘 작업그룹 (재개 버튼), 깨우지 않은 메시지 표시. 목록은 높이를 정하고 넘치면 스크롤 (입력란을 남긴다) */
+.chat-paused-list {
+  flex: none;
+  max-height: 104px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
+.chat-paused {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+}
+.chat-paused span {
+  flex: 1;
+}
+.chat-held {
+  padding: 0 4px;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
 .chat-error {
   padding: 4px 10px;
   color: var(--error);
@@ -789,6 +818,7 @@ button.secondary {
   word-break: break-word;
 }
 .chat-input {
+  flex: none;
   margin: 6px 8px 8px;
   resize: none;
   font: inherit;

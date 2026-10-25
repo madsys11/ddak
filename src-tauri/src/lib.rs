@@ -67,6 +67,8 @@ pub fn run() {
             chat::chat_members,
             chat::chat_waiting,
             chat::chat_wake_member,
+            chat::chat_paused,
+            chat::chat_resume,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,

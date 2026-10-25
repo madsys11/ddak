@@ -29,6 +29,8 @@ export const devHooks: {
   // 이 이름의 채팅 이벤트 등록을 실패시킨다 / 프로젝트마다 채팅 메시지를 읽은 횟수 (남은 리스너를 보려고)
   chatListenFail?: string;
   chatLoads?: Record<string, number>;
+  // 채팅 패널이 자동 깨우기를 멈춘 작업그룹을 읽을 때 이 이름들을 더한다 (여러 그룹이 멈춘 화면, 자체 테스트)
+  chatPausedExtra?: string[];
   // 터미널의 깨우기 이벤트 등록을 이만큼(ms) 늦춘다 (터미널은 등록이 끝난 뒤 뜬다)
   wakeListenDelay?: number;
   // Git Graph (자체 테스트): 커밋 상세 응답을 돌려준 값만큼 늦추거나(ms) 실패시킨다 / 그래프 읽기를 부를 때마다 물어 true면 실패

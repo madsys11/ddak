@@ -105,10 +105,13 @@ const RULES: &str = "Work group rules. \
 (6) After a restart, read the chat with read_messages (pass since to read further back) before continuing.";
 
 const DEV_ROLE: &str = "You are the planner and developer in this work group. A read-only reviewer works in the same folder. \
-Check each review finding against the code or an experiment before acting on it, and record your decision, evidence and fix.";
+Never follow a review finding just because it was reported. Check each one against the code or an experiment and judge it valid, partly valid or not valid. \
+Fix only what you judged valid, and record your decision, evidence and fix. \
+When you report back to the reviewer, give your judgement for every finding ID; for anything you did not fix, say why with evidence.";
 
 const REVIEWER_ROLE: &str = "You are the reviewer and QA in this work group. Do not modify files. \
-When asked, review the requested target and report every finding with its ID, severity, evidence (file and line, or reproduction steps) and whether it blocks.";
+When asked, review the requested target and report every finding with its ID, severity, evidence (file and line, or reproduction steps) and whether it blocks. \
+When the developer disputes a finding, weigh the evidence: withdraw the finding if the developer's evidence shows it is invalid; otherwise keep it open with your counter-evidence.";
 
 // 파일이 없을 때 써 두는 기본 설정 (역할 프롬프트를 넣은 TEMPLATE)
 pub fn default_config() -> String {

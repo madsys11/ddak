@@ -29,6 +29,9 @@ pub struct Message {
     pub text: String,
     // 멘션된 참여자 (보낼 때 있던 참여자 중에서. @all이거나 사용자가 아무도 멘션하지 않았으면 보낸 사람 말고 모두)
     pub to: Vec<String>,
+    // 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않았다 (to는 원래 받는 사람 그대로. WAKE_LIMIT)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
 }
 
 struct Member {
@@ -55,6 +58,26 @@ struct Inner {
     // 프로젝트(실제 경로) → 메시지 (처음 쓸 때 파일에서 읽는다. 읽기에 실패하면 넣지 않고 다음에 다시 읽는다)
     rooms: HashMap<PathBuf, Vec<Message>>,
     names: HashMap<PathBuf, Names>,
+    // (프로젝트, 작업그룹) → 자동 깨우기 셈 (WAKE_LIMIT). 메모리에만 둔다: 앱을 다시 켜면 처음부터 센다.
+    limits: HashMap<(PathBuf, String), Limit>,
+}
+
+// 자동 깨우기 제한 (docs/spec.md "작업그룹 협업 규약"). 세션끼리 끝없이 주고받지 않도록, 사용자 메시지 없이 한 작업그룹의
+// 세션이 다른 세션에게 보낸 메시지를 센다 (@all도 1개). WAKE_LIMIT개까지는 깨우고, 그 뒤 메시지는 저장만 하고 깨우지 않는다
+// (held). 사용자 메시지가 그 작업그룹에 닿거나 사용자가 재개하면 다시 세고, 보류된 알림을 받는 사람마다 한 번 알린다.
+// 이미 깨운 세션의 작업은 멈추지 않는다 (새 알림을 넣지 않을 뿐).
+pub const WAKE_LIMIT: u32 = 6;
+
+#[derive(Default)]
+struct Limit {
+    count: u32,
+    // 보류된 알림: (받는 사람, 보낸 사람)
+    held: Vec<(String, String)>,
+}
+
+// 참여자 이름 "작업그룹/역할"의 작업그룹 (사용자는 없음)
+fn group_of(name: &str) -> Option<&str> {
+    name.split_once('/').map(|(g, _)| g)
 }
 
 // 앱 상태 (서버를 띄우지 못했으면 None: 세션은 채팅 없이 뜬다)
@@ -62,8 +85,14 @@ pub struct ChatsState(pub Option<Arc<Chats>>);
 
 // 방에 생긴 일: 새 메시지, 참여자가 바뀜 (들어옴·나감)
 pub enum Change<'a> {
-    Message(&'a Message),
+    // 새 메시지와, 이 메시지(사용자)로 자동 깨우기 제한이 풀려 보류됐던 알림 (받는 사람, 보낸 사람). 둘은 한꺼번에 깨운다
+    // (리뷰 2단계 R1: 따로 깨우면 같은 받는 사람에게 알림이 두 번 갈 수 있었다).
+    Message(&'a Message, &'a [(String, String)]),
     Members,
+    // 자동 깨우기 제한이 걸리거나 풀림
+    Limits,
+    // 재개 버튼으로 풀려 보류됐던 알림: (받는 사람, 보낸 사람)
+    Released(&'a [(String, String)]),
 }
 
 type OnMessage = Box<dyn Fn(&Path, Change) + Send + Sync>;
@@ -217,6 +246,20 @@ impl Chats {
         (t.clone(), format!("http://127.0.0.1:{}/mcp/{t}", self.port), assigned)
     }
 
+    // 깨울 (채팅 토큰, 보낸 사람): 메시지의 받는 사람(보류한 메시지면 없음)과 풀려난 보류분. pty::wake_all로 한꺼번에 예약한다.
+    pub fn wake_items(&self, project: &Path, message: Option<&Message>, released: &[(String, String)]) -> Vec<(String, String)> {
+        let inner = self.inner.lock().unwrap();
+        let pairs = message.filter(|m| !m.held).into_iter().flat_map(|m| m.to.iter().filter(|n| *n != USER).map(|n| (n.clone(), m.from.clone())));
+        let pairs: Vec<(String, String)> = pairs.chain(released.iter().cloned()).collect();
+        let mut items = Vec::new();
+        for (name, from) in pairs {
+            for (token, _) in inner.members.iter().filter(|(_, m)| m.project == project && m.name == name) {
+                items.push((token.clone(), from.clone()));
+            }
+        }
+        items
+    }
+
     // 이 이름들로 참여한 토큰 (깨울 터미널을 찾는다)
     pub fn tokens_named(&self, project: &Path, names: &[String]) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
@@ -272,17 +315,67 @@ impl Chats {
             };
             to.sort();
             to.dedup();
+            // 자동 깨우기 제한: 세션이 다른 세션에게 보낸 것만 센다. 셈과 보류는 이 잠금 안에서 정한다 (동시에 보내도 넘지 않게)
+            let counted = (from != USER && to.iter().any(|n| n != USER)).then(|| group_of(from)).flatten().map(|g| (project.to_path_buf(), g.to_string()));
+            let held = counted.as_ref().is_some_and(|k| inner.limits.get(k).is_some_and(|l| l.count >= WAKE_LIMIT));
             let file = self.file(project);
             let room = self.room(&mut inner, project)?;
             let id = room.iter().map(|m| m.id).max().map_or(1, |n| n + 1);
-            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to };
+            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held };
             let line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&self.dir).and_then(|()| append_line(&file, &line)).map_err(|e| e.to_string())?;
             room.push(message.clone());
-            message
+            // 저장한 뒤에 센다 (저장하지 못한 메시지는 세지 않는다)
+            let mut limits_changed = false;
+            let mut released = Vec::new();
+            if let Some(key) = counted {
+                let limit = inner.limits.entry(key).or_default();
+                if held {
+                    limit.held.extend(message.to.iter().filter(|n| *n != USER).map(|n| (n.clone(), message.from.clone())));
+                } else {
+                    limit.count += 1;
+                    limits_changed = limit.count == WAKE_LIMIT;
+                }
+            } else if from == USER {
+                // 사용자 메시지가 닿은 작업그룹은 다시 센다
+                let groups: Vec<String> = message.to.iter().filter_map(|n| group_of(n)).map(str::to_string).collect();
+                for g in groups {
+                    if let Some(limit) = inner.limits.remove(&(project.to_path_buf(), g)) {
+                        limits_changed |= limit.count >= WAKE_LIMIT;
+                        released.extend(limit.held);
+                    }
+                }
+            }
+            released.sort();
+            released.dedup();
+            (message, limits_changed, released)
         };
-        (self.on_message)(project, Change::Message(&message));
+        let (message, limits_changed, released) = message;
+        (self.on_message)(project, Change::Message(&message, &released));
+        if limits_changed {
+            (self.on_message)(project, Change::Limits);
+        }
         Ok(message)
+    }
+
+    // 자동 깨우기가 멈춘 작업그룹 (WAKE_LIMIT에 닿음)
+    pub fn paused(&self, project: &Path) -> Vec<String> {
+        let inner = self.inner.lock().unwrap();
+        let mut groups: Vec<String> = inner.limits.iter().filter(|((p, _), l)| p == project && l.count >= WAKE_LIMIT).map(|((_, g), _)| g.clone()).collect();
+        groups.sort();
+        groups
+    }
+
+    // 사용자가 그 작업그룹의 자동 깨우기를 재개한다: 다시 세고, 보류된 알림을 받는 사람마다 한 번 알린다
+    pub fn resume(&self, project: &Path, group: &str) {
+        let limit = self.inner.lock().unwrap().limits.remove(&(project.to_path_buf(), group.to_string()));
+        let Some(mut limit) = limit else { return };
+        limit.held.sort();
+        limit.held.dedup();
+        if !limit.held.is_empty() {
+            (self.on_message)(project, Change::Released(&limit.held));
+        }
+        (self.on_message)(project, Change::Limits);
     }
 
     fn respond(&self, mut request: tiny_http::Request) {
@@ -371,6 +464,14 @@ impl Chats {
                 text(list.join("\n"), false)
             }
             "post_message" => match args.get("text").and_then(Value::as_str).map(|t| self.post(&project, &me, t)) {
+                Some(Ok(m)) if m.held => text(
+                    format!(
+                        "Posted #{}, but nobody was notified: automatic notifications for your work group are paused after {WAKE_LIMIT} messages between sessions without the user. \
+                        The message is saved and the user sees it; do not post it again. Notifications resume when the user writes to your work group or resumes them.",
+                        m.id
+                    ),
+                    false,
+                ),
                 Some(Ok(m)) => text(
                     format!("Posted #{}.{}", m.id, if m.to.is_empty() { " Nobody was mentioned, so nobody is notified.".into() } else { format!(" Notified: {}.", m.to.join(", ")) }),
                     false,
@@ -400,7 +501,7 @@ impl Chats {
                 }
                 let lines: Vec<String> = picked
                     .iter()
-                    .map(|m| format!("#{} {}{}: {}", m.id, m.from, if m.to.is_empty() { String::new() } else { format!(" → {}", m.to.join(", ")) }, m.text))
+                    .map(|m| format!("#{} {}{}{}: {}", m.id, m.from, if m.to.is_empty() { String::new() } else { format!(" → {}", m.to.join(", ")) }, if m.held { " (not notified)" } else { "" }, m.text))
                     .collect();
                 text(lines.join("\n"), false)
             }
@@ -424,20 +525,28 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
     let emitter = app.clone();
     let on_message: OnMessage = Box::new(move |project, change| {
         use tauri::Manager;
+        // 깨울 것을 모아 한 번에 예약한다 (pty::wake_all)
+        let wake = |message: Option<&Message>, released: &[(String, String)]| {
+            let items = emitter.state::<ChatsState>().0.as_ref().map(|c| c.wake_items(project, message, released)).unwrap_or_default();
+            if items.is_empty() {
+                return;
+            }
+            for (pty, seq) in crate::pty::wake_all(&emitter.state::<crate::pty::Ptys>(), &items) {
+                let _ = emitter.emit("chat-wake", json!({ "pty": pty, "pending": true, "seq": seq }));
+            }
+        };
         match change {
-            Change::Message(message) => {
+            Change::Message(message, released) => {
                 let _ = emitter.emit("chat", json!({ "project": project, "message": message }));
-                let names: Vec<String> = message.to.iter().filter(|n| *n != USER).cloned().collect();
-                let tokens = emitter.state::<ChatsState>().0.as_ref().map(|c| c.tokens_named(project, &names)).unwrap_or_default();
-                if !tokens.is_empty() {
-                    for (pty, seq) in crate::pty::wake(&emitter.state::<crate::pty::Ptys>(), &tokens, &message.from) {
-                        let _ = emitter.emit("chat-wake", json!({ "pty": pty, "pending": true, "seq": seq }));
-                    }
-                }
+                wake(Some(message), released);
             }
             Change::Members => {
                 let _ = emitter.emit("chat-members", json!({ "project": project }));
             }
+            Change::Limits => {
+                let _ = emitter.emit("chat-limit", json!({ "project": project }));
+            }
+            Change::Released(released) => wake(None, released),
         }
     });
     match Chats::start(dir, on_message) {
@@ -466,6 +575,18 @@ pub fn chat_messages(state: tauri::State<'_, ChatsState>, project: String) -> Re
 #[tauri::command]
 pub fn chat_post(state: tauri::State<'_, ChatsState>, project: String, text: String) -> Result<Message, String> {
     chats_of(&state)?.post(&real(&project), USER, &text)
+}
+
+// 자동 깨우기가 멈춘 작업그룹 (채팅 패널의 알림). 바뀌면 "chat-limit" 이벤트가 온다.
+#[tauri::command]
+pub fn chat_paused(state: tauri::State<'_, ChatsState>, project: String) -> Result<Vec<String>, String> {
+    Ok(chats_of(&state)?.paused(&real(&project)))
+}
+
+#[tauri::command]
+pub fn chat_resume(state: tauri::State<'_, ChatsState>, project: String, group: String) -> Result<(), String> {
+    chats_of(&state)?.resume(&real(&project), &group);
+    Ok(())
 }
 
 // 깨우기를 기다리는 참여자 (채팅 패널의 대기 표시). 대기가 바뀌면 "chat-wake" 이벤트가 온다.
@@ -540,7 +661,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
         let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
-            if let Change::Message(m) = c {
+            if let Change::Message(m, _) = c {
                 sink.lock().unwrap().push(m.id)
             }
         }), 0);
@@ -573,6 +694,70 @@ mod tests {
         watched.leave(&t);
         watched.leave(&t);
         assert_eq!(*changes.lock().unwrap(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 자동 깨우기 제한: 작업그룹마다 세션이 다른 세션에게 보낸 메시지를 세고 (@all도 1개, 사용자에게만 보낸 것·멘션 없는
+    // 것은 세지 않음) WAKE_LIMIT개 뒤부터는 저장만 하고 깨우지 않는다 (held, to는 그대로). 다른 작업그룹·프로젝트는 따로 센다.
+    // 사용자 메시지가 그 작업그룹에 닿거나 재개하면 다시 세고, 보류된 알림을 (받는 사람, 보낸 사람)마다 한 번 알린다.
+    #[test]
+    fn wake_limit_per_work_group() {
+        let dir = temp("limit");
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = log.clone();
+        let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
+            let entry = match c {
+                Change::Message(_, []) | Change::Members => return,
+                Change::Message(m, r) => format!("message {} released {r:?}", m.from),
+                Change::Limits => "limits".to_string(),
+                Change::Released(r) => format!("released {r:?}"),
+            };
+            sink.lock().unwrap().push(entry);
+        }), 0);
+        let taken = || std::mem::take(&mut *log.lock().unwrap());
+        let (p, q) = (Path::new("/p/w"), Path::new("/p/q"));
+        let tokens: Vec<String> = [(p, "g1/dev", "k1"), (p, "g1/rev", "k2"), (p, "g2/dev", "k3"), (q, "g1/dev", "k4"), (q, "g1/rev", "k5")]
+            .into_iter()
+            .map(|(project, name, key)| chats.join(project, name, key).0)
+            .collect();
+        let post = |project: &Path, from: &str, text: &str| chats.post(project, from, text).unwrap();
+        for _ in 0..4 {
+            assert!(!post(p, "g1/dev", "@user done").held && !post(p, "g1/dev", "note").held);
+        }
+        for _ in 0..5 {
+            assert!(!post(p, "g1/dev", "@g1/rev hi").held);
+        }
+        assert!(chats.paused(p).is_empty());
+        assert!(!post(p, "g1/dev", "@all hi").held);
+        assert_eq!((chats.paused(p), taken()), (vec!["g1".to_string()], vec!["limits".to_string()]));
+        let held = post(p, "g1/rev", "@g1/dev again");
+        assert!(held.held && held.to == ["g1/dev"]);
+        assert!(post(p, "g1/rev", "@g1/dev more").held);
+        assert!(taken().is_empty(), "보류할 때마다 알림");
+        // 다른 작업그룹·프로젝트는 따로 센다
+        assert!(!post(p, "g2/dev", "@g1/dev hi").held && !post(q, "g1/dev", "@g1/rev hi").held);
+        // 저장한 파일에도 held가 남는다
+        let again = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
+        assert!(again.messages(p).unwrap().iter().any(|m| m.id == held.id && m.held));
+        // 사용자 메시지가 g1에 닿으면 다시 센다 (g2는 그대로). 사용자 알림과 풀려난 보류분은 한꺼번에 깨운다 (리뷰 2단계 R1)
+        let go_on = post(p, USER, "@g1/dev go on");
+        assert!(!go_on.held);
+        let released = [("g1/dev".to_string(), "g1/rev".to_string())];
+        assert_eq!(chats.wake_items(p, Some(&go_on), &released), [(tokens[0].clone(), USER.to_string()), (tokens[0].clone(), "g1/rev".to_string())]);
+        assert!(chats.wake_items(p, Some(&held), &[]).is_empty(), "보류한 메시지를 깨움");
+        assert_eq!(taken(), [r#"message user released [("g1/dev", "g1/rev")]"#, "limits"]);
+        assert!(chats.paused(p).is_empty() && !post(p, "g1/rev", "@g1/dev ok").held);
+        for _ in 0..5 {
+            post(p, "g2/dev", "@g1/dev x");
+        }
+        assert_eq!(chats.paused(p), ["g2"]);
+        // 재개 버튼
+        taken();
+        assert!(post(p, "g2/dev", "@g1/rev y").held);
+        chats.resume(p, "g2");
+        chats.resume(p, "g2");
+        assert_eq!(taken(), [r#"released [("g1/rev", "g2/dev")]"#, "limits"]);
+        assert!(chats.paused(p).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -638,7 +823,7 @@ mod tests {
         let dir = temp("broken");
         let p = Path::new("/p/b");
         let chats = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
-        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![] }).unwrap();
+        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![], held: false }).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let mut bytes = format!("{}\n", line(1)).into_bytes();
         bytes.extend(b"\xff\xfe broken\n");
@@ -753,7 +938,7 @@ mod tests {
     fn serve_for_experiment() {
         let dir = std::env::temp_dir().join("ddak-chat-experiment");
         let chats = Chats::start(dir.clone(), Box::new(|_, c| {
-            if let Change::Message(m) = c {
+            if let Change::Message(m, _) = c {
                 println!("MESSAGE {}", serde_json::to_string(m).unwrap())
             }
         })).unwrap();

@@ -5,7 +5,11 @@ import { devHooks } from "./devHooks";
 import { usePrefs } from "./prefs";
 
 // src-tauri/src/chat.rs Message
-export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[] };
+// held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음
+export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean };
+
+// src-tauri/src/chat.rs WAKE_LIMIT
+const WAKE_LIMIT = 6;
 
 const USER = "user";
 
@@ -25,6 +29,8 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
   const [members, setMembers] = useState<string[]>([]);
   // 깨우기를 기다리는 참여자 (터미널 이름 줄의 배지와 같은 상태. 채팅을 보는 동안에도 보이게)
   const [waiting, setWaiting] = useState<string[]>([]);
+  // 자동 깨우기가 멈춘 작업그룹 (세션끼리 WAKE_LIMIT개를 주고받음). 사용자가 그 그룹에 쓰거나 재개하면 풀린다.
+  const [paused, setPaused] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   // 이벤트를 등록하지 못함: 새 메시지를 스스로 다시 읽지 못한다
   const [listenError, setListenError] = useState<string | null>(null);
@@ -74,6 +80,12 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
       const mine = ++nw;
       invoke<string[]>("chat_waiting", { project }).then((w) => alive && mine === nw && setWaiting(w), () => {});
     };
+    let np = 0;
+    const loadPaused = () => {
+      const mine = ++np;
+      const extra = dev ? (devHooks.chatPausedExtra ?? []) : [];
+      invoke<string[]>("chat_paused", { project }).then((g) => alive && mine === np && setPaused([...g, ...extra]), () => {});
+    };
     const onMembers = () => {
       loadMembers();
       loadWaiting();
@@ -89,7 +101,7 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
           if (alive) offs.push(off);
           else off();
         });
-      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", onMembers), register("chat-wake", loadWaiting)]);
+      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", onMembers), register("chat-wake", loadWaiting), register("chat-limit", loadPaused)]);
       if (!alive) return;
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) {
@@ -99,6 +111,7 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
       loadMessages();
       loadMembers();
       loadWaiting();
+      loadPaused();
     })();
     return () => {
       alive = false;
@@ -170,12 +183,28 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
             <div className="chat-meta">
               <span className="chat-from">{m.from === USER ? t("chat.you") : m.from}</span>
               {m.to.length > 0 && <span className="chat-to">→ {m.to.map((x) => (x === USER ? t("chat.you") : x)).join(", ")}</span>}
+              {m.held && (
+                <span className="chat-held" data-held title={t("chat.heldHint")}>
+                  {t("chat.held")}
+                </span>
+              )}
               <time>{time(m.time)}</time>
             </div>
             <div className="chat-text">{m.text}</div>
           </div>
         ))}
       </div>
+      {/* 멈춘 작업그룹이 많아도 입력란을 밀어내지 않게 높이를 정한 스크롤 영역에 둔다 (리뷰 2단계 R2) */}
+      {paused.length > 0 && (
+        <div className="chat-paused-list">
+          {paused.map((g) => (
+            <div key={g} className="chat-paused" data-paused={g}>
+              <span>{t("chat.paused", { group: g, n: WAKE_LIMIT })}</span>
+              <button onClick={() => invoke("chat_resume", { project, group: g }).catch((e) => setError(String(e)))}>{t("chat.resume")}</button>
+            </div>
+          ))}
+        </div>
+      )}
       {error && <div className="chat-error">{error}</div>}
       {listenError && <div className="chat-error" data-listen-error>{t("chat.listenError", { detail: listenError })}</div>}
       {/* 참여자 칩은 입력란 바로 위에 둔다 (누르면 멘션을 넣으므로 쓰는 곳 가까이) */}

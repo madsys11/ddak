@@ -480,19 +480,30 @@ fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<(), Strin
 }
 
 // 이 토큰들로 참여한 터미널이 from의 메시지를 받았다: 깨우기를 기다린다. (기다리게 된 터미널, 변경 번호)
-pub fn wake(ptys: &Ptys, tokens: &[String], from: &str) -> Vec<(u32, u64)> {
+// 테스트용 줄임. 앱은 wake_all로 한꺼번에 예약한다.
+#[cfg(test)]
+fn wake(ptys: &Ptys, tokens: &[String], from: &str) -> Vec<(u32, u64)> {
+    wake_all(ptys, &tokens.iter().map(|t| (t.clone(), from.to_string())).collect::<Vec<_>>())
+}
+
+// 여러 (채팅 토큰, 보낸 사람)을 잠금 하나 안에서 한꺼번에 예약한다. 한 터미널에 보낸 사람이 여럿이어도 알림은 한 번이다
+// (리뷰 2단계 R1: 따로 부르면 그 사이 wake_tick이 앞 것을 먼저 써서 같은 터미널에 알림이 두 번 갔다). 터미널마다 변경 번호 하나.
+pub fn wake_all(ptys: &Ptys, items: &[(String, String)]) -> Vec<(u32, u64)> {
     let sessions = ptys.sessions.lock().unwrap();
     let mut wakes = ptys.wakes.lock().unwrap();
-    let ids: Vec<u32> = sessions.iter().filter(|(_, s)| s.chat_token.as_ref().is_some_and(|t| tokens.contains(t))).map(|(id, _)| *id).collect();
-    ids.into_iter()
-        .map(|id| {
-            let p = wakes.entry(id).or_default();
+    let mut ids: Vec<u32> = Vec::new();
+    for (token, from) in items {
+        for (id, _) in sessions.iter().filter(|(_, s)| s.chat_token.as_deref() == Some(token.as_str())) {
+            let p = wakes.entry(*id).or_default();
             if !p.from.iter().any(|f| f == from) {
-                p.from.push(from.to_string());
+                p.from.push(from.clone());
             }
-            (id, ptys.wake_seq.fetch_add(1, Ordering::Relaxed) + 1)
-        })
-        .collect()
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+    }
+    ids.into_iter().map(|id| (id, ptys.wake_seq.fetch_add(1, Ordering::Relaxed) + 1)).collect()
 }
 
 // 깨우기를 기다리는 터미널을 본다 (주기적으로, now는 지금). 사용자가 입력 중이 아니거나 바로 깨우기를 눌렀으면 알림을
@@ -992,6 +1003,12 @@ mod tests {
         ptys.wake_now_tokens(&["tok".into()]);
         assert_eq!(wake_tick(&ptys, Instant::now()).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
         assert!(ptys.waiting_tokens().is_empty());
+        // 보낸 사람이 여럿이어도 한꺼번에 예약하면 알림은 한 번 (리뷰 2단계 R1)
+        let both = wake_all(&ptys, &[("tok".into(), "origin/x".into()), ("other".into(), "origin/z".into()), ("tok".into(), "origin/y".into())]);
+        assert_eq!(both.iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        wait("New chat message from origin/x, origin/y. Read it");
+        assert!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).is_empty(), "두 번 깨움");
         wake(&ptys, &["tok".into()], "origin/e");
         close(&ptys, id);
         assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "없어진 터미널을 그만두지 않음");

@@ -1771,8 +1771,15 @@ async function testAddSession(root: string, first: Terminal) {
   // 시작할 때 커서 위치를 물어서 xterm이 자동 응답(ESC[행;열R)을 보내게 한다 (사용자 입력이 아니다. 리뷰 P2)
   // 줄을 받을 때마다 상태(ESC[5n)·DEC 커서 위치(ESC[?6n)도 물어서, Enter 직후에 응답이 오게 한다 (리뷰 후속 P2)
   const listener = `{"name":"listener","command":"sh","args":["-c","stty -echo; printf \\"\\\\033[6n\\"; while read l; do echo GOT:$l; printf \\"\\\\033[5n\\\\033[?6n\\"; done"],"readOnly":true}`;
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener}`;
-  await run(first, `printf '%s' '${TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","sessions":[${pick}]}]}`)}' > "${file}"`);
+  // chatter: 같은 작업그룹(origin)의 listener를 멘션한 메시지를 MCP로 7개 보낸다 (자동 깨우기 제한 WAKE_LIMIT=6). $0은 주소, $1은 요청
+  const chatRpc = `{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"tools/call\\",\\"params\\":{\\"name\\":\\"post_message\\",\\"arguments\\":{\\"text\\":\\"@origin/listener ping\\"}}}`;
+  const chatter = `{"name":"chatter","command":"sh","args":["-c","for i in 1 2 3 4 5 6 7; do curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"; echo; done","{chat}","${chatRpc}"],"readOnly":true}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter}`;
+  // tty 한 줄은 1024바이트까지라 두 번에 나눠 쓰고 옮긴다 (쓰는 도중의 반쪽 파일을 읽지 않게)
+  const content = TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","sessions":[${pick}]}]}`);
+  const half = Math.ceil(content.length / 2);
+  await run(first, `printf '%s' '${content.slice(0, half)}' > "${file}.part"`);
+  await run(first, `printf '%s' '${content.slice(half)}' >> "${file}.part" && mv "${file}.part" "${file}"`);
   await waitFor("세션 고르기 설정", () => devHooks.groups?.groups.some((g) => g.id === "pick"), 3000);
   const before = tabCount();
   await menu("new_tab");
@@ -1800,7 +1807,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -2080,6 +2087,58 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   const elapsed = performance.now() - t0;
   devHooks.wakeListenDelay = undefined;
   check("깨우기: 터미널은 깨우기 이벤트 등록이 끝난 뒤에 뜸", !!spawned && elapsed >= 1400, `${Math.round(elapsed)}ms`);
+  await menu("close_pane");
+
+  // 자동 깨우기 제한: 같은 작업그룹의 세션끼리 사용자 없이 6개를 주고받으면 7번째부터는 저장만 하고 깨우지 않는다.
+  // 패널에 멈춤과 재개 버튼, 깨우지 않은 메시지 표시. 보낸 세션은 도구 결과로 안다. 재개하면 받는 사람을 한 번 깨운다.
+  const fromChatter = () => got().filter((l) => l.includes("New chat message from origin/chatter")).length;
+  const pausedBar = () => panel()!.querySelector<HTMLElement>("[data-paused='origin']");
+  await openAdd("menu");
+  choose("pick/chatter");
+  const chatterPane = await waitFor("chatter 창", () => visiblePanes().find((p) => p.el.querySelector(".pane-label")?.firstChild?.textContent === "chatter"), 5000);
+  const pings = async () => (await stored()).filter((m) => m.from === "origin/chatter") as { held?: boolean }[];
+  await waitAsync("chatter 메시지 7개", async () => (await pings()).length === 7, 10000).catch(() => null);
+  const sent7 = await pings();
+  await waitFor("멈춤 표시", pausedBar, 3000).catch(() => null);
+  await waitFor("허용된 알림", () => fromChatter() > 0, WAKE_IDLE_MS + 4000).catch(() => null);
+  await sleep(WAKE_IDLE_MS + 1000);
+  const beforeResume = fromChatter();
+  const toldChatter = screen(chatterPane.term).some((l) => l.includes("nobody was notified: automatic notifications for your work group are paused"));
+  // 깨우지 않음 표시는 7번째 메시지에만
+  const heldTag = panel()!.querySelectorAll(".chat-msg [data-held]").length === 1 && !!panel()!.querySelector(".chat-msg:last-of-type [data-held]");
+  check(
+    "깨우기 제한: 세션끼리 6개까지 깨우고 7번째는 저장만 (보낸 세션에 알림, 패널에 멈춤·깨우지 않음 표시)",
+    sent7.length === 7 && sent7.filter((m) => m.held).length === 1 && !!sent7[6].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar(),
+    `${sent7.map((m) => !!m.held).join(",")} told=${toldChatter} tag=${heldTag} bar=${!!pausedBar()} wakes=${beforeResume}`,
+  );
+  pausedBar()?.querySelector("button")?.click();
+  const resumed = await waitFor("재개 뒤 깨움", () => fromChatter() === beforeResume + 1, WAKE_IDLE_MS + 4000).then(() => true, () => false);
+  await sleep(1000);
+  check(
+    "깨우기 제한: 재개하면 멈춤 표시가 사라지고 보류된 알림을 받는 사람에게 한 번 알림",
+    resumed && fromChatter() === beforeResume + 1 && !pausedBar(),
+    `${beforeResume}→${fromChatter()} bar=${!!pausedBar()}`,
+  );
+
+  // 멈춘 작업그룹이 많아도 알림 목록은 높이가 정해진 스크롤 영역이고, 참여자 칩과 입력란은 패널 안에 남는다 (리뷰 2단계 R2)
+  devHooks.chatPausedExtra = Array.from({ length: 12 }, (_, i) => `group-${i + 1}`);
+  toggle().click();
+  await waitFor("채팅 열기", shown, 2000);
+  await emit("chat-limit", { project: root });
+  const pausedList = await waitFor("멈춘 그룹 12개", () => panel()!.querySelectorAll("[data-paused]").length === 12 && panel()!.querySelector<HTMLElement>(".chat-paused-list"), 3000).catch(() => null);
+  const panelBox = panel()!.getBoundingClientRect();
+  const inputRect = input().getBoundingClientRect();
+  const chipsBox = panel()!.querySelector(".chat-members")!.getBoundingClientRect();
+  check(
+    "깨우기 제한: 멈춘 그룹이 많아도 알림은 스크롤 영역, 칩과 입력란은 패널 안에 보임",
+    !!pausedList && pausedList.scrollHeight > pausedList.clientHeight && pausedList.clientHeight <= 104 && inputRect.height >= 40 && inputRect.bottom <= panelBox.bottom && chipsBox.top >= pausedList.getBoundingClientRect().bottom - 1,
+    `${pausedList?.clientHeight}/${pausedList?.scrollHeight} input=${Math.round(inputRect.top)}-${Math.round(inputRect.bottom)} panel=${Math.round(panelBox.bottom)} chips=${Math.round(chipsBox.top)}`,
+  );
+  devHooks.chatPausedExtra = undefined;
+  await emit("chat-limit", { project: root });
+  await waitFor("가짜 멈춤 지움", () => !panel()!.querySelector("[data-paused]"), 3000).catch(() => null);
+  toggle().click();
+  await waitFor("채팅 닫기", () => !shown(), 2000);
   await menu("close_pane");
 }
 
@@ -2372,7 +2431,11 @@ async function testTabScroll() {
 
 async function testLastExit(first: Terminal) {
   first.input("exit\r");
-  await waitFor("빈 화면", () => document.querySelector(".workspace-empty"), 10000);
+  // 시간 초과면 남은 창(이름표)을 함께 남긴다 (앞 테스트가 창을 닫지 않았는지)
+  const left = () => paneEls().map((el) => el.querySelector(".pane-label")?.firstChild?.textContent ?? "-").join(",");
+  await waitFor("빈 화면", () => document.querySelector(".workspace-empty"), 10000).catch((e) => {
+    throw new Error(`${e.message} (남은 창: ${left()}, 탭 ${tabCount()})`);
+  });
   check("닫기: 모든 터미널을 닫으면 빈 화면", true);
   const ws = document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
   const buttons = [...ws.querySelectorAll(".workspace-empty button")].map((b) => b.textContent);
