@@ -62,6 +62,8 @@ struct Session {
     awaiting_changes: u64,
     // 알림을 쓰고 Enter를 보낼 차례를 기다린다 (wake_tick)
     enter: Option<Enter>,
+    // claude 훅으로 "사용자를 기다림"을 알린 때 (뒤따라 켜진 상태의 기다림이 같은 확인인지 본다, set_awaiting)
+    hook_attention: Option<Instant>,
 }
 
 // 알림을 쓴 뒤 보낼 Enter. at: 알림을 쓴 때, before: 그때의 사용자 입력, force: 바로 깨우기(사용자가 누름)라 기다려도 보냄,
@@ -98,6 +100,9 @@ impl Input {
 // (한 번에 보내면 claude가 붙여넣기로 봐서 제출하지 않는다. docs/reviews/2026-10-24-chat-wake-experiment.md).
 pub const WAKE_IDLE: Duration = Duration::from_secs(3);
 const WAKE_GAP: Duration = Duration::from_millis(300);
+// claude 훅의 알림 뒤 이 안에 켜진 상태의 기다림은 같은 확인으로 본다 (set_awaiting). 훅은 확인이 뜬 지 약 6초 뒤에 오고
+// 상태는 보통 먼저 오지만 순서 보장은 없다
+const ATTENTION_GAP: Duration = Duration::from_secs(10);
 
 fn wake_notice(from: &[String]) -> String {
     format!(
@@ -267,7 +272,7 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_changed: None, awaiting_changes: 0, enter: None })
+    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -740,9 +745,14 @@ pub fn start_waker(app: tauri::AppHandle) {
 }
 
 // 앞에서 도는 프로그램이 사용자를 기다리는지 (프론트 src/Terminal.tsx: OSC 7501 blocked, 화면의 선택 창)
+// 사용자를 기다리게 되면 (kind: permission·question·auth·dialog) 채팅방 참여자의 터미널이면 사용자에게 알린다 (chat.rs
+// Change::Attention, 보고 있으면 생략). claude·codex 모두 된다 (codex는 권한 확인 훅이 없다)
 #[tauri::command]
-pub fn pty_awaiting(ptys: State<'_, Ptys>, id: u32, awaiting: bool) {
-    ptys.set_awaiting(id, awaiting);
+pub fn pty_awaiting(ptys: State<'_, Ptys>, chats: State<'_, crate::chat::ChatsState>, id: u32, awaiting: bool, kind: Option<String>) {
+    // 알림은 잠금 밖에서
+    if let (Some(token), Some(chats)) = (ptys.set_awaiting(id, awaiting), chats.0.as_ref()) {
+        chats.attention(&token, kind.as_deref().unwrap_or("dialog"), false);
+    }
 }
 
 // 자체 테스트: 그 터미널이 사용자를 기다린다고 알려졌는지
@@ -760,14 +770,40 @@ pub fn chat_wake_now(ptys: State<'_, Ptys>, id: u32) {
 }
 
 impl Ptys {
-    fn set_awaiting(&self, id: u32, awaiting: bool) {
-        if let Some(s) = self.sessions.lock().unwrap().get_mut(&id) {
-            if s.awaiting != awaiting {
-                s.awaiting = awaiting;
-                s.awaiting_changed = Some(Instant::now());
-                s.awaiting_changes += 1;
-            }
+    // 기다리게 되었고 알려야 하면 그 터미널의 채팅 토큰 (알릴 참여자). 기다림이 켜질 때마다(대기 한 번마다) 알린다.
+    // 다만 claude 훅이 ATTENTION_GAP 안에 먼저 알렸고 그 뒤 기다림이 끝난 적이 없으면 같은 확인이라 알리지 않는다
+    // (훅→상태 순서, 리뷰 R3·R4). 상태→훅 순서는 claim_hook_attention이 막는다.
+    fn set_awaiting(&self, id: u32, awaiting: bool) -> Option<String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let s = sessions.get_mut(&id)?;
+        if s.awaiting == awaiting {
+            return None;
         }
+        let now = Instant::now();
+        let ended = s.awaiting_changed;
+        s.awaiting = awaiting;
+        s.awaiting_changed = Some(now);
+        s.awaiting_changes += 1;
+        if !awaiting {
+            return None;
+        }
+        let hook = s.hook_attention.take();
+        let same = hook.is_some_and(|h| now.saturating_duration_since(h) < ATTENTION_GAP && ended.is_none_or(|e| h > e));
+        if same { None } else { s.chat_token.clone() }
+    }
+
+    // claude 훅의 "사용자를 기다림"을 알려도 되는지: 그 토큰의 터미널이 지금 기다리는 중이면 상태로 이미 알린 확인이라 false.
+    // 알리면 그때를 적어 둔다 (뒤따라 켜지는 상태의 기다림을 같은 확인으로 본다). 터미널이 없는 토큰은 true.
+    pub fn claim_hook_attention(&self, token: &str, now: Instant) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        let mut mine: Vec<&mut Session> = sessions.values_mut().filter(|s| s.chat_token.as_deref() == Some(token)).collect();
+        if mine.iter().any(|s| s.awaiting) {
+            return false;
+        }
+        for s in mine.iter_mut() {
+            s.hook_attention = Some(now);
+        }
+        true
     }
 
     // 깨우기를 기다리는 터미널의 채팅 토큰 (채팅 패널의 대기 표시, chat.rs chat_waiting)
@@ -1254,6 +1290,30 @@ mod tests {
         };
         let notice = |from: &str| format!("GOT:[ddak] New chat message from {from}.");
         std::thread::sleep(Duration::from_millis(300));
+        // 기다리게 될 때만 알릴 참여자(토큰)를 돌려준다 (같은 값이면 없음, 풀리면 없음)
+        assert_eq!(ptys.set_awaiting(id, true).as_deref(), Some("tok"));
+        assert_eq!(ptys.set_awaiting(id, true), None);
+        assert_eq!(ptys.set_awaiting(id, false), None);
+        // 답한 뒤 새로 켜진 기다림은 또 알린다 (리뷰 R4)
+        assert_eq!(ptys.set_awaiting(id, true).as_deref(), Some("tok"), "새 대기를 알리지 않음");
+        // 상태로 알린 대기 중의 훅은 같은 확인이라 알리지 않는다
+        assert!(!ptys.claim_hook_attention("tok", Instant::now()));
+        assert_eq!(ptys.set_awaiting(id, false), None);
+        // 훅이 먼저 알리고 곧 상태가 켜지면 같은 확인이라 알리지 않는다. 그 대기가 끝나고 새로 켜지면 알린다
+        assert!(ptys.claim_hook_attention("tok", Instant::now()));
+        assert_eq!(ptys.set_awaiting(id, true), None, "훅이 알린 확인을 또 알림");
+        assert_eq!(ptys.set_awaiting(id, false), None);
+        assert_eq!(ptys.set_awaiting(id, true).as_deref(), Some("tok"), "훅 뒤의 새 대기를 알리지 않음");
+        assert_eq!(ptys.set_awaiting(id, false), None);
+        // 훅이 먼저 알리고 그 사이 다른 대기가 끝났으면 (훅이 그 전 대기의 것) 새 대기는 알린다
+        assert!(ptys.claim_hook_attention("tok", Instant::now()));
+        assert_eq!(ptys.set_awaiting(id, true), None);
+        assert_eq!(ptys.set_awaiting(id, false), None);
+        assert!(ptys.claim_hook_attention("tok", Instant::now() - Duration::from_secs(1)));
+        assert_eq!(ptys.set_awaiting(id, true).as_deref(), Some("tok"), "끝난 대기 전의 훅 때문에 새 대기를 알리지 않음");
+        assert_eq!(ptys.set_awaiting(id, false), None);
+        // 모르는 토큰의 훅은 막지 않는다
+        assert!(ptys.claim_hook_attention("other", Instant::now()));
         ptys.set_awaiting(id, true);
         wake(&ptys, &["tok".into()], "origin/a");
         assert!(tick().is_empty(), "기다리는 중에 알림을 씀");

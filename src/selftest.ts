@@ -1419,6 +1419,92 @@ function testWorkspaceStateUnit() {
 }
 
 // 터미널 자동 응답 판별 (깨우기의 사용자 입력에서 뺀다, src/Terminal.tsx isTerminalReply)
+// 터미널 검색 (⌘F, 터미널 메뉴 "찾기", src/TerminalSearch.tsx): 입력하면 찾고 몇 번째인지 센다. ↩ 다음, ⇧↩ 이전,
+// 대소문자 구분·정규식, 결과 없음. Esc나 ×로 닫으면 터미널로 포커스
+async function testTerminalSearch(term: Terminal) {
+  const pane = visiblePanes().find((p) => p.term === term)!;
+  // 찾을 말이 명령 줄에는 없게 (명령 줄도 화면에 남는다): xq-a, XQ-B, xq-c
+  await run(term, String.raw`p=xq; printf '%s-a\n%s-B\n%s-c\n' $p $(echo $p | tr a-z A-Z) $p`);
+  const bar = () => pane.el.querySelector<HTMLElement>(".terminal-search");
+  await clickMenu("Terminal", "Find…");
+  await waitFor("검색 막대", bar, 3000).catch(() => null);
+  const input = () => bar()!.querySelector("input")!;
+  check("검색: 터미널 메뉴 찾기(⌘F)로 막대가 열리고 입력란에 포커스", !!bar() && document.activeElement === input());
+  const type = (text: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input(), text);
+    input().dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const key = (k: string, shift = false) => input().dispatchEvent(new KeyboardEvent("keydown", { key: k, shiftKey: shift, bubbles: true, cancelable: true }));
+  const count = () => bar()?.querySelector("[data-count]")?.textContent ?? "";
+  const counted = (what: string, ok: (c: string) => boolean) => waitFor(what, () => ok(count()), 3000).then(() => true, () => false);
+  type("xq-");
+  const all = await counted("3개", (c) => / of 3$/.test(c));
+  const first = count();
+  key("Enter");
+  const moved = await counted("다음", (c) => / of 3$/.test(c) && c !== first);
+  const second = count();
+  key("Enter", true);
+  const back = await counted("이전", (c) => c === first);
+  check(
+    "검색: 대소문자 무시로 3개, ↩ 다음·⇧↩ 이전, 지금 결과를 선택",
+    all && moved && back && term.getSelection().toLowerCase() === "xq-",
+    `${first} → ${second} → ${count()} sel=${JSON.stringify(term.getSelection())}`,
+  );
+  bar()!.querySelector<HTMLElement>("[data-option='case']")!.click();
+  const cased = await counted("대소문자 구분", (c) => / of 2$/.test(c));
+  const casedText = count();
+  bar()!.querySelector<HTMLElement>("[data-option='case']")!.click();
+  bar()!.querySelector<HTMLElement>("[data-option='regex']")!.click();
+  type("xq-[ac]");
+  const regexed = await counted("정규식", (c) => / of 2$/.test(c));
+  const regexText = count();
+  // 잘못된 정규식은 결과 없음 (이전 수가 남지 않게, 리뷰 R1)
+  type("xq-[");
+  const badRegex = await counted("잘못된 정규식", (c) => c === "No results");
+  const badText = count();
+  type("zz-not-there");
+  const none = await counted("결과 없음", (c) => c === "No results");
+  check("검색: 대소문자 구분 2개, 정규식 2개, 잘못된 정규식·없으면 결과 없음", cased && regexed && badRegex && none, `${casedText} | ${regexText} | ${badText} | ${count()}`);
+  key("Escape");
+  await waitFor("Esc로 닫힘", () => !bar(), 2000).catch(() => null);
+  check("검색: Esc로 닫으면 터미널로 포커스", !bar() && term.textarea === document.activeElement);
+  await clickMenu("Terminal", "Find…");
+  await waitFor("다시 열림", bar, 3000).catch(() => null);
+  const reopened = !!bar() && input().value === "";
+  const reopenedInfo = `bar=${!!bar()} value=${JSON.stringify(bar() ? input().value : null)}`;
+  bar()?.querySelector<HTMLElement>("[data-action='close']")?.click();
+  await waitFor("×로 닫힘", () => !bar() && term.textarea === document.activeElement, 2000).catch(() => null);
+  check(
+    "검색: 다시 열면 빈 입력, ×로 닫힘",
+    reopened && !bar() && term.textarea === document.activeElement,
+    `${reopenedInfo} | after: bar=${!!bar()} active=${document.activeElement?.className} hasFocus=${document.hasFocus()} retry=${(term.focus(), document.activeElement === term.textarea)} hidden=${pane.el.offsetParent === null}`,
+  );
+
+  // 분할 창: A에서 검색을 연 채 B로 옮겼다가 A의 검색 입력란을 누르면 A가 고른 창이 되고 포커스는 입력란에 남는다.
+  // 그 상태의 ⌘F는 A의 입력란을 고르고 B에는 막대를 열지 않는다 (리뷰 R2)
+  await clickMenu("Terminal", "Find…");
+  await waitFor("A 검색", bar, 3000).catch(() => null);
+  const panes = visiblePanes().length;
+  await menu("split_right");
+  const b = await waitFor("B 창", () => visiblePanes().length === panes + 1 && visiblePanes().find((p) => p.term !== term), 5000);
+  await ready(b.term);
+  b.term.focus();
+  await waitFor("B 고름", () => b.el.classList.contains("focused"), 2000).catch(() => null);
+  input().focus();
+  await waitFor("A 고름", () => pane.el.classList.contains("focused"), 2000).catch(() => null);
+  await sleep(200);
+  const picked = pane.el.classList.contains("focused") && !b.el.classList.contains("focused") && document.activeElement === input();
+  await clickMenu("Terminal", "Find…");
+  await sleep(300);
+  const stayed = document.activeElement === input() && !b.el.querySelector(".terminal-search");
+  check("검색: 다른 창의 검색 입력란을 누르면 그 창을 고르고 입력란에 포커스, ⌘F도 그 창", picked && stayed, `${picked} ${stayed} ${document.activeElement?.className}`);
+  key("Escape");
+  b.term.focus();
+  await waitFor("B 고름", () => b.el.classList.contains("focused"), 2000).catch(() => null);
+  await menu("close_pane");
+  await waitFor("B 닫힘", () => visiblePanes().length === panes, 5000).catch(() => null);
+}
+
 // 앞에서 도는 프로그램의 상태 (src/programStatus.ts): OSC 7501 해석과 화면의 선택 창 판단
 function testProgramStatusUnit() {
   const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
@@ -2114,9 +2200,16 @@ async function testAddSession(root: string, first: Terminal) {
   const prompter = `{"name":"prompter","role":"R {chat}","command":"sh","args":["-c","printf \\"A:%s|B:%s|\\" \\"$0\\" \\"$1\\"","{prompt}","v={prompt:toml}"],"readOnly":true}`;
   // attn: claude 권한 확인 훅처럼 자기 {attention} 주소로 사용자를 기다린다는 신호를 보낸다 (알림)
   const attn = `{"name":"attn","command":"curl","args":["-s","-X","POST","{attention}"],"readOnly":true}`;
+  // asker: 프로그램 상태(OSC 7501)로 답변을 기다린다고 알리고, 1초 뒤 claude 훅처럼 {attention}도 보낸다 (알림은 한 번, 상태의 문구).
+  // 설정은 셸 작은따옴표로 쓰므로 명령에 작은따옴표를 쓰지 않는다 ($1이 printf 형식)
+  // hookfirst: 반대 순서 — {attention}을 먼저 보내고 1초 뒤 상태로 기다림 (알림은 한 번, 훅의 문구)
+  const hookfirst = `{"name":"hookfirst","command":"sh","args":["-c","curl -s -X POST \\"$0\\"; sleep 1; printf \\"$1\\"; sleep 30","{attention}","\\\\033]7501;state=blocked:kind=question\\\\033\\\\\\\\"],"readOnly":true}`;
+  // twice: 답변 대기 → (답함) 작업 중 → 1초 뒤 권한 확인 대기. 10초 안이어도 새 대기라 알림 두 번 (리뷰 R4)
+  const twice = `{"name":"twice","command":"sh","args":["-c","printf \\"$0\\"; sleep 1; printf \\"$1\\"; sleep 1; printf \\"$2\\"; sleep 30","\\\\033]7501;state=blocked:kind=question\\\\033\\\\\\\\","\\\\033]7501;state=working\\\\033\\\\\\\\","\\\\033]7501;state=blocked:kind=permission\\\\033\\\\\\\\"],"readOnly":true}`;
+  const asker = `{"name":"asker","command":"sh","args":["-c","printf \\"$1\\"; sleep 1; curl -s -X POST \\"$0\\"; sleep 30","{attention}","\\\\033]7501;state=blocked:kind=question\\\\033\\\\\\\\"],"readOnly":true}`;
   // lateposter: 2초 뒤에 "@user ..."를 보낸다 (그 사이 다른 프로젝트로 옮겨 가서 받는다)
   const lateposter = `{"name":"lateposter","command":"sh","args":["-c","sleep 2; curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"","{chat}","${rpc}"],"readOnly":true}`;
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter},${attn},${lateposter}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter},${attn},${asker},${hookfirst},${twice},${lateposter}`;
   // 터미널에 보내는 명령은 900바이트까지라 (run) 500자씩 나눠 붙인 뒤 옮긴다 (쓰는 도중의 반쪽 파일을 읽지 않게)
   const content = TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","rules":"S2","sessions":[${pick}]}]}`);
   await run(first, `: > "${file}.part"`);
@@ -2149,7 +2242,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter,pick/attn,pick/lateposter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter,pick/attn,pick/asker,pick/hookfirst,pick/twice,pick/lateposter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -2402,6 +2495,36 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   }, 10000).catch(() => null);
   await closeAdded();
   check("알림: 보고 있으면 알리지 않음, 사용자를 기다린다는 신호({attention})는 알림", quiet.length === 0 && !!attention, `${JSON.stringify(quiet)} ${JSON.stringify(attention)}`);
+  // 프로그램 상태로 기다림을 알리면 알림 (claude·codex 모두). 그 뒤 온 훅 신호는 이미 알린 것이라 건너뛴다
+  await openAdd("menu");
+  choose("pick/asker");
+  const asked: [string, string][] = [];
+  await waitAsync("상태로 온 알림", async () => (asked.push(...(await notes())[0]), asked.some(([, b]) => /^origin\/asker(-\d)? is waiting for your answer$/.test(b))), 10000).catch(() => null);
+  await sleep(2500); // 훅 신호(1초 뒤)가 오고 처리될 때까지
+  asked.push(...(await notes())[0]);
+  await closeAdded();
+  const askerNotes = asked.filter(([, b]) => b.startsWith("origin/asker"));
+  check("알림: 프로그램 상태로 기다림을 알리면 알림, 뒤따른 훅 신호는 한 번 더 알리지 않음", askerNotes.length === 1 && /is waiting for your answer$/.test(askerNotes[0][1]), JSON.stringify(askerNotes));
+  // 훅이 먼저 와도 한 번 (리뷰 R3)
+  await openAdd("menu");
+  choose("pick/hookfirst");
+  const hooked: [string, string][] = [];
+  await waitAsync("훅으로 온 알림", async () => (hooked.push(...(await notes())[0]), hooked.some(([, b]) => b.startsWith("origin/hookfirst"))), 10000).catch(() => null);
+  await sleep(2500); // 상태(1초 뒤)가 오고 처리될 때까지
+  hooked.push(...(await notes())[0]);
+  await closeAdded();
+  const hookNotes = hooked.filter(([, b]) => b.startsWith("origin/hookfirst"));
+  check("알림: 훅 신호가 먼저 오고 상태가 뒤에 와도 한 번", hookNotes.length === 1 && /is waiting for your permission$/.test(hookNotes[0][1]), JSON.stringify(hookNotes));
+  // 답한 뒤 새로 뜬 대기는 10초 안이어도 또 알린다 (리뷰 R4)
+  await openAdd("menu");
+  choose("pick/twice");
+  const twiced: [string, string][] = [];
+  await waitAsync("두 번째 대기 알림", async () => (twiced.push(...(await notes())[0]), twiced.filter(([, b]) => b.startsWith("origin/twice")).length >= 2), 10000).catch(() => null);
+  await sleep(500);
+  twiced.push(...(await notes())[0]);
+  await closeAdded();
+  const twiceNotes = twiced.filter(([, b]) => b.startsWith("origin/twice")).map(([, b]) => b.replace(/^origin\/twice(-\d)? /, ""));
+  check("알림: 답한 뒤 새로 뜬 대기는 또 알림 (답변 → 권한 확인)", twiceNotes.join("|") === "is waiting for your answer|is waiting for your permission", JSON.stringify(twiceNotes));
 
   // 늦게 온 이전 참여자 응답이 최신 목록을 되돌리지 않는다 (리뷰 P2): 들어올 때의 첫 읽기를 늦추고 바로 닫는다
   let calls = 0;
@@ -3174,6 +3297,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
+    ["terminalSearch", () => testTerminalSearch(t())],
     ["programStatusUnit", testProgramStatusUnit],
     ["programStatus", () => testProgramStatus(t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],

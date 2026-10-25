@@ -60,6 +60,10 @@ pub fn text(key: &str, vars: &[(&str, &str)]) -> String {
     let fallback = match key {
         "paused" => "{group}: automatic notifications paused after sessions exchanged {n} messages without you",
         "attention" => "{name} is waiting for your permission",
+        "question" => "{name} is waiting for your answer",
+        "auth" => "{name} is waiting for you to sign in",
+        "dialog" => "{name} is waiting for your choice",
+        "blocked" => "{name} is waiting for you",
         _ => key,
     };
     let mut s = TEXTS.lock().unwrap().as_ref().and_then(|t| t.get(key).cloned()).unwrap_or_else(|| fallback.to_string());

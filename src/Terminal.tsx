@@ -1,10 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
 import { draggedPath, isPathDrag, shellQuote } from "./dragPath";
@@ -12,6 +13,7 @@ import { fixImeInput, passesImeKey } from "./hangul";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, type ProgramStatus } from "./programStatus";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
+import { TerminalSearch } from "./TerminalSearch";
 
 // xterm이 따로 보내지 않는 키 조합을 셸·CLI가 아는 입력으로 바꾼다.
 // - ⌘⌫ → Ctrl+U (커서 앞 지우기, zsh는 줄 전체). VS Code 터미널과 같은 값.
@@ -76,6 +78,11 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
+  // 검색 (⌘F, src/TerminalSearch.tsx): 애드온은 터미널과 함께 만들고, 막대는 열 때만 그린다
+  const searchRef = useRef<SearchAddon>(null);
+  const [searching, setSearching] = useState(false);
+  const focusedRef = useRef(focused);
+  focusedRef.current = focused;
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
   const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
   latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
@@ -91,6 +98,9 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       theme: THEMES[latest.current.theme].terminal,
     });
     termRef.current = term;
+    const search = new SearchAddon();
+    term.loadAddon(search);
+    searchRef.current = search;
     const fit = new FitAddon();
     term.loadAddon(fit);
     // 한글 같은 전각 문자의 폭을 셸과 똑같이 계산하게 한다.
@@ -179,7 +189,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
         id = newId;
         gotId(newId);
         if (import.meta.env.DEV) el.dataset.pty = String(newId);
-        if (awaiting) invoke("pty_awaiting", { id: newId, awaiting });
+        if (awaiting) invoke("pty_awaiting", { id: newId, awaiting, kind: awaitKind() });
         if (early.has(newId)) wake(early.get(newId)!);
         early.clear();
       },
@@ -235,11 +245,13 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     let dialogCap: ReturnType<typeof setTimeout> | undefined;
     let awaiting = false;
     let shown: { status?: ProgramStatus; awaiting: boolean } = { awaiting: false };
+    // 무엇을 기다리는지 (Rust가 알림 문구를 고른다): OSC 7501 blocked의 종류, 종류가 없으면 blocked, 화면의 선택 창이면 dialog
+    const awaitKind = () => (status?.state === "blocked" ? (status.kind ?? "blocked") : "dialog");
     const report = () => {
       const next = awaitingUser(status, dialogSince, Date.now());
       if (next !== awaiting) {
         awaiting = next;
-        if (id !== undefined) invoke("pty_awaiting", { id, awaiting: next }).catch(() => {});
+        if (id !== undefined) invoke("pty_awaiting", { id, awaiting: next, kind: awaitKind() }).catch(() => {});
       }
       if (shown.status !== status || shown.awaiting !== next) {
         shown = { status, awaiting: next };
@@ -316,13 +328,34 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     };
   }, [cwd]);
 
+  // 고른 창이 되면 터미널로 포커스. 이 창의 검색 입력란을 눌러 고른 것이면 입력란에 둔다
   useEffect(() => {
-    if (focused) termRef.current?.focus();
+    const inSearch = !!document.activeElement?.closest(".terminal-search") && ref.current?.parentElement?.contains(document.activeElement);
+    if (focused && !inSearch) termRef.current?.focus();
   }, [focused]);
+
+  // 터미널 메뉴 "찾기" (⌘F): 포커스가 있는 터미널이 검색 막대를 연다 (열려 있으면 입력란으로)
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload }) => {
+      if (payload !== "find" || !focusedRef.current) return;
+      setSearching(true);
+      ref.current?.parentElement?.querySelector<HTMLInputElement>(".terminal-search input")?.select();
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     if (termRef.current) termRef.current.options.theme = THEMES[theme].terminal;
   }, [theme]);
 
-  return <div ref={ref} className="terminal" />;
+  return (
+    <>
+      <div ref={ref} className="terminal" />
+      {searching && termRef.current && searchRef.current && (
+        <TerminalSearch term={termRef.current} search={searchRef.current} onClose={() => setSearching(false)} onFocus={() => latest.current.onFocus()} />
+      )}
+    </>
+  );
 }

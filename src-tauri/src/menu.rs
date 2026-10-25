@@ -18,6 +18,8 @@ const TERMINAL_ITEMS: &[(&str, Option<&str>)] = &[
     ("split_right", Some("CmdOrCtrl+D")),
     ("split_down", Some("CmdOrCtrl+Shift+D")),
     ("close_pane", Some("CmdOrCtrl+W")),
+    // 포커스가 있는 터미널에서 찾기 (src/TerminalSearch.tsx)
+    ("find", Some("CmdOrCtrl+F")),
 ];
 
 // 화면 배율 (프론트 src/prefs.tsx). ⌘+는 Shift+=라 ⌘=로 건다 (Safari·VS Code와 같은 키).

@@ -99,8 +99,12 @@ pub enum Change<'a> {
     Cleared,
     // 이 작업그룹의 자동 깨우기가 막 멈춤 (사용자에게 알린다)
     Paused(&'a str),
-    // 이 참여자가 사용자를 기다림 (claude의 권한 확인 훅이 /attention/<토큰>으로 알림, 사용자에게 알린다)
-    Attention(&'a str),
+    // 이 참여자가 사용자를 기다림 (사용자에게 알린다). kind: permission·question·auth (OSC 7501 blocked의 종류), blocked
+    // (종류 없음), dialog (화면의 선택 창).
+    // hook: claude의 권한 확인 훅(/attention/<토큰>)에서 옴. 아니면 터미널의 프로그램 상태(pty_awaiting, 대기가 켜질 때마다).
+    // 같은 확인을 두 경로가 어느 순서로든 알리므로 하나로 친다: 상태 쪽은 pty.rs set_awaiting, 훅 쪽은 claim_hook_attention.
+    // 훅은 상태를 보내지 않는 claude를 위해 남긴다
+    Attention { name: &'a str, token: &'a str, kind: &'a str, hook: bool },
 }
 
 type OnMessage = Box<dyn Fn(&Path, Change) + Send + Sync>;
@@ -464,6 +468,14 @@ impl Chats {
         self.resume(&key.0, &key.1);
     }
 
+    // 이 토큰의 참여자가 사용자를 기다린다 (Change::Attention)
+    pub fn attention(&self, token: &str, kind: &str, hook: bool) {
+        let who = self.inner.lock().unwrap().members.get(token).map(|m| (m.project.clone(), m.name.clone()));
+        if let Some((project, name)) = who {
+            (self.on_message)(&project, Change::Attention { name: &name, token, kind, hook });
+        }
+    }
+
     fn respond(&self, mut request: tiny_http::Request) {
         let reply = |code: u16, body: String| tiny_http::Response::from_string(body).with_status_code(code);
         // DNS 리바인딩: 다른 이름으로 들어온 요청은 받지 않는다 (토큰이 있어도)
@@ -496,10 +508,7 @@ impl Chats {
         }
         let token = token.unwrap();
         if attention {
-            let who = self.inner.lock().unwrap().members.get(&token).map(|m| (m.project.clone(), m.name.clone()));
-            if let Some((project, name)) = who {
-                (self.on_message)(&project, Change::Attention(&name));
-            }
+            self.attention(&token, "permission", true);
             let _ = request.respond(reply(204, String::new()));
             return;
         }
@@ -655,8 +664,18 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
             Change::Paused(group) => {
                 crate::notify::send(project, crate::notify::Kind::Chat, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]));
             }
-            Change::Attention(name) => {
-                crate::notify::send(project, crate::notify::Kind::Attention, &crate::notify::text("attention", &[("name", name)]));
+            Change::Attention { name, token, kind, hook } => {
+                if hook && !emitter.state::<crate::pty::Ptys>().claim_hook_attention(token, std::time::Instant::now()) {
+                    return;
+                }
+                let key = match kind {
+                    "question" => "question",
+                    "auth" => "auth",
+                    "dialog" => "dialog",
+                    "blocked" => "blocked",
+                    _ => "attention",
+                };
+                crate::notify::send(project, crate::notify::Kind::Attention, &crate::notify::text(key, &[("name", name)]));
             }
         }
     });
@@ -853,7 +872,7 @@ mod tests {
         let sink = log.clone();
         let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
             let entry = match c {
-                Change::Message(_, []) | Change::Members | Change::Cleared | Change::Attention(_) => return,
+                Change::Message(_, []) | Change::Members | Change::Cleared | Change::Attention { .. } => return,
                 Change::Paused(g) => format!("paused {g}"),
                 Change::Message(m, r) => format!("message {} released {r:?}", m.from),
                 Change::Limits => "limits".to_string(),
@@ -1047,7 +1066,7 @@ mod tests {
         let dir = temp("http");
         let seen_attention = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = seen_attention.clone();
-        let chats = Chats::start(dir.clone(), Box::new(move |_, c| if let Change::Attention(n) = c { sink.lock().unwrap().push(n.to_string()) })).unwrap();
+        let chats = Chats::start(dir.clone(), Box::new(move |_, c| if let Change::Attention { name, kind, hook, .. } = c { sink.lock().unwrap().push(format!("{name} {kind} {hook}")) })).unwrap();
         let project = Path::new("/p/x");
         let (token, url, _) = chats.join(project, "origin/dev", "k");
         let path = url.split_once(&format!("127.0.0.1:{}", chats.port)).unwrap().1.to_string();
@@ -1092,7 +1111,11 @@ mod tests {
         // 사용자를 기다린다는 신호 (claude 권한 확인 훅): 그 참여자의 /attention/<토큰>. 모르는 토큰 404, GET 405, 다른 Host 403
         let attention = path.replacen("/mcp/", "/attention/", 1);
         assert_eq!(http(chats.port, "POST", &attention, &host, "").0, 204);
-        assert_eq!(*seen_attention.lock().unwrap(), ["origin/dev"]);
+        assert_eq!(*seen_attention.lock().unwrap(), ["origin/dev permission true"]);
+        // 터미널의 프로그램 상태에서 온 것 (pty_awaiting): 기다리는 것의 종류. 모르는 토큰은 없음
+        chats.attention(path.trim_start_matches("/mcp/"), "question", false);
+        chats.attention("nope", "question", false);
+        assert_eq!(*seen_attention.lock().unwrap(), ["origin/dev permission true", "origin/dev question false"]);
         assert_eq!(http(chats.port, "POST", "/attention/nope", &host, "").0, 404);
         assert_eq!(http(chats.port, "GET", &attention, &host, "").0, 405);
         assert_eq!(http(chats.port, "POST", &attention, "evil.example:80", "").0, 403);

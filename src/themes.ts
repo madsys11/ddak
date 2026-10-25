@@ -51,6 +51,9 @@ const dark: Theme = {
     "--focus-border": "#0078D4",
     "--menu-hover-bg": "#0078D4", // menu.selectionBackground
     "--menu-hover-fg": "#FFFFFF",
+    // 터미널 검색의 일치·지금 결과 (#RRGGBB만, xterm 검색 애드온. VS Code editor.findMatch(Highlight)Background를 배경에 섞은 색)
+    "--search-match": "#4A3B22",
+    "--search-match-active": "#9E6A03",
   },
   terminal: {
     background: "#1F1F1F",
@@ -114,6 +117,8 @@ const solarizedLight: Theme = {
     "--focus-border": "#B49471",
     "--menu-hover-bg": "#DFCA88", // list.activeSelectionBackground
     "--menu-hover-fg": "#6C6C6C",
+    "--search-match": "#F0DFA8",
+    "--search-match-active": "#E3B341",
   },
   terminal: {
     background: "#FDF6E3",

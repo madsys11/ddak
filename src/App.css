@@ -1098,3 +1098,62 @@ body.resizing {
   background: var(--accent);
   border-radius: 7px;
 }
+
+/* 터미널 검색 막대 (src/TerminalSearch.tsx): 창 오른쪽 위 (세션 창은 이름 줄 아래) */
+.terminal-search {
+  position: absolute;
+  top: 4px;
+  right: 18px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 4px;
+  background: var(--widget-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px var(--overlay);
+  font-size: 12px;
+}
+.pane.session .terminal-search {
+  top: 31px;
+}
+.terminal-search input {
+  width: 180px;
+  padding: 2px 6px;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--input-border);
+  border-radius: 3px;
+  outline: none;
+  font: inherit;
+}
+.terminal-search input:focus {
+  border-color: var(--focus-border);
+}
+.terminal-search-count {
+  min-width: 56px;
+  padding: 0 4px;
+  color: var(--fg-dim);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.terminal-search button {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  color: var(--fg-dim);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font: inherit;
+  cursor: pointer;
+}
+.terminal-search button:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.terminal-search button.on {
+  color: var(--fg);
+  border-color: var(--accent);
+}
