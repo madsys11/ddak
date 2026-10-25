@@ -46,6 +46,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             notify::set_view,
             notify::set_notify_texts,
+            notify::set_notify_sound,
             notify::set_badge,
             notify::selftest_notifications,
             notify::selftest_set_focused,

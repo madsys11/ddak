@@ -593,13 +593,18 @@ ddak 앱
     샌드박스 명령의 네트워크 승인)이 약 6초 동안 답 없이 떠 있으면 `curl -X POST {attention}`
     (`http://127.0.0.1:<포트>/attention/<토큰>`, 채팅 서버, 응답 204). 바로 답하면 울리지 않는다. `PermissionRequest`는
     네트워크 승인에서 울리지 않아 쓰지 않는다 (공식 훅 문서). async라 확인을 막지 않는다. codex는 이런 훅이 없다.
-- 보내는 곳: macOS 알림 센터 배너 + 기본 소리 (`UNUserNotificationCenter`). 제목 `ddak · <프로젝트 폴더 이름>`.
+- 보내는 곳: macOS 알림 센터 배너 + 소리 (`UNUserNotificationCenter`). 제목 `ddak · <프로젝트 폴더 이름>`.
   설치한 앱(.app 번들)에서만 보낸다 (번들 없는 실행 파일은 쓸 수 없다). 번들은 앱 식별자로 서명되어 있어야 한다 (배포 계획의
   임시 서명). 권한은 앱을 켤 때 묻는다 (처음 한 번 macOS가 묻는다).
   누르면 ddak이 앞으로 온다 (어느 프로젝트로 옮겨 가지는 않는다).
 - 보고 있으면 보내지 않는다: 창이 앞에 있고 (Tauri 창 이벤트) 그 프로젝트를 보고 있으며, 채팅 알림은 그 프로젝트의 채팅
   패널도 열려 있을 때. 보고 있는 프로젝트와 채팅 패널은 프론트가 알려 준다 (`set_view`).
 - 문구는 프론트 사전의 `notify.*`를 받는다 (`set_notify_texts`, 메뉴와 같은 방식).
+- 소리: 앱 메뉴 "알림 소리"에서 macOS 기본이나 시스템 소리(`/System/Library/Sounds`의 14개)를 고른다.
+  알림 API는 앱 번들과 앱 컨테이너의 `Library/Sounds`에서만 소리 파일을 찾으므로, 고른 소리를
+  `~/Library/Sounds/ddak-<이름>.aiff`로 복사해 그 파일 이름을 넘긴다 (다른 `ddak-*.aiff`는 지운다). 준비하지 못하면 기본 소리.
+  기본값은 Glass (macOS 기본 소리는 작아서 잘 안 들린다). 프론트 설정(`ddak.notifySound`)에 저장하고 `set_notify_sound`로 알린다.
+  고르면 (다시 골라도) 그 소리로 시험 알림을 보낸다 (제목 `ddak`, 보고 있어도 보낸다). 음량은 macOS 알림 음량을 따른다.
 - 앱 안: 사이드바 프로젝트 배지와 Dock 배지 (`set_badge`) = 사용자가 보지 않는 동안 세션이 사용자에게 보낸 메시지 수.
   "보고 있음" = 그 프로젝트의 채팅 패널이 열려 있고, 그 프로젝트가 보이고, 창이 앞에 있음 (`ChatPanel` watching). 보게 되면 지운다.
 - 자체 테스트(`DDAK_SELFTEST`)는 보내지 않고 기록한다 (`selftest_notifications`), 창 포커스는 `selftest_set_focused`로 정한다.

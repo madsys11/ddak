@@ -36,6 +36,8 @@ const RESET_PANELS: &str = "reset_panels";
 const EDIT_GROUPS: &str = "edit_groups";
 const THEME_PREFIX: &str = "theme:";
 const LOCALE_PREFIX: &str = "locale:";
+// 앱 메뉴: 알림 소리 (프론트 src/prefs.tsx NOTIFY_SOUNDS, src-tauri/src/notify.rs)
+const SOUND_PREFIX: &str = "sound:";
 
 #[derive(serde::Deserialize)]
 pub struct Choice {
@@ -49,6 +51,8 @@ pub struct MenuSpec {
     labels: HashMap<String, String>,
     themes: Vec<Choice>,
     locales: Vec<Choice>,
+    #[serde(default)]
+    sounds: Vec<Choice>,
     // 파일 트리가 보이는지 (보기 메뉴의 체크)
     #[serde(default = "shown")]
     sidebar: bool,
@@ -62,10 +66,22 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
     // 문구가 빠져 있으면 id를 그대로 보여 준다. 눈에 띄어야 고친다.
     let l = |id: &str| spec.labels.get(id).map(String::as_str).unwrap_or(id).to_owned();
 
+    let choices = |title: String, prefix: &str, list: &[Choice]| {
+        let mut sub = SubmenuBuilder::new(app, title);
+        for c in list {
+            sub = sub.item(
+                &CheckMenuItemBuilder::with_id(format!("{prefix}{}", c.id), &c.label)
+                    .checked(c.checked)
+                    .build(app)?,
+            );
+        }
+        sub.build()
+    };
     let app_menu = SubmenuBuilder::new(app, "ddak")
         .about_with_text(l("about"), None)
         .separator()
         .item(&MenuItemBuilder::with_id(EDIT_GROUPS, l(EDIT_GROUPS)).build(app)?)
+        .item(&choices(l("notify_sound"), SOUND_PREFIX, &spec.sounds)?)
         .separator()
         .services_with_text(l("services"))
         .separator()
@@ -93,17 +109,6 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         }
         terminal = terminal.item(&item.build(app)?);
     }
-    let choices = |title: String, prefix: &str, list: &[Choice]| {
-        let mut sub = SubmenuBuilder::new(app, title);
-        for c in list {
-            sub = sub.item(
-                &CheckMenuItemBuilder::with_id(format!("{prefix}{}", c.id), &c.label)
-                    .checked(c.checked)
-                    .build(app)?,
-            );
-        }
-        sub.build()
-    };
     let mut view = SubmenuBuilder::new(app, l("view"))
         .item(&MenuItemBuilder::with_id(GIT_GRAPH, l(GIT_GRAPH)).build(app)?)
         .separator()
@@ -158,6 +163,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) {
             || [GIT_GRAPH, TOGGLE_SIDEBAR, RESET_PANELS].contains(&id)
             || id.starts_with(THEME_PREFIX)
             || id.starts_with(LOCALE_PREFIX)
+            || id.starts_with(SOUND_PREFIX)
         {
             let _ = app.emit("menu", id);
         }

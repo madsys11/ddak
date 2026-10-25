@@ -6,6 +6,10 @@
 // - 자체 테스트(DDAK_SELFTEST)는 보내지 않고 기록만 한다 (selftest_notifications).
 // - 문구는 프론트 사전에서 받는다 (set_notify_texts, 메뉴와 같은 방식). 받기 전에는 영어 기본 문구.
 // - Dock 아이콘 배지: 사용자에게 온 안 읽은 메시지 수 (프론트가 센다, set_badge).
+// - 소리: 앱 메뉴 "알림 소리"에서 고른 시스템 소리 이름, "default"면 macOS 기본 소리 (set_notify_sound).
+//   UNNotificationSound는 앱 번들과 앱 컨테이너의 Library/Sounds에서만 파일을 찾는다 (Apple 문서. 시스템 소리 이름을 찾는
+//   NSSound와 다르다). 샌드박스가 없는 앱의 컨테이너는 홈이라, 고른 시스템 소리를 ~/Library/Sounds/ddak-<이름>.aiff로
+//   복사해 그 파일 이름을 넘긴다 (리뷰 R1). 다른 ddak-*.aiff는 지운다 (ddak이 만든 것만).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +26,9 @@ struct View {
 
 static VIEW: Mutex<Option<View>> = Mutex::new(None);
 static TEXTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+// 알림 소리: 고른 이름과 알림에 넘길 파일 이름 (프론트가 받기 전이나 준비하지 못하면 None = macOS 기본)
+static SOUND: Mutex<Option<String>> = Mutex::new(None);
+static SOUND_FILE: Mutex<Option<String>> = Mutex::new(None);
 // 자체 테스트가 본 알림 (제목, 본문)과 마지막 배지 수
 static SENT: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 static BADGE: Mutex<u32> = Mutex::new(0);
@@ -68,7 +75,12 @@ pub fn send(project: &Path, kind: Kind, body: &str) {
         return;
     }
     let name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let title = format!("ddak · {name}");
+    post(&format!("ddak · {name}"), body);
+}
+
+// 보고 있는지 보지 않고 보낸다 (자체 테스트는 기록, 번들이 아니면 로그)
+fn post(title: &str, body: &str) {
+    let title = title.to_string();
     if selftest() {
         SENT.lock().unwrap().push((title, body.to_string()));
         return;
@@ -77,8 +89,37 @@ pub fn send(project: &Path, kind: Kind, body: &str) {
         eprintln!("알림 (번들이 아니라 보내지 않음): {title} — {body}");
         return;
     }
+    let sound = SOUND_FILE.lock().unwrap().clone();
     #[cfg(target_os = "macos")]
-    mac::deliver(&title, body);
+    mac::deliver(&title, body, sound.as_deref());
+    #[cfg(not(target_os = "macos"))]
+    let _ = sound;
+}
+
+const SYSTEM_SOUNDS: &str = "/System/Library/Sounds";
+
+// 시스템 소리 name을 dir(~/Library/Sounds)에 ddak-<name>.aiff로 준비하고 그 파일 이름을 돌려준다.
+// 이미 같은 크기로 있으면 그대로 두고, dir의 다른 ddak-*.aiff는 지운다.
+fn prepare_sound(system: &Path, dir: &Path, name: &str) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind};
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(Error::new(ErrorKind::InvalidInput, format!("소리 이름: {name}")));
+    }
+    let src = system.join(format!("{name}.aiff"));
+    let file = format!("ddak-{name}.aiff");
+    let dst = dir.join(&file);
+    let len = std::fs::metadata(&src)?.len();
+    std::fs::create_dir_all(dir)?;
+    if std::fs::metadata(&dst).map(|m| m.len()).ok() != Some(len) {
+        std::fs::copy(&src, &dst)?;
+    }
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let other = entry.file_name().to_string_lossy().into_owned();
+        if other != file && other.starts_with("ddak-") && other.ends_with(".aiff") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(file)
 }
 
 // 채팅 메시지 본문의 첫 줄 (알림 본문에 넣는다, 너무 길면 자른다)
@@ -118,11 +159,16 @@ mod mac {
         UNUserNotificationCenter::currentNotificationCenter().requestAuthorizationWithOptions_completionHandler(options, &handler);
     }
 
-    pub fn deliver(title: &str, body: &str) {
+    // sound: ~/Library/Sounds에 준비한 파일 이름 (prepare_sound), 없으면 기본 소리
+    pub fn deliver(title: &str, body: &str, sound: Option<&str>) {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        let sound = match sound {
+            Some(file) => UNNotificationSound::soundNamed(&NSString::from_str(file)),
+            None => UNNotificationSound::defaultSound(),
+        };
+        content.setSound(Some(&sound));
         let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(&format!("ddak-{id}")), &content, None);
         UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, None);
@@ -137,6 +183,29 @@ pub fn set_view(active: Option<String>, chat_open: bool) {
         v.active = active;
         v.chat_open = chat_open;
     });
+}
+
+// 알림 소리를 정한다. preview가 있으면 그 문구로 시험 알림을 보낸다 (메뉴에서 고를 때, 보고 있어도 보낸다)
+#[tauri::command]
+pub fn set_notify_sound(sound: String, preview: Option<String>) {
+    // 자체 테스트·개발 실행은 알림을 보내지 않으니 홈에 파일을 만들지 않는다
+    let file = if sound == "default" || selftest() || !bundled() {
+        None
+    } else {
+        let dir = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Sounds"));
+        match dir.ok_or_else(|| std::io::Error::other("HOME 없음")).and_then(|d| prepare_sound(Path::new(SYSTEM_SOUNDS), &d, &sound)) {
+            Ok(file) => Some(file),
+            Err(e) => {
+                eprintln!("알림 소리 {sound} 준비 실패, 기본 소리를 씀: {e}");
+                None
+            }
+        }
+    };
+    *SOUND_FILE.lock().unwrap() = file;
+    *SOUND.lock().unwrap() = Some(sound);
+    if let Some(body) = preview {
+        post("ddak", &body);
+    }
 }
 
 #[tauri::command]
@@ -161,10 +230,10 @@ pub fn set_badge(app: tauri::AppHandle, count: u32) {
     let _ = (app, count);
 }
 
-// 자체 테스트: 보낸 알림 (가져가면 비운다)과 마지막 배지 수, 창 포커스를 정한다 (테스트 창은 포커스가 없을 수 있다)
+// 자체 테스트: 보낸 알림 (가져가면 비운다)과 마지막 배지 수, 알림 소리. 창 포커스를 정한다 (테스트 창은 포커스가 없을 수 있다)
 #[tauri::command]
-pub fn selftest_notifications() -> (Vec<(String, String)>, u32) {
-    (std::mem::take(&mut *SENT.lock().unwrap()), *BADGE.lock().unwrap())
+pub fn selftest_notifications() -> (Vec<(String, String)>, u32, Option<String>) {
+    (std::mem::take(&mut *SENT.lock().unwrap()), *BADGE.lock().unwrap(), SOUND.lock().unwrap().clone())
 }
 
 #[tauri::command]
@@ -191,5 +260,29 @@ mod tests {
         assert_eq!(first_line("\n  hello\nworld"), "hello");
         assert_eq!(first_line(&"가".repeat(130)).chars().count(), 121);
         assert_eq!(text("attention", &[("name", "g/dev")]), "g/dev is waiting for your permission");
+    }
+
+    // 고른 시스템 소리를 ddak-<이름>.aiff로 복사하고, 전에 고른 ddak-*.aiff만 지운다. 이상한 이름·없는 소리는 실패
+    #[test]
+    fn prepares_sound_file() {
+        let base = std::env::temp_dir().join(format!("ddak-sound-{}", std::process::id()));
+        let (system, dir) = (base.join("system"), base.join("Sounds"));
+        std::fs::create_dir_all(&system).unwrap();
+        std::fs::write(system.join("Glass.aiff"), "glass").unwrap();
+        std::fs::write(system.join("Hero.aiff"), "hero!").unwrap();
+        assert_eq!(prepare_sound(&system, &dir, "Glass").unwrap(), "ddak-Glass.aiff");
+        assert_eq!(std::fs::read_to_string(dir.join("ddak-Glass.aiff")).unwrap(), "glass");
+        std::fs::write(dir.join("Mine.aiff"), "mine").unwrap();
+        assert_eq!(prepare_sound(&system, &dir, "Hero").unwrap(), "ddak-Hero.aiff");
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["Mine.aiff", "ddak-Hero.aiff"]);
+        assert!(prepare_sound(&system, &dir, "Funk").is_err());
+        assert!(prepare_sound(&system, &dir, "../Hero").is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+        // 실제 시스템 소리 폴더에 메뉴의 14개가 있다 (src/prefs.tsx NOTIFY_SOUNDS)
+        for name in ["Basso", "Blow", "Bottle", "Frog", "Funk", "Glass", "Hero", "Morse", "Ping", "Pop", "Purr", "Sosumi", "Submarine", "Tink"] {
+            assert!(Path::new(SYSTEM_SOUNDS).join(format!("{name}.aiff")).exists(), "{name}");
+        }
     }
 }

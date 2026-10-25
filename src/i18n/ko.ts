@@ -86,6 +86,7 @@ export const ko: Messages = {
   "sidebar.unread": "나에게 온 메시지 {n}개",
   "notify.paused": "{group}: 사용자 없이 세션끼리 {n}개를 주고받아 자동 알림을 멈췄습니다",
   "notify.attention": "{name}이(가) 권한 확인을 기다립니다",
+  "notify.sound": "알림 소리: {sound}",
   "chat.title": "채팅",
   "chat.toggle": "채팅",
   "chat.close": "채팅 닫기",
@@ -183,6 +184,8 @@ export const ko: Messages = {
 
   "menu.about": "ddak에 관하여",
   "menu.edit_groups": "작업그룹 설정…",
+  "menu.notify_sound": "알림 소리",
+  "menu.sound_default": "macOS 기본",
   "menu.services": "서비스",
   "menu.hide": "ddak 가리기",
   "menu.hideOthers": "기타 가리기",

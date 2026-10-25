@@ -502,6 +502,41 @@ async function testPrefs() {
   check("테마: 다크로 돌아오면 터미널도 다크", termBg("#1F1F1F"));
 }
 
+// 알림 소리 (앱 메뉴 "알림 소리", src/prefs.tsx NOTIFY_SOUNDS, src-tauri/src/notify.rs): 기본은 Glass. 고르면 저장하고 Rust의
+// 알림 소리가 바뀌며, 그 소리로 시험 알림을 보낸다 (같은 것을 다시 골라도). 실제 소리는 설치한 앱에서만 난다.
+async function testNotifySound() {
+  const notes = () => invoke<[[string, string][], number, string | null]>("selftest_notifications");
+  const soundMenu = (m: string[]) => m.filter((x) => x.startsWith("ddak/Notification Sound/") && !x.endsWith("/"));
+  const first = await waitMenu((m) => soundMenu(m).length > 0);
+  const [, , initial] = await notes();
+  check(
+    "알림 소리: 앱 메뉴에 기본 + 시스템 소리 14개, 처음엔 Glass",
+    soundMenu(first).length === 15 && first.includes("ddak/Notification Sound/macOS Default") && first.includes("ddak/Notification Sound/Glass [x]") && initial === "Glass",
+    `${initial} | ${soundMenu(first).join(", ")}`,
+  );
+  await clickMenu("ddak", "Notification Sound", "Hero");
+  const picked = await waitMenu((m) => m.includes("ddak/Notification Sound/Hero [x]") && m.includes("ddak/Notification Sound/Glass"));
+  const [sent, , sound] = await notes();
+  check(
+    "알림 소리: 고르면 저장·체크가 옮겨지고 그 소리로 시험 알림",
+    picked.includes("ddak/Notification Sound/Hero [x]") && !picked.includes("ddak/Notification Sound/Glass [x]") && localStorage.getItem("ddak.notifySound") === "Hero" &&
+      sound === "Hero" && sent.some(([t, b]) => t === "ddak" && b === "Notification sound: Hero"),
+    `${sound} ${localStorage.getItem("ddak.notifySound")} ${JSON.stringify(sent)} | ${soundMenu(picked).filter((x) => x.endsWith("[x]")).join(", ")}`,
+  );
+  // 이미 고른 것을 다시 누르면 muda가 체크를 끈다. 프론트가 다시 맞추고, 시험 알림은 또 보낸다
+  await clickMenu("ddak", "Notification Sound", "Hero");
+  const again = await waitMenu((m) => m.includes("ddak/Notification Sound/Hero [x]"));
+  const [sentAgain] = await notes();
+  check("알림 소리: 다시 골라도 체크 유지, 시험 알림 다시", again.includes("ddak/Notification Sound/Hero [x]") && sentAgain.length === 1, JSON.stringify(sentAgain));
+  await clickMenu("ddak", "Notification Sound", "macOS Default");
+  await waitMenu((m) => m.includes("ddak/Notification Sound/macOS Default [x]"));
+  const [sentDefault, , def] = await notes();
+  check("알림 소리: macOS 기본", def === "default" && sentDefault.some(([, b]) => b === "Notification sound: macOS Default"), `${def} ${JSON.stringify(sentDefault)}`);
+  await clickMenu("ddak", "Notification Sound", "Glass");
+  await waitMenu((m) => m.includes("ddak/Notification Sound/Glass [x]"));
+  await notes();
+}
+
 // 화면 배율: 보기 메뉴(⌘= ⌘- ⌘0)로 웹뷰 전체를 키우고 줄인다.
 // 배율을 바꾸면 CSS 픽셀 기준 창 폭(innerWidth)이 반비례로 바뀌고, 터미널 칸 수도 따라 바뀐다.
 async function testZoom(term: Terminal) {
@@ -3041,6 +3076,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["groupWorktree", () => testGroupWorktree(root, t())],
     ["tabRename", testTabRename],
     ["prefs", testPrefs],
+    ["notifySound", testNotifySound],
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],

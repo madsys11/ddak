@@ -86,6 +86,7 @@ export const en = {
   "sidebar.unread": "{n} messages for you",
   "notify.paused": "{group}: sessions exchanged {n} messages without you, so automatic notifications are paused",
   "notify.attention": "{name} is waiting for your permission",
+  "notify.sound": "Notification sound: {sound}",
   "chat.title": "Chat",
   "chat.toggle": "Chat",
   "chat.close": "Close Chat",
@@ -184,6 +185,8 @@ export const en = {
   // 네이티브 메뉴 (src-tauri/src/menu.rs가 "menu." 뒤의 이름으로 찾는다)
   "menu.about": "About ddak",
   "menu.edit_groups": "Work Groups…",
+  "menu.notify_sound": "Notification Sound",
+  "menu.sound_default": "macOS Default",
   "menu.services": "Services",
   "menu.hide": "Hide ddak",
   "menu.hideOthers": "Hide Others",
