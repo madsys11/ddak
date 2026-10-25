@@ -132,22 +132,54 @@ fn bundled() -> bool {
     std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
 }
 
-// 앱이 뜰 때: 알림 권한을 묻는다 (처음 한 번만 macOS가 묻고, 그 뒤로는 저장된 답을 쓴다)
+// 앱이 뜰 때: 알림 권한을 묻고 (처음 한 번만 macOS가 묻고, 그 뒤로는 저장된 답을 쓴다), 앞에 있을 때도 보이게 한다
 pub fn init() {
     if bundled() && !selftest() {
         #[cfg(target_os = "macos")]
-        mac::authorize();
+        {
+            mac::present_in_front();
+            mac::authorize();
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use block2::RcBlock;
-    use objc2::runtime::Bool;
+    use block2::{DynBlock, RcBlock};
+    use objc2::rc::Retained;
+    use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{AllocAnyThread, define_class, msg_send};
     use objc2_foundation::{NSError, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound, UNUserNotificationCenter,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationPresentationOptions, UNNotificationRequest,
+        UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
+
+    // 앱이 앞에 있을 때 알림을 어떻게 보일지 위임자의 willPresent로 정한다: 배너·목록·소리. 보낼지는 send가 이미 정했으므로
+    // (보고 있으면 보내지 않는다) 온 것은 다 보인다: 다른 프로젝트의 알림, 메뉴에서 소리를 고를 때의 시험 알림.
+    // (2026-10-25 설치 후 사용자 확인: ddak이 앞에 있을 때 소리를 바꿔도 아무것도 안 들림. 이것이 원인인지는 설치 후 확인)
+    define_class!(
+        // SAFETY: NSObject는 하위 클래스 조건이 없고, Drop을 구현하지 않는다.
+        #[unsafe(super(NSObject))]
+        #[name = "DdakNotificationDelegate"]
+        struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl UNUserNotificationCenterDelegate for Delegate {
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present(&self, _center: &UNUserNotificationCenter, _notification: &UNNotification, handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>) {
+                handler.call((UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List | UNNotificationPresentationOptions::Sound,));
+            }
+        }
+    );
+
+    pub fn present_in_front() {
+        let delegate: Retained<Delegate> = unsafe { msg_send![super(Delegate::alloc().set_ivars(())), init] };
+        UNUserNotificationCenter::currentNotificationCenter().setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        // 위임자는 약한 참조라 앱이 끝날 때까지 둔다
+        std::mem::forget(delegate);
+    }
 
     pub fn authorize() {
         let handler = RcBlock::new(|granted: Bool, _error: *mut NSError| {
