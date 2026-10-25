@@ -7,6 +7,7 @@ import { devHooks, liveTerms } from "./devHooks";
 import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus } from "./programStatus";
 import { LOCALES } from "./i18n";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
@@ -1418,6 +1419,90 @@ function testWorkspaceStateUnit() {
 }
 
 // 터미널 자동 응답 판별 (깨우기의 사용자 입력에서 뺀다, src/Terminal.tsx isTerminalReply)
+// 앞에서 도는 프로그램의 상태 (src/programStatus.ts): OSC 7501 해석과 화면의 선택 창 판단
+function testProgramStatusUnit() {
+  const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
+  const cases: [string, unknown][] = [
+    ["?", "query"],
+    [" ? ", "query"],
+    ["state=idle:app=claude-code", { state: "idle" }],
+    [`state=blocked:app=claude-code:kind=permission:msg=${b64("approve Bash: ls")}`, { state: "blocked", kind: "permission", msg: "approve Bash: ls" }],
+    ["state=working:kind=permission", { state: "working" }],
+    ["state=blocked:kind=nope", { state: "blocked" }],
+    ["state=clear", "clear"],
+    ["state=blocked:id=sub/1", null],
+    ["state=sleeping", null],
+    ["kind=permission", null],
+    [`state=done:msg=${b64("a\u0007b")}`, { state: "done" }],
+    [`state=done:msg=${b64("한글 요약")}`, { state: "done", msg: "한글 요약" }],
+  ];
+  const bad = cases.filter(([body, want]) => JSON.stringify(parseProgramStatus(body)) !== JSON.stringify(want)).map(([b]) => b);
+  check("프로그램 상태: OSC 7501 본문 해석 (물음, 상태·종류·msg, 지움, 하위 기록·모르는 상태는 버림)", bad.length === 0, bad.join(" | "));
+  check("프로그램 상태: 물음의 답", PROGRAM_STATUS_REPLY === "\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\");
+  // 실제 화면에서 본 모양 (claude 2.1.310 폴더 신뢰 창, codex 승인 창)과 선택 창이 아닌 것
+  const dialogs: string[][] = [
+    ["Quick safety check: Is this a project you created or one you trust?", "", "❯ 1. Yes, I trust this folder", "  2. No, exit", "", "Enter to confirm · Esc to cancel"],
+    ["Do you want to proceed?", "❯ 1. Yes", "  2. No"],
+    ["Would you like to run the following command?", "› 1. Yes, proceed (y)", "  2. No (esc)", "Press enter to confirm or esc to cancel"],
+  ];
+  const plain: string[][] = [
+    ["$ ls", "1. first item", "2. second item", "$ "],
+    ["❯ 1. lonely option", "", "", "text"],
+    ["Enter the folder name", "$ "],
+  ];
+  check(
+    "프로그램 상태: 화면 아래쪽의 선택 창 (claude·codex) / 번호 목록·안내문은 아님",
+    dialogs.every((d) => dialogOnScreen(d)) && plain.every((p) => !dialogOnScreen(p)),
+    `${dialogs.map((d) => dialogOnScreen(d))} ${plain.map((p) => dialogOnScreen(p))}`,
+  );
+  // 선택 창이 오래 남으면 (DIALOG_CAP) 풀린다. blocked는 상한 없음
+  const now = 1_000_000_000;
+  check(
+    "프로그램 상태: 기다림 = blocked 또는 상한 안의 선택 창",
+    awaitingUser({ state: "blocked" }, undefined, now) && !awaitingUser({ state: "working" }, undefined, now) &&
+      awaitingUser(undefined, now - 1000, now) && !awaitingUser(undefined, now - DIALOG_CAP_MS, now),
+  );
+}
+
+// 앞에서 도는 프로그램의 상태 (src/programStatus.ts, Terminal.tsx): 물음에 답하고, 보고와 화면의 선택 창으로 이름표의 상태와
+// Rust의 "기다림"(깨우기를 미룸, pty_awaiting)이 바뀐다
+async function testProgramStatus(term: Terminal) {
+  const pane = visiblePanes().find((p) => p.term === term)!;
+  const ptyId = Number(pane.el.querySelector<HTMLElement>(".terminal")?.dataset.pty);
+  const awaiting = () => invoke<boolean | null>("selftest_pty_awaiting", { id: ptyId });
+  const badge = () => pane.el.querySelector<HTMLElement>(".pane-label .pane-badge.status");
+  const shows = (what: string | null, wait: boolean) => async () => (badge()?.textContent ?? null) === what && (await awaiting()) === wait;
+  // 본문은 셸 따옴표 안에 넣을 수 있는 글자만 쓴다 (msg는 base64)
+  const report = (body: string) => run(term, `printf '\\033]7501;%s\\033\\\\' '${body}'`);
+  // 물음: 다른 입력처럼 PTY로 답이 간다 (head가 받아 cat -v로 보인다)
+  const reply = await run(term, String.raw`stty -icanon -echo min 0 time 20; printf '\033]7501;?\033\\'; head -c 200 | cat -v; echo; stty sane`, 15000);
+  check(
+    "프로그램 상태: OSC 7501 물음에 답함 (받는 상태·종류)",
+    reply.some((l) => l.includes("^[]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth^[\\")),
+    reply.filter((l) => l.includes("7501")).join(" | "),
+  );
+  await report(`state=blocked:kind=permission:msg=${btoa("approve Bash: ls")}`);
+  const blocked = await waitAsync("권한 대기 표시", shows("waiting for permission", true), 3000).then(() => true, () => false);
+  check("프로그램 상태: blocked(permission)이면 이름표에 권한 확인 대기, 깨우기 미룸", blocked && badge()?.title.startsWith("approve Bash: ls") === true, `${badge()?.textContent} ${await awaiting()} ${badge()?.title}`);
+  await report("state=working");
+  const working = await waitAsync("작업 중 표시", shows("working", false), 3000).then(() => true, () => false);
+  check("프로그램 상태: working이면 작업 중, 깨우기 미루지 않음", working, `${badge()?.textContent} ${await awaiting()}`);
+  // 하위 기록(id)은 보지 않는다
+  await report("state=blocked:id=sub1");
+  await sleep(300);
+  check("프로그램 상태: 하위 기록(id)은 무시", (await shows("working", false)()), `${badge()?.textContent} ${await awaiting()}`);
+  // 상태를 알리지 않는 선택 창 (폴더 신뢰 등): 화면으로 본다
+  await run(term, String.raw`printf 'Allow this?\n\342\235\257 1. Yes\n  2. No\nEnter to confirm \302\267 Esc to cancel\n'`);
+  const dialog = await waitAsync("선택 대기 표시", shows("waiting for a choice", true), 3000).then(() => true, () => false);
+  check("프로그램 상태: 화면에 선택 창이 보이면 선택 대기, 깨우기 미룸", dialog, `${badge()?.textContent} ${await awaiting()}`);
+  term.input("clear\r");
+  const cleared = await waitAsync("선택 창 사라짐", shows("working", false), 5000).then(() => true, () => false);
+  check("프로그램 상태: 선택 창이 사라지면 풀림", cleared, `${badge()?.textContent} ${await awaiting()}`);
+  await report("state=idle");
+  const idle = await waitAsync("상태 없음", async () => !badge() && (await awaiting()) === false, 3000).then(() => true, () => false);
+  check("프로그램 상태: idle이면 이름표에 상태 없음", idle, `${badge()?.textContent}`);
+}
+
 function testTerminalReplyUnit() {
   // xterm 6.0이 만드는 응답 전부 (src/Terminal.tsx 주석)
   const replies = [
@@ -1653,6 +1738,14 @@ async function testGroupWorktree(root: string, first: Terminal) {
   await ready(g.term);
   const pwd = (await run(g.term, "pwd")).map((l) => l.trim()).find((l) => l.startsWith("/")) ?? "";
   check("작업그룹 추가: 터미널이 worktree 폴더에서 시작 (DDAK_HOME/worktrees/<프로젝트>-<해시>/test-1)", /\/home-main\/worktrees\/proj-[0-9a-f]{6}\/test-1$/.test(pwd), pwd);
+  // claude 폴더 신뢰 (src-tauri/src/claude_trust.rs, 자체 테스트는 DDAK_HOME/claude.json): 원본 프로젝트를 신뢰했으니
+  // (scripts/selftest.sh) 작업그룹 폴더도 신뢰로 적히고, 다른 항목은 남는다
+  const trust = (await run(g.term, `tr -d ' \\n' < "$DDAK_HOME/claude.json"; echo`)).join("");
+  check(
+    "작업그룹 추가: 원본을 claude가 신뢰하면 작업그룹 폴더도 신뢰로 적음",
+    trust.includes(`"${pwd}":{"hasTrustDialogAccepted":true}`) && trust.includes(`"${root}":{"hasTrustDialogAccepted":true,"keep":1}`),
+    trust.slice(0, 400),
+  );
 
   const out = async (cmd: string) => (await run(g.term, cmd)).map((l) => l.trim()).filter(Boolean);
   const branches = await out("for d in server web cloned linked; do printf '%s=' $d; git -C $d branch --show-current; done");
@@ -3081,6 +3174,8 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
+    ["programStatusUnit", testProgramStatusUnit],
+    ["programStatus", () => testProgramStatus(t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],
     ["webglLoss", () => testWebglLoss(t())],
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다

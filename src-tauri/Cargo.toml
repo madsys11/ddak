@@ -20,7 +20,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: 사용자의 claude 설정을 다시 쓸 때 키 순서를 그대로 둔다 (claude_trust.rs)
+serde_json = { version = "1", features = ["preserve_order"] }
 portable-pty = "0.9.0"
 tauri-plugin-dialog = "2.8.3"
 notify = "8"

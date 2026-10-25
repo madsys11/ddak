@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod chat;
+mod claude_trust;
 mod clone;
 mod fs;
 mod git;
@@ -87,6 +88,8 @@ pub fn run() {
             chat::chat_resume,
             pty::pty_write,
             pty::pty_foreground,
+            pty::pty_awaiting,
+            pty::selftest_pty_awaiting,
             pty::pty_resize,
             pty::pty_kill,
             pty::chat_wake_now,

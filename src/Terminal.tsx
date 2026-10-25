@@ -9,6 +9,7 @@ import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
 import { draggedPath, isPathDrag, shellQuote } from "./dragPath";
 import { fixImeInput, passesImeKey } from "./hangul";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, type ProgramStatus } from "./programStatus";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 
@@ -55,6 +56,8 @@ type Props = {
   chat?: { project: string; name: string; key: string };
   // 채팅 깨우기를 기다리는지 바뀔 때 (src-tauri/src/pty.rs wake). wakeNow: 기다리지 않고 바로 깨운다
   onWake?: (pending: boolean, wakeNow: () => void) => void;
+  // 앞에서 도는 프로그램의 상태(OSC 7501)와 사용자를 기다리는지(그 상태나 화면의 선택 창)가 바뀔 때 (src/programStatus.ts)
+  onStatus?: (status: ProgramStatus | undefined, awaiting: boolean) => void;
 };
 
 // xterm이 프로그램의 질의에 스스로 보내는 응답 (xterm 6.0 InputHandler·CoreBrowserTerminal의 triggerDataEvent 전부):
@@ -69,13 +72,13 @@ export const isTerminalReply = (data: string) =>
   /^\x1b\][\s\S]*(\x07|\x1b\\)$/.test(data) ||
   /^\x1bP[\s\S]*\x1b\\$/.test(data);
 
-export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake }: Props) {
+export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake, onStatus }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
 
   useEffect(() => {
     const el = ref.current!;
@@ -125,6 +128,9 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
 
     let id: number | undefined;
     let disposed = false;
+    // PTY가 생기면 풀린다 (그 전에 온 OSC 7501 물음의 답을 기다렸다 보낸다)
+    let gotId: (id: number) => void = () => {};
+    const idReady = new Promise<number>((resolve) => (gotId = resolve));
     // 출력(바이트)과 마지막의 종료({exit})가 같은 채널로 순서대로 온다 (src-tauri/src/pty.rs pty_spawn).
     // 채널은 spawn 전에 만들어서, 생성 응답보다 먼저 끝나도 종료를 잃지 않는다.
     const onData = new Channel<ArrayBuffer | { exit: number | null }>();
@@ -171,7 +177,9 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
           return;
         }
         id = newId;
+        gotId(newId);
         if (import.meta.env.DEV) el.dataset.pty = String(newId);
+        if (awaiting) invoke("pty_awaiting", { id: newId, awaiting });
         if (early.has(newId)) wake(early.get(newId)!);
         early.clear();
       },
@@ -221,6 +229,54 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
         })
         .catch(() => {});
     };
+    // 앞에서 도는 프로그램이 사용자를 기다리는지 (src/programStatus.ts). 기다리는 동안 Rust는 깨우기를 미룬다 (pty_awaiting).
+    let status: ProgramStatus | undefined;
+    let dialogSince: number | undefined;
+    let dialogCap: ReturnType<typeof setTimeout> | undefined;
+    let awaiting = false;
+    let shown: { status?: ProgramStatus; awaiting: boolean } = { awaiting: false };
+    const report = () => {
+      const next = awaitingUser(status, dialogSince, Date.now());
+      if (next !== awaiting) {
+        awaiting = next;
+        if (id !== undefined) invoke("pty_awaiting", { id, awaiting: next }).catch(() => {});
+      }
+      if (shown.status !== status || shown.awaiting !== next) {
+        shown = { status, awaiting: next };
+        latest.current.onStatus?.(status, next);
+      }
+    };
+    // OSC 7501: 물음에는 다른 입력과 같은 차례로 답하고 (사용자 입력 아님. claude는 물음 바로 뒤에 장치 속성을 물어서, 그 답보다
+    // 먼저 가야 한다), 보고는 상태로. 화면에는 아무것도 그리지 않는다.
+    const programStatus = term.parser.registerOscHandler(7501, (body) => {
+      const parsed = parseProgramStatus(body);
+      if (parsed === "query") {
+        sending = sending.then(() => idReady).then((target) => invoke("pty_write", { id: target, data: PROGRAM_STATUS_REPLY, user: false })).catch(() => {});
+      } else if (parsed) {
+        status = parsed === "clear" ? undefined : parsed;
+        report();
+      }
+      return true;
+    });
+    // 화면 아래쪽의 선택 창 (출력을 그린 뒤 잠시 모아서 본다)
+    let dialogCheck: ReturnType<typeof setTimeout> | undefined;
+    const checkDialog = () => {
+      dialogCheck = undefined;
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      for (let y = buf.baseY; y < buf.baseY + term.rows; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+      if (!dialogOnScreen(lines)) {
+        dialogSince = undefined;
+        clearTimeout(dialogCap);
+      } else if (dialogSince === undefined) {
+        dialogSince = Date.now();
+        dialogCap = setTimeout(report, DIALOG_CAP_MS);
+      }
+      report();
+    };
+    const parsed = term.onWriteParsed(() => {
+      if (dialogCheck === undefined) dialogCheck = setTimeout(checkDialog, 100);
+    });
     const input = term.onData((data) => {
       if (id === undefined) return;
       const target = id;
@@ -245,6 +301,10 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       el.removeEventListener("drop", onDrop);
       observer.disconnect();
       input.dispose();
+      programStatus.dispose();
+      parsed.dispose();
+      clearTimeout(dialogCheck);
+      clearTimeout(dialogCap);
       unfixIme();
       resize.dispose();
       title.dispose();

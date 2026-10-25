@@ -59,6 +59,9 @@ cat > "$base/data-restart/groups.json" <<'JSON'
 JSON
 
 printf '{"projects":[{"path":"%s"}],"active":"%s"}' "$root" "$root" > "$base/data-resume/projects.json"
+# claude 설정 대신 (src-tauri/src/claude_trust.rs): 원본 프로젝트를 신뢰한 상태. 작업그룹을 만들면 그 폴더도 신뢰로 적힌다
+mkdir -p "$base/home-main"
+printf '{"projects":{"%s":{"hasTrustDialogAccepted":true,"keep":1}}}' "$root" > "$base/home-main/claude.json"
 # resume: 두 번 켠다 (resume-save가 남긴 상태를 resume-check가 복원). keeps는 복원 인자로 이어 가고,
 # fresh는 복원 인자가 실패해 처음 인자로 돌아간다. keeps의 역할(KP1)은 둘 사이에 KP2로 바꾼다: 복원은 세션을 만들 때
 # 저장한 프롬프트({prompt})를 써야 한다.

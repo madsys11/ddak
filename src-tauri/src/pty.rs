@@ -54,6 +54,24 @@ struct Session {
     chat_token: Option<String>,
     // 사용자의 마지막 입력 (깨우기가 입력 중인지 본다)
     input: Input,
+    // 앞에서 도는 프로그램이 사용자를 기다린다 (권한 확인·선택 창 등. 프론트가 알린다, pty_awaiting). 그동안 깨우지 않는다.
+    // awaiting_changed: 마지막으로 바뀐 때, awaiting_changes: 바뀐 횟수 (기다리는 동안 친 키를 초안과 구분한다. 확인 사이에
+    // 기다림이 시작되고 끝나도 횟수로 안다)
+    awaiting: bool,
+    awaiting_changed: Option<Instant>,
+    awaiting_changes: u64,
+    // 알림을 쓰고 Enter를 보낼 차례를 기다린다 (wake_tick)
+    enter: Option<Enter>,
+}
+
+// 알림을 쓴 뒤 보낼 Enter. at: 알림을 쓴 때, before: 그때의 사용자 입력, force: 바로 깨우기(사용자가 누름)라 기다려도 보냄,
+// changes: 그때의 기다림 변경 횟수 (달라졌으면 그 뒤 프로그램이 사용자를 기다린 적이 있다)
+#[derive(Clone, Copy)]
+struct Enter {
+    at: Instant,
+    before: Input,
+    force: bool,
+    changes: u64,
 }
 
 // 사용자 입력 (pty_write). 깨우기는 치는 중(선택지를 고르는 중 포함)에 끼어들지 않게, IDLE 동안 입력이 없을 때만 알림을
@@ -249,7 +267,7 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE })
+    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_changed: None, awaiting_changes: 0, enter: None })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -660,19 +678,38 @@ pub fn wake_all(ptys: &Ptys, items: &[(String, String)]) -> Vec<(u32, u64)> {
     ids.into_iter().map(|id| (id, ptys.wake_seq.fetch_add(1, Ordering::Relaxed) + 1)).collect()
 }
 
-// 깨우기를 기다리는 터미널을 본다 (주기적으로, now는 지금). 사용자가 입력 중이 아니거나 바로 깨우기를 눌렀으면 알림을
-// 쓰고, WAKE_GAP 뒤에 그 사이 사용자가 입력하지 않았으면 Enter를 보낸다. 입력했으면 Enter를 보내지 않는다 (알림이
-// 초안과 함께 제출되지 않게). 대기에서 빠진 터미널과 변경 번호 (깨웠거나, 터미널이 없어져 그만둠)
+// 깨우기를 기다리는 터미널을 본다 (주기적으로, now는 지금). 사용자가 입력 중이 아니고 프로그램이 사용자를 기다리지 않으면
+// (또는 바로 깨우기를 눌렀으면) 알림을 쓰고, WAKE_GAP 뒤의 확인에서 Enter를 보낸다. 그 사이 사용자가 입력했으면 Enter를
+// 보내지 않는다 (알림이 초안과 함께 제출되지 않게. 사용자가 Enter를 치면 함께 제출된다).
+// 프로그램이 사용자를 기다리는 동안은 알림도 Enter도 미룬다: Enter가 선택 창의 답을 고르지 않게 (docs/reviews/2026-10-25-wake-hold.md).
+// 미룬 Enter는 기다림이 끝나면 보낸다. 기다리는 동안 친 키(선택 창의 답)는 초안으로 보지 않고, 끝난 뒤에 친 것만 본다.
+// 바로 깨우기는 기다려도 알림과 Enter를 보낸다 (사용자가 고른 것). Enter를 기다리는 터미널에는 다음 알림을 쓰지 않는다.
+// 대기에서 빠진 터미널과 변경 번호 (알림을 썼거나, 터미널이 없어져 그만둠)
 pub fn wake_tick(ptys: &Ptys, now: Instant) -> Vec<(u32, u64)> {
     let mut sessions = ptys.sessions.lock().unwrap();
     let mut wakes = ptys.wakes.lock().unwrap();
+    for session in sessions.values_mut() {
+        let Some(e) = session.enter else { continue };
+        // 기다리는 동안은 무엇을 쳐도 (선택지 고르기·답) Enter를 둔다
+        if session.awaiting && !e.force {
+            continue;
+        }
+        // 알림 뒤에 기다린 적이 있으면 그 기다림이 끝난 뒤에 친 키만 초안이다
+        let since = if session.awaiting_changes != e.changes { e.before.last.max(session.awaiting_changed) } else { e.before.last };
+        if session.input.last > since {
+            session.enter = None;
+        } else if now >= e.at + WAKE_GAP {
+            let _ = session.writer.write_all(b"\r");
+            session.enter = None;
+        }
+    }
     let (mut woke, mut gone) = (Vec::new(), Vec::new());
     for (id, p) in wakes.iter() {
         let Some(session) = sessions.get_mut(id) else {
             gone.push(*id);
             continue;
         };
-        if !(p.now || session.input.quiet(now)) {
+        if session.enter.is_some() || !(p.now || (session.input.quiet(now) && !session.awaiting)) {
             continue;
         }
         if session.writer.write_all(wake_notice(&p.from).as_bytes()).is_err() {
@@ -680,15 +717,7 @@ pub fn wake_tick(ptys: &Ptys, now: Instant) -> Vec<(u32, u64)> {
             continue;
         }
         woke.push(*id);
-        let (all, id, before) = (ptys.sessions.clone(), *id, session.input);
-        std::thread::spawn(move || {
-            std::thread::sleep(WAKE_GAP);
-            if let Some(s) = all.lock().unwrap().get_mut(&id) {
-                if s.input == before {
-                    let _ = s.writer.write_all(b"\r");
-                }
-            }
-        });
+        session.enter = Some(Enter { at: now, before: session.input, force: p.now, changes: session.awaiting_changes });
     }
     woke.into_iter()
         .chain(gone)
@@ -710,6 +739,18 @@ pub fn start_waker(app: tauri::AppHandle) {
     });
 }
 
+// 앞에서 도는 프로그램이 사용자를 기다리는지 (프론트 src/Terminal.tsx: OSC 7501 blocked, 화면의 선택 창)
+#[tauri::command]
+pub fn pty_awaiting(ptys: State<'_, Ptys>, id: u32, awaiting: bool) {
+    ptys.set_awaiting(id, awaiting);
+}
+
+// 자체 테스트: 그 터미널이 사용자를 기다린다고 알려졌는지
+#[tauri::command]
+pub fn selftest_pty_awaiting(ptys: State<'_, Ptys>, id: u32) -> Option<bool> {
+    ptys.sessions.lock().unwrap().get(&id).map(|s| s.awaiting)
+}
+
 // 깨우기를 기다리는 터미널을 사용자가 눌러 바로 깨운다 (다음 확인 때)
 #[tauri::command]
 pub fn chat_wake_now(ptys: State<'_, Ptys>, id: u32) {
@@ -719,6 +760,16 @@ pub fn chat_wake_now(ptys: State<'_, Ptys>, id: u32) {
 }
 
 impl Ptys {
+    fn set_awaiting(&self, id: u32, awaiting: bool) {
+        if let Some(s) = self.sessions.lock().unwrap().get_mut(&id) {
+            if s.awaiting != awaiting {
+                s.awaiting = awaiting;
+                s.awaiting_changed = Some(Instant::now());
+                s.awaiting_changes += 1;
+            }
+        }
+    }
+
     // 깨우기를 기다리는 터미널의 채팅 토큰 (채팅 패널의 대기 표시, chat.rs chat_waiting)
     pub fn waiting_tokens(&self) -> Vec<String> {
         let sessions = self.sessions.lock().unwrap();
@@ -1103,10 +1154,12 @@ mod tests {
         let joined = Joined { leave: Box::new(|| ()), token: "tok".into() };
         let id = open(&ptys, "/", Some(&argv), None, false, SIZE, move |b| { sink.lock().unwrap().extend(b); true }, |_| (), Some(joined)).unwrap();
         let text = || String::from_utf8_lossy(&out.lock().unwrap()).to_string();
+        // 기다리는 동안 확인을 돌린다 (Enter는 알림을 쓴 뒤 WAKE_GAP이 지난 확인에서 간다)
         let wait = |what: &str| {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !text().contains(what) {
                 assert!(Instant::now() < deadline, "{what} 없음: {:?}", text());
+                wake_tick(&ptys, Instant::now() + WAKE_IDLE + WAKE_GAP);
                 std::thread::sleep(Duration::from_millis(50));
             }
         };
@@ -1142,7 +1195,8 @@ mod tests {
         wake(&ptys, &["tok".into()], "origin/c");
         assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
         write_input(&ptys, id, "y", true).unwrap();
-        std::thread::sleep(WAKE_GAP * 3);
+        wake_tick(&ptys, Instant::now() + WAKE_IDLE + WAKE_GAP);
+        std::thread::sleep(Duration::from_millis(300));
         assert!(!text().contains("GOT:[ddak] New chat message from origin/c"), "사용자 입력 뒤에 Enter를 보냄");
         write_input(&ptys, id, "\r", true).unwrap();
         wait("from origin/c. Read it with the ddak read_messages tool. Post with post_message only what moves the work: a result someone asked for, a needed request or question, or a concrete blocker. Do not post acknowledgements. @mention only someone who must act next or who asked for what you deliver.y");
@@ -1166,6 +1220,92 @@ mod tests {
         wake(&ptys, &["tok".into()], "origin/e");
         close(&ptys, id);
         assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "없어진 터미널을 그만두지 않음");
+    }
+
+    // 프로그램이 사용자를 기다리는 동안(선택 창 등)은 알림도 Enter도 미루고, 끝나면 보낸다 (Enter가 선택 창의 답을 고르지
+    // 않게). 기다리는 동안 친 키(선택 창의 답)는 초안으로 보지 않고, 끝난 뒤에 친 키는 초안으로 본다 (Enter를 보내지 않음).
+    // 바로 깨우기(사용자가 누름)는 기다려도 알림과 Enter를 보낸다 (리뷰 R2·R3).
+    #[test]
+    fn wake_holds_while_program_awaits_user() {
+        let ptys = Ptys::default();
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let sink = out.clone();
+        let argv: Vec<String> = ["/bin/sh", "-c", "stty -echo; while read l; do echo \"GOT:$l\"; done"].iter().map(|a| a.to_string()).collect();
+        let joined = Joined { leave: Box::new(|| ()), token: "tok".into() };
+        let id = open(&ptys, "/", Some(&argv), None, false, SIZE, move |b| { sink.lock().unwrap().extend(b); true }, |_| (), Some(joined)).unwrap();
+        let text = || String::from_utf8_lossy(&out.lock().unwrap()).to_string();
+        let tick = || wake_tick(&ptys, Instant::now() + WAKE_IDLE + WAKE_GAP);
+        let wait = |what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !text().contains(what) {
+                assert!(Instant::now() < deadline, "{what} 없음: {:?}", text());
+                tick();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        // 몇 번 확인을 돌려도 Enter가 가지 않았는지
+        let no_enter = |what: &str, why: &str| {
+            for _ in 0..4 {
+                tick();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!text().contains(what), "{why}: {:?}", text());
+        };
+        let notice = |from: &str| format!("GOT:[ddak] New chat message from {from}.");
+        std::thread::sleep(Duration::from_millis(300));
+        ptys.set_awaiting(id, true);
+        wake(&ptys, &["tok".into()], "origin/a");
+        assert!(tick().is_empty(), "기다리는 중에 알림을 씀");
+        ptys.set_awaiting(id, false);
+        assert_eq!(tick().iter().map(|w| w.0).collect::<Vec<_>>(), [id], "끝난 뒤에 알림을 쓰지 않음");
+        wait(&notice("origin/a"));
+
+        // 알림을 쓴 뒤 Enter 전에 기다리게 되면 미룬다. 기다리는 동안 친 키(선택지 고르기·답)는 초안이 아니다: 끝나면 Enter 한 번.
+        // 답 키 뒤에도 기다리는 채로 확인이 돈다 (리뷰 2차 R3)
+        wake(&ptys, &["tok".into()], "origin/b");
+        assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        ptys.set_awaiting(id, true);
+        no_enter(&notice("origin/b"), "기다리는 중에 Enter를 보냄");
+        write_input(&ptys, id, "1", true).unwrap();
+        no_enter(&notice("origin/b"), "기다리는 중 친 키 뒤에 Enter를 보냄");
+        std::thread::sleep(Duration::from_millis(20));
+        ptys.set_awaiting(id, false);
+        wait(&notice("origin/b"));
+        no_enter(&notice("origin/c"), "다음 알림 전");
+        assert!(!text().lines().any(|l| l.trim_end_matches('\r') == "GOT:"), "Enter를 두 번 보냄: {:?}", text());
+        assert_eq!(text().matches(&notice("origin/b")).count(), 1);
+
+        // 확인 없이 기다림이 시작되고, 답하고, 끝나도 같다 (리뷰 2차 R3)
+        wake(&ptys, &["tok".into()], "origin/e");
+        assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        ptys.set_awaiting(id, true);
+        std::thread::sleep(Duration::from_millis(20));
+        write_input(&ptys, id, "2", true).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        ptys.set_awaiting(id, false);
+        wait(&notice("origin/e"));
+        assert_eq!(text().matches(&notice("origin/e")).count(), 1);
+
+        // 기다림이 끝난 뒤에 친 키는 초안이다: Enter를 보내지 않는다 (사용자가 Enter를 치면 함께 제출)
+        wake(&ptys, &["tok".into()], "origin/c");
+        assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id]);
+        ptys.set_awaiting(id, true);
+        tick();
+        ptys.set_awaiting(id, false);
+        std::thread::sleep(Duration::from_millis(20));
+        write_input(&ptys, id, "x", true).unwrap();
+        no_enter(&notice("origin/c"), "끝난 뒤 친 초안과 함께 Enter를 보냄");
+        write_input(&ptys, id, "\r", true).unwrap();
+        wait(&notice("origin/c"));
+
+        // 바로 깨우기는 기다리는 중에도 알림과 Enter를 보낸다
+        ptys.set_awaiting(id, true);
+        wake(&ptys, &["tok".into()], "origin/d");
+        ptys.wake_now_tokens(&["tok".into()]);
+        assert_eq!(wake_tick(&ptys, Instant::now()).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "바로 깨우기를 막음");
+        wait(&notice("origin/d"));
+        close(&ptys, id);
     }
 
     // claude 세션 표시는 터미널에 넘기지 않고, 같은 접두사의 사용자 설정과 그 밖의 CLAUDE 변수는 그대로 둔다 (리뷰 R1).

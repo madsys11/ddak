@@ -11,6 +11,7 @@ import { ChatIcon, GitIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icon
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { usePointerTrack } from "./pointerTrack";
 import { Terminal } from "./Terminal";
+import type { ProgramStatus } from "./programStatus";
 import { useT } from "./prefs";
 import { type Group, promptOf } from "./useGroups";
 import { type PaneSession, type Setup, type State, type Tab, commandOf, fromSaved, toSaved } from "./workspaceState";
@@ -270,6 +271,31 @@ type Props = {
 };
 
 // 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
+// 이름표의 프로그램 상태. 사용자를 기다리면 무엇을 기다리는지 (선택 창만 보이면 "선택 대기"), 아니면 작업 중·완료·오류.
+// 대기(idle)는 보이지 않는다. 사용자를 기다리는 동안 채팅 깨우기는 미뤄진다 (hint).
+function StatusBadge({ status, awaiting }: { status?: ProgramStatus; awaiting: boolean }) {
+  const t = useT();
+  const blocked = status?.state === "blocked";
+  const label = awaiting
+    ? blocked
+      ? t(status.kind ? `status.${status.kind}` : "status.blocked")
+      : t("status.dialog")
+    : status?.state === "working"
+      ? t("status.working")
+      : status?.state === "done"
+        ? t("status.done")
+        : status?.state === "error"
+          ? t("status.error")
+          : null;
+  if (!label) return null;
+  const tip = [status?.msg, awaiting ? t("status.awaitingHint") : null].filter(Boolean).join("\n");
+  return (
+    <span className={`pane-badge status${awaiting ? " awaiting" : ""}${status?.state === "error" ? " error" : ""}`} data-status={awaiting ? "awaiting" : status?.state} title={tip || undefined}>
+      {label}
+    </span>
+  );
+}
+
 export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRoot, onError, chatOpen, chatUnread, onToggleChat }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
@@ -289,6 +315,8 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   const [adding, setAdding] = useState<number | null>(null);
   // 채팅 깨우기를 기다리는 창 → 바로 깨우기 (src-tauri/src/pty.rs wake)
   const [waking, setWaking] = useState<Record<number, () => void>>({});
+  // 창마다 앞에서 도는 프로그램의 상태와 사용자를 기다리는지 (src/programStatus.ts, 이름표에 보인다)
+  const [statuses, setStatuses] = useState<Record<number, { status?: ProgramStatus; awaiting: boolean }>>({});
   const activeRef = useRef(s.active);
   activeRef.current = s.tabs.some((tab) => tab.id === s.active) ? s.active : -1;
   // 탭마다 터미널을 다시 띄운 횟수. 터미널 key에 넣어서, 늘면 그 탭의 터미널을 새로 띄운다.
@@ -665,6 +693,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                   <div className="pane-label">
                     {session.setup ? t("session.setup") : session.name}
                     {session.readOnly && <span className="pane-badge">{t("session.readOnly")}</span>}
+                    {statuses[id] && <StatusBadge {...statuses[id]} />}
                     {waking[id] && (
                       <button className="pane-badge wake" data-wake title={t("chat.wakeHint")} onClick={waking[id]}>
                         {t("chat.wakePending")}
@@ -704,6 +733,15 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                     shiftEnter={session?.shiftEnter}
                     shiftEnterFor={shiftEnterFor}
                     shellAfter={session?.setup ? false : undefined}
+                    onStatus={(status, awaiting) =>
+                      setStatuses((all) => {
+                        if (!status && !awaiting) {
+                          const { [id]: _, ...rest } = all;
+                          return rest;
+                        }
+                        return { ...all, [id]: { status, awaiting } };
+                      })
+                    }
                     onWake={(pending, wakeNow) =>
                       setWaking((w) => {
                         if (!pending) {

@@ -866,6 +866,11 @@ button.secondary {
 .tabbar-btn.active {
   color: var(--fg);
 }
+/* 앞에서 도는 프로그램의 상태 (src/programStatus.ts). 사용자를 기다리면 강조색 */
+.pane-badge.status.awaiting {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 /* 채팅 깨우기를 기다리는 창 (누르면 바로 깨움) */
 .pane-badge.wake {
   font: inherit;

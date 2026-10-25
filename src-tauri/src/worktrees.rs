@@ -561,7 +561,14 @@ pub async fn group_create(app: AppHandle, project: String, prefix: String) -> Re
     let home = ddak_home()?;
     let plan = crate::setup::plan(&app, Path::new(&project))?;
     let origin = project.clone();
-    let made = tauri::async_runtime::spawn_blocking(move || create(&home, &project, &prefix)).await.map_err(|e| code_err("io", e))??;
+    let made = tauri::async_runtime::spawn_blocking(move || {
+        let made = create(&home, &project, &prefix)?;
+        // 원본 프로젝트를 claude가 신뢰하면 작업그룹 폴더도 (첫 claude가 신뢰를 묻는 동안 깨우기의 Enter가 답을 고르지 않게)
+        crate::claude_trust::inherit_for_group(Path::new(&project), Path::new(&made.path));
+        Ok::<_, CodeError>(made)
+    })
+    .await
+    .map_err(|e| code_err("io", e))??;
     let setup = match plan {
         Some(plan) => Some(crate::setup::command(&plan, &origin, &made.path, &made.name)?),
         None => None,
