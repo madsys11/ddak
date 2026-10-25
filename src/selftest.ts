@@ -263,19 +263,39 @@ async function testTerminal(root: string) {
     ["insertText", "ㅎ", "ㅎ"], ["insertReplacementText", "하", "ㅏ"], ["insertReplacementText", "한", "ㄴ"],
     ["insertText", "ㄱ", "ㄱ"], ["insertReplacementText", "그", "ㅡ"], ["insertReplacementText", "글", "ㄹ"],
   ];
+  // 입력란이 포커스를 잃으면 xterm이 입력란을 비운다 (CoreBrowserTerminal `_handleTextAreaBlur`). 이 합성 이벤트는 그 뒤에도
+  // 앞 글자를 바꾸는 입력을 이어 보내서, 앞 글자를 지우지 못해 "[ㅎ한글]"처럼 된다 (조합 도중 포커스를 빼서 재현:
+  // 간헐 실패와 출력·전송 순서가 같았다). 실제 입력기가 포커스 전환 뒤 바꾸기를 이어 보내는지는 확인하지 않았다.
+  // 그래서 입력하는 동안 입력란이 포커스를 잃었으면 (다른 앱을 씀 등) 그 시도는 버리고 다시 한다 (최대 3번). 입력 중
+  // 포커스를 잃지 않았는데 틀리면 실패로 둔다.
+  let blurs = 0;
+  const onBlur = () => blurs++;
+  ta.addEventListener("blur", onBlur);
+  // type: 입력을 친다. 결과 줄은 시도마다 붙이는 표시 + expect
+  const typed = async (name: string, type: () => Promise<void>, expect: string) => {
+    let detail = "";
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const before = blurs;
+      const tag = `K${attempt}${Math.random().toString(36).slice(2, 6)}`;
+      const sent: string[] = [];
+      const rec = term.onData((x) => sent.push(x));
+      term.input(`echo '${tag}[`, true);
+      await type();
+      term.input("]'\r", true);
+      rec.dispose();
+      // 입력을 다 친 바로 그때 정한다. 결과를 기다리는 동안 잃은 포커스는 입력에 영향이 없어서 다시 하는 이유가 아니다
+      // (리뷰 P2: 대기 중의 포커스 잃음이 진짜 결함을 가릴 수 있었다)
+      const lost = blurs - before;
+      const ok = await waitFor(name, () => screen(term).some((l) => l.trim() === `${tag}${expect}`), 5000).then(() => true, () => false);
+      const line = screen(term).filter((l) => l.trim().startsWith(tag)).slice(-1)[0]?.trim() ?? "";
+      detail = `${line} 보낸 것: ${JSON.stringify(sent).replace(/\x7f/g, "<DEL>")} 입력 중 포커스 잃음 ${lost}회, 창 포커스 ${document.hasFocus()}`;
+      if (ok) return check(name, true, attempt > 1 ? `입력 중 포커스를 잃어 ${attempt}번째에 통과` : undefined);
+      if (lost === 0) break;
+    }
+    check(name, false, detail);
+  };
   for (const fast of [false, true]) {
-    const name = `터미널: 한글 입력 (WebKit 바꾸기 이벤트로 조합${fast ? ", 빠르게 쳐서 키가 겹침" : ""})`;
-    // 실패하면 터미널로 나간 입력을 그대로 남긴다 (2026-10-23 빠른 입력에서 "[??한글]" 1회, 원인 미확인)
-    const sent: string[] = [];
-    const rec = term.onData((x) => sent.push(x));
-    term.input("echo '[", true);
-    await ime(hangul, fast);
-    term.input("]'\r", true);
-    rec.dispose();
-    await waitFor("한글 입력 결과", () => screen(term).filter((l) => l.trim() === "[한글]").length === (fast ? 2 : 1), 5000).then(
-      () => check(name, true),
-      () => check(name, false, `${screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")} 보낸 것: ${JSON.stringify(sent).replace(/\x7f/g, "<DEL>")}`),
-    );
+    await typed(`터미널: 한글 입력 (WebKit 바꾸기 이벤트로 조합${fast ? ", 빠르게 쳐서 키가 겹침" : ""})`, () => ime(hangul, fast), "[한글]");
   }
   // 실제 앱에서 기록한 "마찬가지로" 빠른 입력 (2026-10-23). 받침이 다음 음절로 넘어갈 때
   // "맟" → 바꾸기 "마" + 새 입력 "차"로 온다. 키를 떼기 전에 다음 입력이 오는 순서도 그대로다.
@@ -287,22 +307,23 @@ async function testTerminal(root: string) {
     ["r", "갖"], ["d", "ㅈ"], ["r", "가"], ["i", "지"], ["d", "ㅣ"], ["u", "ㅈ"],
     ["r", "질"], ["d", "ㄹ"], ["u", "ㅣ"], ["r", "지"], ["i", "로"], ["d", "ㅗ"], ["u", "ㄹ"], ["u", "ㅗ"],
   ];
-  term.input("echo '[", true);
-  for (const [kind, v] of recorded) {
-    if (kind === "d" || kind === "u") key(kind === "d" ? "keydown" : "keyup", v, kind === "d" ? 229 : 0);
-    else {
-      const inputType = kind === "i" ? "insertText" : "insertReplacementText";
-      ta.dispatchEvent(new InputEvent("beforeinput", { inputType, data: v, bubbles: true, cancelable: true, composed: true }));
-      ta.value = kind === "i" ? ta.value + v : ta.value.slice(0, -1) + v;
-      ta.dispatchEvent(new InputEvent("input", { inputType, data: v, bubbles: true, composed: true }));
-    }
-    await sleep(5);
-  }
-  term.input("]'\r", true);
-  await waitFor("기록한 입력 재현", () => screen(term).some((l) => l.trim() === "[마찬가지로]"), 5000).then(
-    () => check("터미널: 실제로 기록한 빠른 한글 입력 재현 (받침이 넘어감)", true),
-    () => check("터미널: 실제로 기록한 빠른 한글 입력 재현 (받침이 넘어감)", false, screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")),
+  await typed(
+    "터미널: 실제로 기록한 빠른 한글 입력 재현 (받침이 넘어감)",
+    async () => {
+      for (const [kind, v] of recorded) {
+        if (kind === "d" || kind === "u") key(kind === "d" ? "keydown" : "keyup", v, kind === "d" ? 229 : 0);
+        else {
+          const inputType = kind === "i" ? "insertText" : "insertReplacementText";
+          ta.dispatchEvent(new InputEvent("beforeinput", { inputType, data: v, bubbles: true, cancelable: true, composed: true }));
+          ta.value = kind === "i" ? ta.value + v : ta.value.slice(0, -1) + v;
+          ta.dispatchEvent(new InputEvent("input", { inputType, data: v, bubbles: true, composed: true }));
+        }
+        await sleep(5);
+      }
+    },
+    "[마찬가지로]",
   );
+  ta.removeEventListener("blur", onBlur);
 
   // ⌘⌫ → Ctrl+U, ⇧↩ → 세션 구성의 shiftEnter (테스트 설정은 ESC CR). 실제로 보내는 값과 셸에서의 동작을 본다.
   const sentBy = (init: KeyboardEventInit) => keySends(term, init);
