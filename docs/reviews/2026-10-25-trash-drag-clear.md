@@ -20,3 +20,15 @@
   `'<루트>/d d'\''s.txt' `, 채팅 입력란에 `keep.txt `. addSession(채팅 패널): 지우기 취소·확인, 버튼 끔, 번호 16→17.
 - 수정을 끄면 (휴지통 무시, 놓기 무시, 지운 지점 무시) 위 검사가 실패한다.
 - 한계: 실제 마우스 끌기는 합성 이벤트라 직접 확인해야 한다.
+
+## 설치 뒤: 실제로 끌어 놓아도 들어가지 않음 — 원인, 수정
+
+**보고**: 사용자가 설치한 앱에서 파일·폴더를 터미널이나 채팅 입력란에 끌어다 놓아도 아무것도 들어가지 않았다.
+
+**원인** (소스): Tauri는 창마다 네이티브 끌어 놓기 처리기를 켜 둔다 (`dragDropEnabled` 기본 true). 그 처리기는 끌기 이벤트마다
+늘 `true`를 돌려주고 (`tauri-runtime-wry` lib.rs `with_drag_drop_handler`), wry는 true면 WKWebView의 기본 처리를 부르지 않는다
+(`wry` src/wkwebview/drag_drop.rs `dragging_entered`·`perform_drag_operation`). 그래서 웹뷰 안의 HTML 끌어 놓기도 dragover·drop이
+페이지에 오지 않는다. 자체 테스트는 페이지 안에서 합성 DragEvent를 보내서 이 단계를 거치지 않았다.
+
+**수정**: `tauri.conf.json` 창 설정에 `"dragDropEnabled": false`. 앱은 Tauri의 파일 끌어 놓기 이벤트를 쓰지 않는다.
+**확인**: Rust `native_drag_drop_is_off` (설정을 true로 바꾸면 실패). selftest trashDrag 통과. 실제 마우스 끌기는 설치 뒤 직접 확인.

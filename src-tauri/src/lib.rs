@@ -85,3 +85,16 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    // 창의 네이티브 끌어 놓기 처리기를 끈다. 켜 두면 Tauri가 모든 끌기를 가로채(처리기가 늘 true) 웹뷰의 HTML 끌어 놓기
+    // (파일 트리 → 터미널·채팅 입력란, src/dragPath.ts)가 dragover·drop을 받지 못한다 (tauri-runtime-wry, wry drag_drop.rs).
+    // 자체 테스트는 합성 이벤트라 이것을 잡지 못해서 설정을 직접 본다.
+    #[test]
+    fn native_drag_drop_is_off() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows = conf["app"]["windows"].as_array().unwrap();
+        assert!(!windows.is_empty() && windows.iter().all(|w| w["dragDropEnabled"] == false), "{windows:?}");
+    }
+}
