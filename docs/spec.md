@@ -392,6 +392,15 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   두고 앱을 띄운다 (resume 둘은 같은 폴더를 써서 저장한 상태를 다음 실행이 복원). `SELFTEST_SCENARIOS="main resume"`처럼
   일부만 돌릴 수 있다.
   진짜 claude·codex를 띄우지 않도록 테스트용 `groups.json`을 넣는다.
+- `main`은 이름 붙은 단계의 차례다 (`src/selftest.ts` runSelftest). 단계마다 예외를 따로 잡아 FAIL로 남기고 다음 단계로
+  가며 (첫 터미널을 못 띄우면 그 뒤는 SKIP), 걸린 시간을 `INFO  단계`로 남긴다. `SELFTEST_ONLY="addSession gitGraph"`로
+  단계를 고르면 기본 단계(`projectStart`, `terminal`)와 고른 단계가 기대는 앞 단계(`STEP_DEPS`)만 돈다.
+  - 단계가 300초 안에 끝나지 않으면 시간 초과 FAIL, 뒤 단계 SKIP, 결과를 보고한다. 단계가 끝날 때마다 작업그룹 설정에 진짜
+    claude·codex가 있으면 (설정을 바꾸는 단계가 되돌리지 못함) "테스트 설정 유지" FAIL과 함께 뒤 단계를 SKIP한다.
+  - 테스트 모듈을 불러오지 못하면 (문법 오류 등) 바로 FAIL로 끝난다 (`main.tsx`). `selftest.sh`는 도는 동안 `caffeinate`로
+    맥이 잠들지 않게 한다.
+  - 2026-10-25 측정: 단계 합 약 110초, 앱 띄우기·끝내기 약 6초. 전체가 훨씬 오래 걸린 실행은 창이 가려져 화면 갱신이
+    멈춘 경우였다 ("알려진 문제"). Rust를 고친 뒤 첫 실행은 다시 빌드한다.
 - 탭 스크롤 검사는 탭 15개로 WebGL 컨텍스트를 밀어내므로 WebGL·배율 검사 뒤에 둔다.
 - 터미널에 보내는 명령(`run`)은 900바이트 이하. 셸이 줄 편집으로 돌아오기 전에 친 입력은 tty가 한 줄에 1024바이트
   (`MAX_CANON`)까지만 받고 나머지를 버린다. 넘으면 `run`이 바로 실패로 알린다.

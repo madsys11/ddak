@@ -9,6 +9,8 @@ pub struct Config {
     root: String,
     // 시나리오 묶음 (src/selftest.ts의 runSelftest). 앱을 다시 켜야 하는 경우를 위해 나눈다.
     scenario: String,
+    // main 시나리오에서 돌릴 단계 (비면 전부. DDAK_SELFTEST_ONLY, 공백·쉼표로 구분)
+    only: Vec<String>,
 }
 
 #[tauri::command]
@@ -16,6 +18,7 @@ pub fn selftest_config() -> Option<Config> {
     Some(Config {
         root: std::env::var("DDAK_SELFTEST").ok()?,
         scenario: std::env::var("DDAK_SELFTEST_SCENARIO").unwrap_or_else(|_| "main".into()),
+        only: std::env::var("DDAK_SELFTEST_ONLY").unwrap_or_default().split([' ', ',']).filter(|s| !s.is_empty()).map(str::to_string).collect(),
     })
 }
 

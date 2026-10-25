@@ -3,6 +3,8 @@
 # 사용법: scripts/selftest.sh
 set -e
 cd "$(dirname "$0")/.."
+# 도는 동안 맥이 잠들지 않게 한다 (잠들면 앱의 타이머까지 멈춰 결과 없이 멈춘다. 2026-10-25). 이 스크립트가 끝나면 풀린다.
+caffeinate -dims -w $$ &
 
 # base/proj: 테스트할 프로젝트, base/other: 두 번째 프로젝트, base/data-<시나리오>: 앱 데이터(프로젝트 목록),
 # base/home-<시나리오>: ~/.ddak 대신 (작업그룹 worktree)
@@ -30,7 +32,7 @@ config="{\"build\":{\"devUrl\":\"http://localhost:$port\",\"beforeDevCommand\":\
 run() {
   local scenario=$1 dirs=${2:-$1}
   echo "--- $scenario" >&2
-  DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_DATA_DIR="$base/data-$dirs" DDAK_HOME="$base/home-$dirs" \
+  DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_SELFTEST_ONLY="${SELFTEST_ONLY:-}" DDAK_DATA_DIR="$base/data-$dirs" DDAK_HOME="$base/home-$dirs" \
     npx tauri dev --no-watch --config "$config" 2>&1 \
     | sed -n '/=== DDAK SELFTEST BEGIN ===/,/=== DDAK SELFTEST \(PASS\|FAIL\) ===/p' \
     | tee /dev/stderr | grep -q "=== DDAK SELFTEST PASS ==="
@@ -66,7 +68,8 @@ JSON
 
 # 하나가 실패해도 나머지를 다 돌리고, 끝에 하나라도 실패했으면 실패로 끝낸다.
 failed=0
-# SELFTEST_SCENARIOS로 일부만 돌릴 수 있다 (예: "main", "resume")
+# SELFTEST_SCENARIOS로 일부만 돌릴 수 있다 (예: "main", "resume").
+# SELFTEST_ONLY로 main의 단계를 고른다 (예: "addSession gitGraph". 기본 단계는 늘 돈다. src/selftest.ts runSelftest)
 only=${SELFTEST_SCENARIOS:-main restart corrupt resume}
 for scenario in main restart corrupt; do
   [[ " $only " == *" $scenario "* ]] && { run $scenario || failed=1; }

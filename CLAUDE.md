@@ -23,7 +23,11 @@
   이 환경에서는 화면 캡처가 안 되므로 UI 확인은 이 방식으로 한다.
   앱을 다시 켜야 확인되는 것(저장된 상태 불러오기 등)은 `selftest.sh`의 시나리오(`main`, `restart`, `corrupt`)로
   나눠 앱을 따로 띄운다. 시나리오마다 앱 데이터 폴더(`DDAK_DATA_DIR`)를 따로 준비한다.
-- 테스트를 추가하면 수정을 잠시 끄고 돌려서 그 테스트가 실제로 실패하는지 확인한다.
+- 고치는 동안에는 Rust 단위 테스트와 관련 단계만 돌린다: `SELFTEST_SCENARIOS=main SELFTEST_ONLY="addSession" scripts/selftest.sh`
+  (단계 이름은 `src/selftest.ts` runSelftest. 기본 단계와, 고른 단계가 기대는 앞 단계(`STEP_DEPS`)도 함께 돈다).
+  전체 `scripts/selftest.sh`는 리뷰를 요청하기 전에 한 번 돌린다. 단계마다 걸린 시간이 `INFO  단계`로 나온다.
+- 테스트를 추가하면 수정을 잠시 끄고 돌려서 그 테스트가 실제로 실패하는지 확인한다 (그 단계만 돌리면 된다).
+  새 단계는 혼자 돌려 보고, 앞 단계에 기대면 `STEP_DEPS`에 적는다.
 - 네이티브 메뉴 동작은 "menu" 이벤트를 직접 보내지 말고 `clickMenu(...제목 경로)`로 실제 메뉴를
   실행해서 확인한다. 이벤트 직접 전송은 muda의 클릭 처리(체크 토글 등)를 건너뛴다.
 

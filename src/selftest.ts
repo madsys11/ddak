@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { devHooks, liveTerms } from "./devHooks";
+import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
 import { LOCALES } from "./i18n";
@@ -1177,38 +1178,43 @@ async function testGroups(term: Terminal) {
   const firstTab = document.querySelector(".project-workspace:not([style*='none']) .tab .tab-title")?.textContent;
   check("작업그룹: 첫 탭 제목은 기본 그룹 이름", firstTab === "Test", firstTab ?? "");
 
-  await write("{");
-  const bad = await waitFor("형식 오류 표시", () => sidebarErrors().find((e) => e.startsWith("Work group settings have an error")), 3000);
-  check("작업그룹: 형식이 깨지면 오류 표시", bad.includes("Invalid settings file"), bad);
-  check("작업그룹: 오류 동안 마지막 올바른 설정 유지", devHooks.groups?.default === "test");
+  // 아래에서 진짜 claude가 든 설정과 기본 설정(claude·codex)을 거친다. 중간에 예외가 나도 테스트 설정으로 되돌린다
+  // (리뷰 R1: 단계가 예외로 끝나도 다음 단계로 가므로, 되돌리지 않으면 뒤 단계가 진짜 CLI를 띄웠다)
+  try {
+    await write("{");
+    const bad = await waitFor("형식 오류 표시", () => sidebarErrors().find((e) => e.startsWith("Work group settings have an error")), 3000);
+    check("작업그룹: 형식이 깨지면 오류 표시", bad.includes("Invalid settings file"), bad);
+    check("작업그룹: 오류 동안 마지막 올바른 설정 유지", devHooks.groups?.default === "test");
 
-  const one = (id: string) => `{"id":"${id}","name":"X","sessions":[{"name":"s"}]}`;
-  await write(`{"default":"a","groups":[${one("a")},${one("a")}]}`);
-  await waitFor("중복 id 오류", () => sidebarErrors().some((e) => e.includes("“a” is used more than once")), 3000).then(
-    () => check("작업그룹: 중복 id 오류", true),
-    () => check("작업그룹: 중복 id 오류", false, sidebarErrors().join("|")),
-  );
-  await write(`{"default":"a","groups":[{"id":"a","name":"X","sessions":[{"name":"s","readonly":true}]}]}`);
-  await waitFor("모르는 키 오류", () => sidebarErrors().some((e) => e.includes("readonly")), 3000).then(
-    () => check("작업그룹: 오타 난 키(readonly)도 오류", true),
-    () => check("작업그룹: 오타 난 키(readonly)도 오류", false, sidebarErrors().join("|")),
-  );
+    const one = (id: string) => `{"id":"${id}","name":"X","sessions":[{"name":"s"}]}`;
+    await write(`{"default":"a","groups":[${one("a")},${one("a")}]}`);
+    await waitFor("중복 id 오류", () => sidebarErrors().some((e) => e.includes("“a” is used more than once")), 3000).then(
+      () => check("작업그룹: 중복 id 오류", true),
+      () => check("작업그룹: 중복 id 오류", false, sidebarErrors().join("|")),
+    );
+    await write(`{"default":"a","groups":[{"id":"a","name":"X","sessions":[{"name":"s","readonly":true}]}]}`);
+    await waitFor("모르는 키 오류", () => sidebarErrors().some((e) => e.includes("readonly")), 3000).then(
+      () => check("작업그룹: 오타 난 키(readonly)도 오류", true),
+      () => check("작업그룹: 오타 난 키(readonly)도 오류", false, sidebarErrors().join("|")),
+    );
 
-  await write(`{"default":"solo","groups":[{"id":"solo","name":"Solo","sessions":[{"name":"dev","command":"claude","args":["--model","opus"]}]}]}`);
-  await waitFor("고친 설정 반영", () => devHooks.groups?.default === "solo", 3000).then(
-    () => check("작업그룹: 고친 설정을 다시 읽고 오류 사라짐", devHooks.groups!.groups[0].sessions[0].args.join(" ") === "--model opus" && sidebarErrors().length === 0, sidebarErrors().join("|")),
-    (e) => check("작업그룹: 고친 설정을 다시 읽고 오류 사라짐", false, String(e)),
-  );
-  check("작업그룹: 이미 열린 탭은 설정이 바뀌어도 그대로", document.querySelector(".project-workspace:not([style*='none']) .tab .tab-title")?.textContent === "Test");
+    await write(`{"default":"solo","groups":[{"id":"solo","name":"Solo","sessions":[{"name":"dev","command":"claude","args":["--model","opus"]}]}]}`);
+    await waitFor("고친 설정 반영", () => devHooks.groups?.default === "solo", 3000).then(
+      () => check("작업그룹: 고친 설정을 다시 읽고 오류 사라짐", devHooks.groups!.groups[0].sessions[0].args.join(" ") === "--model opus" && sidebarErrors().length === 0, sidebarErrors().join("|")),
+      (e) => check("작업그룹: 고친 설정을 다시 읽고 오류 사라짐", false, String(e)),
+    );
+    check("작업그룹: 이미 열린 탭은 설정이 바뀌어도 그대로", document.querySelector(".project-workspace:not([style*='none']) .tab .tab-title")?.textContent === "Test");
 
-  await run(term, `rm "${file}"`);
-  await waitFor("기본 설정 복구", () => devHooks.groups?.default === "dev-review", 3000).then(
-    () => check("작업그룹: 파일을 지우면 기본 설정으로 다시 만듦", true),
-    (e) => check("작업그룹: 파일을 지우면 기본 설정으로 다시 만듦", false, String(e)),
-  );
-  // 뒤의 시나리오가 새 프로젝트를 열 때 진짜 claude·codex가 뜨지 않게 테스트 설정으로 되돌린다.
-  await write(testConfig);
-  await waitFor("테스트 설정 복귀", () => devHooks.groups?.default === "test", 3000);
+    await run(term, `rm "${file}"`);
+    await waitFor("기본 설정 복구", () => devHooks.groups?.default === "dev-review", 3000).then(
+      () => check("작업그룹: 파일을 지우면 기본 설정으로 다시 만듦", true),
+      (e) => check("작업그룹: 파일을 지우면 기본 설정으로 다시 만듦", false, String(e)),
+    );
+  } finally {
+    // 뒤의 시나리오가 새 프로젝트를 열 때 진짜 claude·codex가 뜨지 않게 테스트 설정으로 되돌린다.
+    await write(testConfig);
+    await waitFor("테스트 설정 복귀", () => devHooks.groups?.default === "test", 3000);
+  }
 }
 
 // 한글 보정(src/hangul.ts)만 따로: 화면 밖 xterm에 붙여서 나가는 입력을 본다.
@@ -2629,7 +2635,30 @@ async function testCorrupt(root: string) {
   check("작업그룹: 명령 없는 세션(셸)", g.groups[1].sessions[0].command === "" && g.groups[1].sessions[0].args.length === 0);
 }
 
-export async function runSelftest(root: string, scenario: string) {
+// main 시나리오의 단계. 앞 단계가 만든 상태(터미널 first, 탭, 세션, 설정)를 뒤 단계가 이어 쓴다.
+// 단계마다 예외를 따로 잡아 FAIL로 남기고 다음 단계로 간다 (하나가 죽어도 나머지 결과를 얻게). 걸린 시간은 INFO로 남긴다.
+// only(scripts/selftest.sh의 SELFTEST_ONLY)를 주면 기본 단계(BASE_STEPS)와 고른 단계만 순서대로 돈다. 앞 단계가 만든 상태에
+// 기대는 단계는 혼자 돌면 실패할 수 있다: 고칠 때는 관련 단계만 돌리고, 리뷰 전에는 전체를 돌린다.
+const BASE_STEPS = ["projectStart", "terminal"];
+// 한 단계가 이 시간 안에 끝나지 않으면 멈춘 것으로 보고 FAIL로 남긴 뒤, 뒤 단계는 돌지 않고 결과를 보고한다 (멈춘 단계가
+// 뒤에서 계속 돌아 섞이지 않게). 없으면 멈춘 단계 하나로 전체가 보고 없이 끝나지 않아 어디서 멈췄는지 알 수 없었다.
+// 가장 긴 단계가 25초 남짓 (2026-10-25)이라 넉넉히 둔다.
+const STEP_TIMEOUT_MS = 300_000;
+// 진짜 CLI. 작업그룹 설정에 이것이 있으면 새 작업그룹·세션이 실제로 띄운다.
+const REAL_CLIS = ["claude", "codex"];
+const usesRealCli = (g: Groups | null | undefined) => !!g?.groups.some((x) => x.sessions.some((s) => REAL_CLIS.includes(s.command)));
+// 혼자 돌면 실패하는 단계가 기대는 앞 단계 (고르면 함께 돈다). 실제로 혼자 돌려 확인한 것만 적는다 (2026-10-25):
+// addSession·projects·claude·tabsAndSplits·manyTerminals는 혼자 돈다.
+// groupWorktree는 repos가 넣은 저장소에, groupClone·groupEnd는 groupWorktree의 작업그룹 폴더·준비 스크립트에,
+// gitGraph는 groupEnd가 만든 커밋과 그때까지의 작업그룹 번호(test-6)에 기댄다.
+const STEP_DEPS: Record<string, string[]> = {
+  groupWorktree: ["repos"],
+  groupClone: ["repos", "groupWorktree"],
+  groupEnd: ["repos", "groupWorktree"],
+  gitGraph: ["repos", "groupWorktree", "groupClone", "groupEnd"],
+};
+
+export async function runSelftest(root: string, scenario: string, only: string[] = []) {
   const single: Record<string, (root: string) => Promise<void>> = {
     restart: testRestart,
     corrupt: testCorrupt,
@@ -2645,38 +2674,77 @@ export async function runSelftest(root: string, scenario: string) {
     await invoke("selftest_report", { ok: !failed, log: log.join("\n") });
     return;
   }
-  for (const step of [() => testProjectStart(root), testTree, async () => {
-    const first = await testTerminal(root);
-    await testWatch(root, first);
-    await testRepos(root, first);
-    await testCreate(root, first);
-    await testRename(root, first);
-    await testImeUnit();
-    testTerminalReplyUnit();
-    testWorkspaceStateUnit();
-    await testGroups(first);
-    await testGroupWorktree(root, first);
-    await testTabRename();
-    await testPrefs();
-    await testZoom(first);
-    await testClaude(first);
-    await testTabsAndSplits(root, first);
-    await testWebglLoss(first);
+  let first: Terminal | undefined;
+  const t = () => first!;
+  const steps: [string, () => Promise<unknown> | void][] = [
+    ["projectStart", () => testProjectStart(root)],
+    ["tree", testTree],
+    ["terminal", async () => (first = await testTerminal(root))],
+    ["watch", () => testWatch(root, t())],
+    ["repos", () => testRepos(root, t())],
+    ["create", () => testCreate(root, t())],
+    ["rename", () => testRename(root, t())],
+    ["imeUnit", testImeUnit],
+    ["terminalReplyUnit", testTerminalReplyUnit],
+    ["workspaceStateUnit", testWorkspaceStateUnit],
+    ["groups", () => testGroups(t())],
+    ["groupWorktree", () => testGroupWorktree(root, t())],
+    ["tabRename", testTabRename],
+    ["prefs", testPrefs],
+    ["zoom", () => testZoom(t())],
+    ["claude", () => testClaude(t())],
+    ["tabsAndSplits", () => testTabsAndSplits(root, t())],
+    ["webglLoss", () => testWebglLoss(t())],
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다
-    await testGroupClone(root, first);
-    await testGroupEnd(root, first);
-    await testAddSession(root, first);
-    await testGitGraph(root, first);
-    await testTabMove();
-    await testTabScroll();
-    await testManyTerminals(20);
-    await testProjects(root, first);
-    await testLastExit(first);
-  }]) {
+    ["groupClone", () => testGroupClone(root, t())],
+    ["groupEnd", () => testGroupEnd(root, t())],
+    ["addSession", () => testAddSession(root, t())],
+    ["gitGraph", () => testGitGraph(root, t())],
+    ["tabMove", testTabMove],
+    ["tabScroll", testTabScroll],
+    ["manyTerminals", () => testManyTerminals(20)],
+    ["projects", () => testProjects(root, t())],
+    ["lastExit", () => testLastExit(t())],
+  ];
+  const unknown = only.filter((n) => !steps.some(([name]) => name === n));
+  const chosen = new Set([...BASE_STEPS, ...only, ...only.flatMap((n) => STEP_DEPS[n] ?? [])]);
+  if (unknown.length) check("단계 이름", false, `없는 단계: ${unknown.join(", ")} (있는 단계: ${steps.map(([n]) => n).join(", ")})`);
+  const terminalAt = steps.findIndex(([n]) => n === "terminal");
+  let stopped = "";
+  for (const [i, [name, step]] of steps.entries()) {
+    if (only.length && !chosen.has(name)) continue;
+    // 첫 터미널을 못 띄웠으면 그 뒤 단계는 돌지 않는다 (같은 원인의 실패가 줄줄이 나지 않게)
+    if (i > terminalAt && !first) {
+      log.push(`SKIP  ${name}: 첫 터미널 없음`);
+      continue;
+    }
+    if (stopped) {
+      log.push(`SKIP  ${name}: ${stopped}`);
+      continue;
+    }
+    const start = performance.now();
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await step();
+      const hung = await Promise.race([
+        Promise.resolve().then(step).then(() => false),
+        new Promise<boolean>((r) => (timer = setTimeout(() => r(true), STEP_TIMEOUT_MS))),
+      ]);
+      if (hung) {
+        stopped = `${name}이(가) ${STEP_TIMEOUT_MS / 1000}초 안에 끝나지 않음`;
+        check(`시간 초과 (${name})`, false, stopped);
+      }
     } catch (e) {
-      check("예외", false, String(e));
+      check(`예외 (${name})`, false, String(e));
+    } finally {
+      clearTimeout(timer);
+    }
+    log.push(`INFO  단계 ${name}: ${((performance.now() - start) / 1000).toFixed(1)}초`);
+    // 단계가 끝난 뒤 설정이 진짜 CLI를 띄우면 (되돌리지 못함) 뒤 단계는 돌지 않는다 (리뷰 R1). 파일과 앱이 쓰는 설정을 모두 본다
+    // (파일이 깨졌으면 앱은 마지막 올바른 설정을 쓴다).
+    const onDisk = await invoke<Groups>("groups_load").catch(() => null);
+    if (usesRealCli(onDisk) || usesRealCli(devHooks.groups)) {
+      stopped = `${name} 뒤 작업그룹 설정이 테스트 설정이 아님 (진짜 claude·codex)`;
+      check("테스트 설정 유지", false, stopped);
     }
   }
   await invoke("selftest_report", { ok: !failed, log: log.join("\n") });
