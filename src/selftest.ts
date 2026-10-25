@@ -1438,11 +1438,14 @@ async function testTrashAndDrag(root: string, term: Terminal) {
     target.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
     return over.defaultPrevented;
   };
+  // 놓은 경로를 printf로 돌려 셸이 받은 그대로 찍는다 (화면의 입력 줄은 길면 셸이 다시 그려서 그대로 읽기 어렵다)
   const termEl = [...liveTerms].find(([, x]) => x === term)![0];
+  term.input("printf 'GOT[%s]\\n' ");
   const accepted = drag("d d's.txt", termEl);
-  const quoted = `'${root}/d d'\\''s.txt'`;
-  const line = await waitFor("놓은 경로", () => screen(term).find((l) => l.includes(quoted)), 3000).catch(() => screen(term).at(-1) ?? "");
-  term.input("\x15");
+  await sleep(200);
+  term.input("\r");
+  const expected = `GOT[${root}/d d's.txt]`;
+  const line = await waitFor("놓은 경로", () => screen(term).find((l) => l.includes(expected)), 3000).catch(() => screen(term).at(-1) ?? "");
   const chatInput = document.querySelector<HTMLTextAreaElement>(".project-workspace:not([style*='none']) .chat-input")!;
   drag("keep.txt", chatInput);
   const relDropped = await waitFor("채팅에 놓은 경로", () => chatInput.value === "keep.txt " && chatInput.value, 3000).catch(() => chatInput.value);
@@ -1450,7 +1453,7 @@ async function testTrashAndDrag(root: string, term: Terminal) {
   chatInput.dispatchEvent(new Event("input", { bubbles: true }));
   check(
     "끌어 놓기: 터미널에는 셸용으로 감싼 절대 경로, 채팅 입력란에는 트리 루트 기준 상대 경로",
-    accepted && line.includes(quoted) && relDropped === "keep.txt ",
+    accepted && line.includes(expected) && relDropped === "keep.txt ",
     `${accepted} ${line} | ${JSON.stringify(relDropped)}`,
   );
   await run(term, `rm -f "${root}/keep.txt" "${root}/d d's.txt"`);
@@ -1927,7 +1930,11 @@ async function testAddSession(root: string, first: Terminal) {
   const chatter = `{"name":"chatter","command":"sh","args":["-c","for i in 1 2 3 4 5 6 7; do curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"; echo; done","{chat}","${chatRpc}"],"readOnly":true}`;
   // prompter: 역할(role) + 그룹 규약(rules)이 인자의 {prompt}·{prompt:toml}로 들어가는지 찍는다. 역할 안의 {chat}은 바뀌면 안 된다
   const prompter = `{"name":"prompter","role":"R {chat}","command":"sh","args":["-c","printf \\"A:%s|B:%s|\\" \\"$0\\" \\"$1\\"","{prompt}","v={prompt:toml}"],"readOnly":true}`;
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter}`;
+  // attn: claude 권한 확인 훅처럼 자기 {attention} 주소로 사용자를 기다린다는 신호를 보낸다 (알림)
+  const attn = `{"name":"attn","command":"curl","args":["-s","-X","POST","{attention}"],"readOnly":true}`;
+  // lateposter: 2초 뒤에 "@user ..."를 보낸다 (그 사이 다른 프로젝트로 옮겨 가서 받는다)
+  const lateposter = `{"name":"lateposter","command":"sh","args":["-c","sleep 2; curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"","{chat}","${rpc}"],"readOnly":true}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter},${attn},${lateposter}`;
   // 터미널에 보내는 명령은 900바이트까지라 (run) 500자씩 나눠 붙인 뒤 옮긴다 (쓰는 도중의 반쪽 파일을 읽지 않게)
   const content = TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","rules":"S2","sessions":[${pick}]}]}`);
   await run(first, `: > "${file}.part"`);
@@ -1960,7 +1967,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter,pick/attn,pick/lateposter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -2061,6 +2068,8 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   };
   const stored = () => invoke<{ from: string; text: string; to: string[] }[]>("chat_messages", { project: root });
 
+  // 창이 앞에 있다고 알린다: 채팅은 실제로 보고 있을 때만 읽은 것으로 친다 (테스트 창은 포커스가 없을 수 있다)
+  window.dispatchEvent(new Event("focus"));
   toggle().click();
   await waitFor("채팅 패널", () => shown() && panel()!.querySelector(".chat-msg"), 5000);
   const first = panel()!.querySelector<HTMLElement>(".chat-msg")!;
@@ -2119,16 +2128,98 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   await waitFor("터미널 포커스", terminalFocused, 2000).catch(() => null);
   check("채팅 패널: × 로 닫으면 터미널로 포커스", terminalFocused(), document.activeElement?.className ?? "");
 
-  // 닫아 두고 새 poster를 더하면 그 poster가 "@user ..."를 보낸다 → 버튼에 점, 열면 사라짐
+  // 닫아 두고 새 poster를 더하면 그 poster가 "@user ..."를 보낸다 → 버튼에 점, 열면 사라짐.
+  // 알림 (src-tauri/src/notify.rs, 자체 테스트는 보내지 않고 기록): 세션이 사용자에게 보낸 메시지는 알리고, 사이드바 프로젝트와
+  // Dock에 안 읽은 수. 창이 앞에 있고 그 프로젝트의 채팅 패널을 보고 있으면 알리지 않는다.
+  const notes = () => invoke<[[string, string][], number]>("selftest_notifications");
+  const unreadBadge = () => document.querySelector<HTMLElement>(`.project-row[data-project="${CSS.escape(root)}"] .project-unread`);
+  await invoke("selftest_set_focused", { focused: false });
+  await notes();
   await openAdd("menu");
   choose("pick/poster");
   await waitFor("나에게 온 메시지 표시", () => toggle().classList.contains("unread"), 10000).then(
     () => check("채팅 패널: 닫혀 있는 동안 나에게 온 메시지는 버튼에 점", true),
     () => check("채팅 패널: 닫혀 있는 동안 나에게 온 메시지는 버튼에 점", false, toggle().className),
   );
+  await waitFor("사이드바 배지", unreadBadge, 3000).catch(() => null);
+  // 기록은 가져가면 비워지므로 모아 가며 기다린다
+  const noted: [string, string][] = [];
+  let dock = 0;
+  await waitAsync("알림 기록", async () => {
+    const [n, d] = await notes();
+    noted.push(...n);
+    dock = d;
+    return noted.length > 0 && dock === 1;
+  }, 3000).catch(() => null);
+  const projectName = root.split("/").pop();
+  check(
+    "알림: 세션이 사용자에게 보낸 메시지는 알림 (제목 ddak · 프로젝트, 본문 보낸 사람: 첫 줄), 사이드바·Dock 배지",
+    noted.length === 1 && noted[0][0] === `ddak · ${projectName}` && /^origin\/poster-\d: @user hello from poster$/.test(noted[0][1]) && unreadBadge()?.dataset.unread === "1" && dock === 1,
+    `${JSON.stringify(noted)} ${unreadBadge()?.dataset.unread} ${dock}`,
+  );
+  // 창이 앞에 있다고 알린다 (테스트 창은 포커스가 없을 수 있다. 채팅은 실제로 보고 있을 때만 읽은 것으로 친다)
+  window.dispatchEvent(new Event("focus"));
   toggle().click();
   await waitFor("다시 열기", shown, 2000);
   check("채팅 패널: 열면 점이 사라짐", !toggle().classList.contains("unread"), toggle().className);
+  await sleep(300);
+  const [, badgeAfter] = await notes();
+  check("알림: 채팅을 열면 사이드바·Dock 배지가 사라짐", !unreadBadge() && badgeAfter === 0, `${unreadBadge()?.dataset.unread} ${badgeAfter}`);
+  // 닫기는 비동기라 창이 실제로 줄 때까지 기다린다 (뒤 검사가 창 수를 센다)
+  const closeAdded = async () => {
+    const n = paneEls().length;
+    await menu("close_pane");
+    await waitFor("더한 창 닫기", () => paneEls().length === n - 1, 5000);
+  };
+  // 실제로 보고 있을 때만 읽은 것으로 친다 (리뷰 R2): 채팅을 열어 둔 채 창이 뒤로 가거나 다른 프로젝트로 가면 배지에 센다
+  window.dispatchEvent(new Event("blur"));
+  const beforeBlur = (await stored()).length;
+  await openAdd("menu");
+  choose("pick/poster");
+  await waitAsync("뒤에 있을 때 온 메시지", async () => (await stored()).length > beforeBlur, 10000).catch(() => null);
+  const blurBadge = await waitFor("뒤에 있을 때 배지", () => unreadBadge()?.dataset.unread === "1", 3000).then(() => true, () => false);
+  window.dispatchEvent(new Event("focus"));
+  const focusCleared = await waitFor("앞으로 오면 지움", () => !unreadBadge(), 3000).then(() => true, () => false);
+  await closeAdded();
+  const other = root.replace(/\/proj$/, "/other");
+  await openAdd("menu");
+  choose("pick/lateposter");
+  await devHooks.addProject!(other);
+  const awayBadge = await waitFor("다른 프로젝트에 있을 때 배지", () => unreadBadge()?.dataset.unread === "1", 10000).then(() => true, () => false);
+  projectRow(root)!.click();
+  const backCleared = await waitFor("돌아오면 지움", () => !unreadBadge(), 3000).then(() => true, () => false);
+  const confirmBefore = devHooks.confirm;
+  devHooks.confirm = async () => true;
+  projectRow(other)!.querySelector<HTMLElement>("[data-action=remove]")!.click();
+  await waitFor("다른 프로젝트 빼기", () => !projectRow(other), 3000);
+  devHooks.confirm = confirmBefore;
+  await waitFor("돌아온 프로젝트", () => document.querySelector(".project-workspace:not([style*='none'])")?.getAttribute("data-project") === root, 3000);
+  await closeAdded();
+  check(
+    "알림: 채팅을 열어 둬도 창이 뒤에 있거나 다른 프로젝트에 있으면 배지에 세고, 보게 되면 지움",
+    blurBadge && focusCleared && awayBadge && backCleared,
+    `${blurBadge} ${focusCleared} ${awayBadge} ${backCleared}`,
+  );
+  // 창이 앞에 있고 이 프로젝트의 채팅 패널을 보고 있으면 알리지 않는다. 사용자를 기다린다는 신호({attention})는 알린다
+  // (그 프로젝트를 보고 있지 않을 때)
+  await notes(); // 앞 검사의 알림은 비운다
+  await invoke("selftest_set_focused", { focused: true });
+  const beforeQuiet = (await stored()).length;
+  await openAdd("menu");
+  choose("pick/poster");
+  await waitAsync("보고 있을 때 온 메시지", async () => (await stored()).length > beforeQuiet, 10000).catch(() => null);
+  await sleep(300);
+  const [quiet] = await notes();
+  await closeAdded();
+  await invoke("selftest_set_focused", { focused: false });
+  await openAdd("menu");
+  choose("pick/attn");
+  const attention = await waitAsync("권한 확인 알림", async () => {
+    const [n] = await notes();
+    return n.find(([, body]) => /^origin\/attn(-\d)? is waiting for your permission$/.test(body));
+  }, 10000).catch(() => null);
+  await closeAdded();
+  check("알림: 보고 있으면 알리지 않음, 사용자를 기다린다는 신호({attention})는 알림", quiet.length === 0 && !!attention, `${JSON.stringify(quiet)} ${JSON.stringify(attention)}`);
 
   // 늦게 온 이전 참여자 응답이 최신 목록을 되돌리지 않는다 (리뷰 P2): 들어올 때의 첫 읽기를 늦추고 바로 닫는다
   let calls = 0;
@@ -2269,6 +2360,7 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   const pings = async () => (await stored()).filter((m) => m.from === "origin/chatter") as { held?: boolean }[];
   await waitAsync("chatter 메시지 7개", async () => (await pings()).length === 7, 10000).catch(() => null);
   const sent7 = await pings();
+  const pausedNote = (await invoke<[[string, string][], number]>("selftest_notifications"))[0].find(([, b]) => b.startsWith("origin: sessions exchanged 6 messages"));
   await waitFor("멈춤 표시", pausedBar, 3000).catch(() => null);
   await waitFor("허용된 알림", () => fromChatter() > 0, WAKE_IDLE_MS + 4000).catch(() => null);
   await sleep(WAKE_IDLE_MS + 1000);
@@ -2278,8 +2370,8 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   const heldTag = panel()!.querySelectorAll(".chat-msg [data-held]").length === 1 && !!panel()!.querySelector(".chat-msg:last-of-type [data-held]");
   check(
     "깨우기 제한: 세션끼리 6개까지 깨우고 7번째는 저장만 (보낸 세션에 알림, 패널에 멈춤·깨우지 않음 표시)",
-    sent7.length === 7 && sent7.filter((m) => m.held).length === 1 && !!sent7[6].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar(),
-    `${sent7.map((m) => !!m.held).join(",")} told=${toldChatter} tag=${heldTag} bar=${!!pausedBar()} wakes=${beforeResume}`,
+    sent7.length === 7 && sent7.filter((m) => m.held).length === 1 && !!sent7[6].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar() && !!pausedNote,
+    `${sent7.map((m) => !!m.held).join(",")} told=${toldChatter} tag=${heldTag} bar=${!!pausedBar()} wakes=${beforeResume} note=${JSON.stringify(pausedNote)}`,
   );
   pausedBar()?.querySelector("button")?.click();
   const resumed = await waitFor("재개 뒤 깨움", () => fromChatter() === beforeResume + 1, WAKE_IDLE_MS + 4000).then(() => true, () => false);
@@ -2289,6 +2381,17 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
     resumed && fromChatter() === beforeResume + 1 && !pausedBar(),
     `${beforeResume}→${fromChatter()} bar=${!!pausedBar()}`,
   );
+
+  // 사용자가 그 작업그룹 세션의 터미널에 입력해도 다시 센다 (재개와 같다): chatter를 한 번 더 띄워 멈춘 뒤 listener 창에 친다
+  await openAdd("menu");
+  choose("pick/chatter");
+  const pausedAgain = await waitFor("다시 멈춤", pausedBar, 10000).then(() => true, () => false);
+  const typedIn = typeKeys(listenerPane.term, "abc");
+  const unpaused = await waitFor("입력으로 풀림", () => !pausedBar(), 3000).then(() => true, () => false);
+  typeKeys(listenerPane.term, "\x15");
+  const backendPaused = await invoke<string[]>("chat_paused", { project: root });
+  const listenerPty = listenerPane.el.querySelector<HTMLElement>(".terminal")!.dataset.pty;
+  check("깨우기 제한: 그 작업그룹 세션의 터미널에 사용자가 입력하면 다시 센다", pausedAgain && typedIn === "abc" && unpaused, `${pausedAgain} ${JSON.stringify(typedIn)} ${unpaused} backend=${backendPaused} pty=${listenerPty}`);
 
   // 멈춘 작업그룹이 많아도 알림 목록은 높이가 정해진 스크롤 영역이고, 참여자 칩과 입력란은 패널 안에 남는다 (리뷰 2단계 R2)
   devHooks.chatPausedExtra = Array.from({ length: 12 }, (_, i) => `group-${i + 1}`);

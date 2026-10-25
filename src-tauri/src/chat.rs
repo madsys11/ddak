@@ -97,6 +97,10 @@ pub enum Change<'a> {
     Released(&'a [(String, String)]),
     // 대화를 모두 지움 (chat_clear)
     Cleared,
+    // 이 작업그룹의 자동 깨우기가 막 멈춤 (사용자에게 알린다)
+    Paused(&'a str),
+    // 이 참여자가 사용자를 기다림 (claude의 권한 확인 훅이 /attention/<토큰>으로 알림, 사용자에게 알린다)
+    Attention(&'a str),
 }
 
 type OnMessage = Box<dyn Fn(&Path, Change) + Send + Sync>;
@@ -350,14 +354,17 @@ impl Chats {
             room.push(message.clone());
             // 저장한 뒤에 센다 (저장하지 못한 메시지는 세지 않는다)
             let mut limits_changed = false;
+            let mut paused_now = None;
             let mut released = Vec::new();
             if let Some(key) = counted {
+                let group = key.1.clone();
                 let limit = inner.limits.entry(key).or_default();
                 if held {
                     limit.held.extend(message.to.iter().filter(|n| *n != USER).map(|n| (n.clone(), message.from.clone())));
                 } else {
                     limit.count += 1;
                     limits_changed = limit.count == WAKE_LIMIT;
+                    paused_now = limits_changed.then_some(group);
                 }
             } else if from == USER {
                 // 사용자 메시지가 닿은 작업그룹은 다시 센다
@@ -371,12 +378,15 @@ impl Chats {
             }
             released.sort();
             released.dedup();
-            (message, limits_changed, released)
+            (message, limits_changed, paused_now, released)
         };
-        let (message, limits_changed, released) = message;
+        let (message, limits_changed, paused_now, released) = message;
         (self.on_message)(project, Change::Message(&message, &released));
         if limits_changed {
             (self.on_message)(project, Change::Limits);
+        }
+        if let Some(group) = paused_now {
+            (self.on_message)(project, Change::Paused(&group));
         }
         Ok(message)
     }
@@ -437,6 +447,23 @@ impl Chats {
         (self.on_message)(project, Change::Limits);
     }
 
+    // 사용자가 이 참여자의 터미널에 입력했다 (pty_write): 그 작업그룹에 사용자가 개입한 것이므로 자동 깨우기를 다시 센다
+    // (재개와 같다: 보류분은 받는 사람마다 한 번 깨운다). 지시를 채팅이 아니라 터미널에 쓰면 셈이 쌓이기만 해서 정상적인
+    // 리뷰 흐름도 멈췄다 (2026-10-25). 셈이 없으면 아무것도 하지 않는다 (키마다 불린다).
+    pub fn user_input(&self, token: &str) {
+        let key = {
+            let inner = self.inner.lock().unwrap();
+            let Some(m) = inner.members.get(token) else { return };
+            let Some(group) = group_of(&m.name) else { return };
+            let key = (m.project.clone(), group.to_string());
+            if !inner.limits.contains_key(&key) {
+                return;
+            }
+            key
+        };
+        self.resume(&key.0, &key.1);
+    }
+
     fn respond(&self, mut request: tiny_http::Request) {
         let reply = |code: u16, body: String| tiny_http::Response::from_string(body).with_status_code(code);
         // DNS 리바인딩: 다른 이름으로 들어온 요청은 받지 않는다 (토큰이 있어도)
@@ -448,7 +475,10 @@ impl Chats {
             [format!("http://127.0.0.1:{}", self.port), format!("http://localhost:{}", self.port)].contains(&h.value.as_str().to_string())
         });
         let host_ok = host_ok && origin_ok;
-        let token = request.url().strip_prefix("/mcp/").map(str::to_string);
+        // /mcp/<토큰>: MCP. /attention/<토큰>: 그 참여자가 사용자를 기다린다는 신호 (claude 권한 확인 훅, 본문 없음)
+        let url = request.url().to_string();
+        let attention = url.starts_with("/attention/");
+        let token = url.strip_prefix("/mcp/").or_else(|| url.strip_prefix("/attention/")).map(str::to_string);
         let known = token.as_ref().is_some_and(|t| self.inner.lock().unwrap().members.contains_key(t));
         if !host_ok || !known {
             let _ = request.respond(reply(if host_ok { 404 } else { 403 }, String::new()));
@@ -465,6 +495,14 @@ impl Chats {
             return;
         }
         let token = token.unwrap();
+        if attention {
+            let who = self.inner.lock().unwrap().members.get(&token).map(|m| (m.project.clone(), m.name.clone()));
+            if let Some((project, name)) = who {
+                (self.on_message)(&project, Change::Attention(&name));
+            }
+            let _ = request.respond(reply(204, String::new()));
+            return;
+        }
         let answer = match serde_json::from_str::<Value>(&body) {
             Err(e) => Some(json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": e.to_string() } })),
             Ok(Value::Array(batch)) => {
@@ -596,6 +634,11 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
         };
         match change {
             Change::Message(message, released) => {
+                // 세션이 사용자에게 보낸 것만 알린다 (질문·결정 요청·작업 완료 보고. 사용자 자신이 보낸 것은 아님).
+                // 화면 갱신·깨우기(터미널 잠금을 기다릴 수 있다)보다 먼저.
+                if message.from != USER && message.to.iter().any(|n| n == USER) {
+                    crate::notify::send(project, crate::notify::Kind::Chat, &format!("{}: {}", message.from, crate::notify::first_line(&message.text)));
+                }
                 let _ = emitter.emit("chat", json!({ "project": project, "message": message }));
                 wake(Some(message), released);
             }
@@ -608,6 +651,12 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
             Change::Released(released) => wake(None, released),
             Change::Cleared => {
                 let _ = emitter.emit("chat", json!({ "project": project }));
+            }
+            Change::Paused(group) => {
+                crate::notify::send(project, crate::notify::Kind::Chat, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]));
+            }
+            Change::Attention(name) => {
+                crate::notify::send(project, crate::notify::Kind::Attention, &crate::notify::text("attention", &[("name", name)]));
             }
         }
     });
@@ -804,7 +853,8 @@ mod tests {
         let sink = log.clone();
         let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
             let entry = match c {
-                Change::Message(_, []) | Change::Members | Change::Cleared => return,
+                Change::Message(_, []) | Change::Members | Change::Cleared | Change::Attention(_) => return,
+                Change::Paused(g) => format!("paused {g}"),
                 Change::Message(m, r) => format!("message {} released {r:?}", m.from),
                 Change::Limits => "limits".to_string(),
                 Change::Released(r) => format!("released {r:?}"),
@@ -826,7 +876,8 @@ mod tests {
         }
         assert!(chats.paused(p).is_empty());
         assert!(!post(p, "g1/dev", "@all hi").held);
-        assert_eq!((chats.paused(p), taken()), (vec!["g1".to_string()], vec!["limits".to_string()]));
+        // 막 멈췄을 때 한 번 알린다 (사용자 알림)
+        assert_eq!((chats.paused(p), taken()), (vec!["g1".to_string()], vec!["limits".to_string(), "paused g1".to_string()]));
         let held = post(p, "g1/rev", "@g1/dev again");
         assert!(held.held && held.to == ["g1/dev"]);
         assert!(post(p, "g1/rev", "@g1/dev more").held);
@@ -855,6 +906,19 @@ mod tests {
         chats.resume(p, "g2");
         assert_eq!(taken(), [r#"released [("g1/rev", "g2/dev")]"#, "limits"]);
         assert!(chats.paused(p).is_empty());
+        // 사용자가 그 작업그룹 세션의 터미널에 입력해도 다시 센다 (다른 그룹·프로젝트는 그대로, 셈이 없으면 아무것도 안 함)
+        for _ in 0..6 {
+            post(p, "g1/dev", "@g1/rev z");
+        }
+        assert!(post(p, "g1/dev", "@g1/rev held").held);
+        post(q, "g1/dev", "@g1/rev q");
+        taken();
+        chats.user_input(&tokens[2]);
+        assert_eq!(chats.paused(p), ["g1"], "다른 그룹의 입력으로 풀림");
+        chats.user_input(&tokens[1]);
+        assert!(chats.paused(p).is_empty() && taken() == [r#"released [("g1/rev", "g1/dev")]"#, "limits"]);
+        chats.user_input(&tokens[1]);
+        assert!(taken().is_empty(), "셈이 없는데 알림");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -981,7 +1045,9 @@ mod tests {
     #[test]
     fn mcp_over_http() {
         let dir = temp("http");
-        let chats = Chats::start(dir.clone(), Box::new(|_, _| ())).unwrap();
+        let seen_attention = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = seen_attention.clone();
+        let chats = Chats::start(dir.clone(), Box::new(move |_, c| if let Change::Attention(n) = c { sink.lock().unwrap().push(n.to_string()) })).unwrap();
         let project = Path::new("/p/x");
         let (token, url, _) = chats.join(project, "origin/dev", "k");
         let path = url.split_once(&format!("127.0.0.1:{}", chats.port)).unwrap().1.to_string();
@@ -1023,6 +1089,13 @@ mod tests {
         assert!(chats.messages(project).unwrap().iter().all(|m| m.text != "from a page"));
         assert_eq!(http_with(chats.port, &path, &host, &format!("Origin: http://127.0.0.1:{}\r\n", chats.port), &post).0, 200);
         assert_eq!(http(chats.port, "GET", &path, &host, "").0, 405);
+        // 사용자를 기다린다는 신호 (claude 권한 확인 훅): 그 참여자의 /attention/<토큰>. 모르는 토큰 404, GET 405, 다른 Host 403
+        let attention = path.replacen("/mcp/", "/attention/", 1);
+        assert_eq!(http(chats.port, "POST", &attention, &host, "").0, 204);
+        assert_eq!(*seen_attention.lock().unwrap(), ["origin/dev"]);
+        assert_eq!(http(chats.port, "POST", "/attention/nope", &host, "").0, 404);
+        assert_eq!(http(chats.port, "GET", &attention, &host, "").0, 405);
+        assert_eq!(http(chats.port, "POST", &attention, "evil.example:80", "").0, 403);
         chats.leave(&token);
         assert_eq!(http(chats.port, "POST", &path, &host, "{}").0, 404);
         let _ = std::fs::remove_dir_all(&dir);

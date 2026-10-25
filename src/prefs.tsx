@@ -80,6 +80,13 @@ function syncMenu(locale: Locale, theme: ThemeId, sidebar: boolean) {
   );
   const themes = Object.entries(THEMES).map(([id, th]) => ({ id, label: translate(locale, th.name), checked: id === theme }));
   const locales = Object.entries(LOCALES).map(([id, l]) => ({ id, label: l.name, checked: id === locale }));
+  // 알림 문구도 같은 사전에서 (src-tauri/src/notify.rs)
+  const notify = Object.fromEntries(
+    Object.entries(LOCALES[locale].messages)
+      .filter(([key]) => key.startsWith("notify."))
+      .map(([key, text]) => [key.slice("notify.".length), text]),
+  );
+  invoke("set_notify_texts", { texts: notify }).catch(() => {});
   return invoke("set_menu", { spec: { labels, themes, locales, sidebar } });
 }
 

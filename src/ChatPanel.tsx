@@ -16,15 +16,19 @@ const WAKE_LIMIT = 6;
 const USER = "user";
 
 // 프로젝트 채팅방 (docs/spec.md "채팅방 설계"): 오른쪽 패널. 사용자(user)로 읽고 쓴다.
-// 닫혀 있어도 떠 있으면서 새 메시지를 받고, 닫혀 있는 동안 사용자를 멘션한 메시지가 오면 onUnread(true)로 알린다.
+// 닫혀 있어도 떠 있으면서 새 메시지를 받고, 닫혀 있는 동안 세션이 사용자에게 보낸 메시지 수를 onUnread로 알린다
+// (채팅 버튼의 점, 사이드바 프로젝트 배지, Dock 배지).
 // 메시지·참여자가 바뀌면 Rust가 이벤트("chat", "chat-members")를 보내고, 받으면 이 프로젝트 것을 다시 읽는다
 // (이벤트의 프로젝트는 실제 경로라 여기의 경로와 다를 수 있어서 비교하지 않는다). 이벤트를 먼저 등록하고 처음 상태를
 // 읽는다 (리뷰 P2: 읽은 뒤 등록하기 전에 온 메시지를 놓쳤다). 읽기가 겹치면 마지막 요청의 결과만 쓴다.
-export function ChatPanel({ project, open, onClose, onUnread }: {
+// watching: 사용자가 실제로 보고 있다 (패널이 열려 있고, 이 프로젝트가 보이고, 창이 앞에 있음). 그때만 읽은 것으로 친다
+// (리뷰 R2: 열어 둔 채 다른 프로젝트로 가면 숨은 패널이 메시지를 읽은 것으로 처리해 배지가 빠졌다).
+export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   project: string;
   open: boolean;
+  watching: boolean;
   onClose: () => void;
-  onUnread: (unread: boolean) => void;
+  onUnread: (unread: number) => void;
 }) {
   const { t, locale, panels, setPanelWidth } = usePrefs();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -42,8 +46,8 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
   const input = useRef<HTMLTextAreaElement>(null);
   // 마지막으로 본 메시지 번호 (열려 있을 때 본 것)
   const seen = useRef(0);
-  const latest = useRef({ open, onUnread });
-  latest.current = { open, onUnread };
+  const latest = useRef({ watching, onUnread });
+  latest.current = { watching, onUnread };
 
   useEffect(() => {
     let alive = true;
@@ -58,8 +62,8 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
           setMessages(m);
           setError(null);
           const last = m.at(-1)?.id ?? 0;
-          if (latest.current.open) seen.current = last;
-          else if (m.some((x) => x.id > seen.current && x.to.includes(USER))) latest.current.onUnread(true);
+          if (latest.current.watching) seen.current = last;
+          else latest.current.onUnread(m.filter((x) => x.id > seen.current && x.from !== USER && x.to.includes(USER)).length);
         },
         (e) => alive && mine === n && setError(String(e)),
       );
@@ -121,14 +125,17 @@ export function ChatPanel({ project, open, onClose, onUnread }: {
     };
   }, [project]);
 
-  // 열면 다 본 것으로 하고 입력란으로
+  // 열면 입력란으로
   useEffect(() => {
-    if (!open) return;
-    seen.current = messages.at(-1)?.id ?? 0;
-    onUnread(false);
-    input.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (open) input.current?.focus();
   }, [open]);
+  // 보게 되면 (열기, 이 프로젝트로 돌아오기, 창이 앞으로) 다 본 것으로
+  useEffect(() => {
+    if (!watching) return;
+    seen.current = messages.at(-1)?.id ?? 0;
+    onUnread(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watching]);
 
   // 맨 아래를 보고 있었으면 새 메시지를 따라 내려간다
   const atBottom = useRef(true);

@@ -6,6 +6,7 @@ mod fs;
 mod git;
 mod groups;
 mod menu;
+mod notify;
 mod prepare;
 mod projects;
 mod pty;
@@ -31,11 +32,23 @@ pub fn run() {
         .manage(watch::Watches::default())
         .setup(|app| {
             menu::install(app.handle());
+            notify::init();
             app.manage(chat::install(app.handle()));
             pty::start_waker(app.handle().clone());
             Ok(())
         })
+        // 알림을 보낼지 정할 때 창이 앞에 있는지 본다 (src-tauri/src/notify.rs)
+        .on_window_event(|_, event| {
+            if let tauri::WindowEvent::Focused(focused) = event {
+                notify::set_focused(*focused);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            notify::set_view,
+            notify::set_notify_texts,
+            notify::set_badge,
+            notify::selftest_notifications,
+            notify::selftest_set_focused,
             fs::list_dir,
             fs::fs_create,
             fs::fs_rename,

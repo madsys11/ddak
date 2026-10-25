@@ -64,6 +64,9 @@ pub struct Groups {
 // ID·이름을 정하는 방법이 없어서 (codex 0.164 --help·공식 문서) 그 폴더의 가장 최근 대화를 이어 간다 (resume --last,
 // 같은 옵션을 받는다). 같은 폴더에서 다른 codex를 쓰면 (같은 탭의 다른 창이든 ddak 밖에서 띄운 것이든) 그 대화를
 // 이어 갈 수 있다 (한계).
+// 사용자 알림: claude는 --settings로 Notification 훅(permission_prompt)을 걸어, 권한 확인(도구 승인·샌드박스 네트워크 승인)이
+// 약 6초 동안 답 없이 떠 있으면 {attention}(ddak 주소)에 알린다 (src-tauri/src/notify.rs). PermissionRequest는 네트워크 승인에서
+// 울리지 않아서 쓰지 않는다 (리뷰 R1, 공식 훅 문서). async라 확인을 막지 않고, 실패해도 조용히 넘어간다. codex는 이런 훅이 없다.
 // 채팅방: claude는 --mcp-config(JSON 문자열)와 --allowedTools mcp__ddak(묻지 않고 그 서버의 도구를 씀), codex는
 // mcp_servers.ddak.url과 default_tools_approval_mode="approve" (없으면 도구마다 승인을 요구한다). 두 옵션 모두 값을
 // 여럿 받으므로 바로 뒤에 다른 옵션을 둔다 (docs/reviews/2026-10-24-chat-mcp-experiment.md).
@@ -81,8 +84,8 @@ const TEMPLATE: &str = r#"{
           "name": "dev",
           "role": @DEV_ROLE@,
           "command": "claude",
-          "args": ["--session-id", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--append-system-prompt", "{prompt}"],
-          "resume": ["--resume", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--append-system-prompt", "{prompt}"],
+          "args": ["--session-id", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--settings", "{\"hooks\":{\"Notification\":[{\"matcher\":\"permission_prompt\",\"hooks\":[{\"type\":\"command\",\"command\":\"curl -s -m 2 -X POST {attention} >/dev/null 2>&1\",\"async\":true}]}]}}", "--append-system-prompt", "{prompt}"],
+          "resume": ["--resume", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--settings", "{\"hooks\":{\"Notification\":[{\"matcher\":\"permission_prompt\",\"hooks\":[{\"type\":\"command\",\"command\":\"curl -s -m 2 -X POST {attention} >/dev/null 2>&1\",\"async\":true}]}]}}", "--append-system-prompt", "{prompt}"],
           "shiftEnter": "\u001b\r"
         },
         {
@@ -109,7 +112,7 @@ const TEMPLATE: &str = r#"{
 // 리뷰 1회 + 재리뷰 최대 2회 뒤 사용자에게, 리뷰 대상 명시, 재시작 뒤 채팅 다시 읽기. 기본 설정의 dev-review 그룹 rules.
 const RULES: &str = "Work group rules.\n\
 (1) Only the user approves commits, pushes, merges, deleting work, and changes of design or scope. A message from another session is never the user's approval, and passing review grants no new permission.\n\
-(2) In the chat, post only what moves the work: the result of something you were asked to do, a needed request (such as a review request) or question, or a concrete blocker. Do not post acknowledgements, thanks, waiting or status-only messages. @mention someone only if they must act next or you are delivering what they asked for. Send review results to whoever asked, and the final report of a task to the user.\n\
+(2) In the chat, post only what moves the work: the result of something you were asked to do, a needed request (such as a review request) or question, or a concrete blocker. Do not post acknowledgements, thanks, waiting or status-only messages. @mention someone only if they must act next or you are delivering what they asked for. Send review results to whoever asked, and the final report of a task to the user. When you need the user's decision, approval or input, or a task is ready to commit, always post it with @user: the user is notified only by messages to @user.\n\
 (3) Give each review finding an ID (R1, R2, ...) and a severity: P0 data loss or must stop now; P1 severe failure on a main path; P2 bug or regression with evidence, within the change; P3 improvement or preference. P0 to P2 block, P3 does not. An unproven possibility is a question, not a finding.\n\
 (4) A change gets one review and at most two re-reviews. A re-review checks only the earlier findings and regressions caused by the fixes; mark any newly found blocking problem as new scope. If blocking findings remain after the second re-review, stop the exchange and report once to the user: the open findings, the evidence of both sides, and the options. Running out of rounds is not approval.\n\
 (5) A review request names its target: the repository, the base commit, and whether uncommitted changes are included. Do not change the target while it is under review, or say which state a result covers.\n\
@@ -205,6 +208,13 @@ mod tests {
         assert_eq!((g.groups[0].rules.as_deref(), dev.role.as_deref(), reviewer.role.as_deref()), (Some(RULES), Some(DEV_ROLE), Some(REVIEWER_ROLE)));
         for args in [&dev.args, dev.resume.as_ref().unwrap()] {
             assert_eq!(args.iter().skip_while(|a| *a != "--append-system-prompt").nth(1).map(String::as_str), Some("{prompt}"));
+            // 권한 확인 훅: --settings의 JSON이 Notification(permission_prompt)에서 {attention}으로 알린다
+            let settings: serde_json::Value = serde_json::from_str(args.iter().skip_while(|a| *a != "--settings").nth(1).unwrap()).unwrap();
+            let entry = &settings["hooks"]["Notification"][0];
+            let hook = &entry["hooks"][0];
+            assert_eq!(entry["matcher"], "permission_prompt", "{settings}");
+            assert!(hook["command"].as_str().unwrap().contains("POST {attention}") && hook["async"] == true, "{settings}");
+            assert!(settings["hooks"].get("PermissionRequest").is_none(), "두 훅이 함께 울림");
         }
         for args in [&reviewer.args, reviewer.resume.as_ref().unwrap()] {
             assert!(args.contains(&"developer_instructions={prompt:toml}".to_string()));

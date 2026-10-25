@@ -504,6 +504,8 @@ fn join_chat(
     });
     let mut vars = vars;
     vars.insert("chat".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.clone()));
+    // 사용자를 기다린다는 신호를 보낼 주소 (claude 권한 확인 훅, src-tauri/src/chat.rs /attention/<토큰>)
+    vars.insert("attention".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.replacen("/mcp/", "/attention/", 1)));
     let fill = |argv: Option<Vec<String>>| argv.map(|a| a.iter().map(|x| fill_placeholders(x, &vars)).collect::<Vec<_>>());
     (fill(command), fill(fallback), joined.map(|(_, j)| j))
 }
@@ -545,17 +547,24 @@ pub fn pty_spawn(
 // user: 사용자가 친 것 (키·붙여넣기·IME). 터미널이 스스로 보낸 응답(커서 위치 등)은 깨우기의 입력 상태에 넣지 않는다
 // (리뷰 P2: 커서 위치 응답 때문에 입력 중으로 보고 깨우지 않았다). 무엇이 사용자 입력인지는 프론트가 정한다 (Terminal.tsx).
 #[tauri::command]
-pub fn pty_write(ptys: State<'_, Ptys>, id: u32, data: String, user: Option<bool>) -> Result<(), String> {
-    write_input(&ptys, id, &data, user.unwrap_or(false))
+pub fn pty_write(ptys: State<'_, Ptys>, chats: State<'_, crate::chat::ChatsState>, id: u32, data: String, user: Option<bool>) -> Result<(), String> {
+    let typed_in = write_input(&ptys, id, &data, user.unwrap_or(false))?;
+    // 작업그룹 세션의 터미널에 사용자가 입력하면 그 그룹의 자동 깨우기를 다시 센다 (chat.rs user_input). 잠금 밖에서.
+    if let (Some(token), Some(chats)) = (typed_in, chats.0.as_ref()) {
+        chats.user_input(&token);
+    }
+    Ok(())
 }
 
-fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<(), String> {
+// 쓴다. 사용자 입력이면 입력 상태를 바꾸고, 채팅방에 참여한 터미널이면 그 토큰을 돌려준다.
+fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<Option<String>, String> {
     let mut sessions = ptys.sessions.lock().unwrap();
     let session = sessions.get_mut(&id).ok_or("no such pty")?;
     if user {
         session.input.typed(Instant::now());
     }
-    session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())
+    session.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(if user { session.chat_token.clone() } else { None })
 }
 
 // 이 토큰들로 참여한 터미널이 from의 메시지를 받았다: 깨우기를 기다린다. (기다리게 된 터미널, 변경 번호)

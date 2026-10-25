@@ -1080,3 +1080,16 @@ body.resizing {
   cursor: col-resize;
   user-select: none;
 }
+
+/* 사이드바 프로젝트: 세션이 사용자에게 보낸 안 읽은 메시지 수 (src/Sidebar.tsx) */
+.project-unread {
+  margin-left: 6px;
+  padding: 0 5px;
+  min-width: 14px;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  color: var(--menu-hover-fg);
+  background: var(--accent);
+  border-radius: 7px;
+}

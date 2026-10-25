@@ -13,6 +13,8 @@ type Props = {
   active: string | null;
   // 프로젝트 → 파일 트리가 보여 줄 폴더 (보고 있는 탭이 작업그룹이면 그 worktree 폴더). 없으면 프로젝트 폴더
   treeRoots: Record<string, { cwd: string; worktree: string | null }>;
+  // 프로젝트 → 세션이 사용자에게 보낸 안 읽은 메시지 수 (배지)
+  unread: Record<string, number>;
   // 목록 파일·작업그룹 설정 오류 등. 비어 있는 것은 건너뛴다.
   errors: (string | null)[];
   onAdd: () => void;
@@ -21,7 +23,7 @@ type Props = {
 };
 
 // 프로젝트 목록. 프로젝트를 펼치면 그 폴더의 파일 트리가 보인다.
-export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate, onRemove }: Props) {
+export function Sidebar({ projects, active, treeRoots, unread, errors, onAdd, onActivate, onRemove }: Props) {
   const t = useT();
   const { panels, setPanelWidth } = usePrefs();
   const [addingTo, setAddingTo] = useState<string | null>(null);
@@ -80,6 +82,7 @@ export function Sidebar({ projects, active, treeRoots, errors, onAdd, onActivate
               project={p}
               active={p.path === active}
               treeRoot={treeRoots[p.path]}
+              unread={unread[p.path] ?? 0}
               onActivate={() => onActivate(p.path)}
               onRemove={() => onRemove(p.path)}
               onAddRepo={() => setAddingTo(p.path)}
@@ -99,13 +102,14 @@ type NodeProps = {
   project: Project;
   active: boolean;
   treeRoot?: { cwd: string; worktree: string | null };
+  unread: number;
   onActivate: () => void;
   onRemove: () => void;
   onAddRepo: () => void;
   onSetup: () => void;
 };
 
-function ProjectNode({ project, active, treeRoot, onActivate, onRemove, onAddRepo, onSetup }: NodeProps) {
+function ProjectNode({ project, active, treeRoot, unread, onActivate, onRemove, onAddRepo, onSetup }: NodeProps) {
   const t = useT();
   const tree = useTree();
   const folderMenu = useFolderMenu();
@@ -155,6 +159,11 @@ function ProjectNode({ project, active, treeRoot, onActivate, onRemove, onAddRep
         />
         <ProjectIcon />
         <span className="tree-name">{baseName(path)}</span>
+        {unread > 0 && (
+          <span className="project-unread" data-unread={unread} title={t("sidebar.unread", { n: unread })}>
+            {unread}
+          </span>
+        )}
         {treeRoot?.worktree && (
           <span className="project-worktree" title={treeRoot.cwd}>
             {treeRoot.worktree}
