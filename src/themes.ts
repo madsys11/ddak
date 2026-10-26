@@ -46,6 +46,9 @@ const dark: Theme = {
     // 대화상자
     "--overlay": "#00000080",
     "--widget-bg": "#202020", // editorWidget.background
+    // 모바일 연결 창의 QR (카메라가 읽게 어느 테마에서나 밝은 바탕에 검은 점)
+    "--qr-fg": "#000000",
+    "--qr-bg": "#FFFFFF",
     "--input-bg": "#313131",
     "--input-border": "#3C3C3C",
     "--focus-border": "#0078D4",
@@ -117,6 +120,8 @@ const solarizedLight: Theme = {
     "--graph-6": "#DC322F",
     "--overlay": "#00000033",
     "--widget-bg": "#EEE8D5",
+    "--qr-fg": "#000000",
+    "--qr-bg": "#FFFFFF",
     "--input-bg": "#DDD6C1",
     "--input-border": "#D3AF86",
     "--focus-border": "#B49471",

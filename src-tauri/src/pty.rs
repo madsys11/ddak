@@ -742,8 +742,13 @@ pub fn start_waker(app: tauri::AppHandle) {
     use tauri::{Emitter, Manager};
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(250));
-        for (id, seq) in wake_tick(&app.state::<Ptys>(), Instant::now()) {
+        let woke = wake_tick(&app.state::<Ptys>(), Instant::now());
+        for (id, seq) in &woke {
             let _ = app.emit("chat-wake", serde_json::json!({ "pty": id, "pending": false, "seq": seq }));
+        }
+        // 폰은 어느 프로젝트인지 모르고 보고 있는 참여자를 다시 읽는다 (mobile.rs)
+        if !woke.is_empty() {
+            crate::mobile::publish(&app, None, "waiting", serde_json::json!({}));
         }
         app.state::<Ptys>().keep_awake();
     });

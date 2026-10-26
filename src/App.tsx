@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChatPanel } from "./ChatPanel";
+import { MobileDialog } from "./MobileDialog";
 import { Sidebar } from "./Sidebar";
 import { Workspace } from "./Workspace";
 import { StoreBroken, baseName, useProjects } from "./useProjects";
@@ -88,6 +89,16 @@ function App() {
     };
   }, [activate]);
 
+  // 앱 메뉴 "모바일 연결…" (src-tauri/src/menu.rs)
+  const [mobileOpen, setMobileOpen] = useState(false);
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload }) => payload === "mobile" && setMobileOpen(true));
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+  const mobileDialog = mobileOpen && <MobileDialog onClose={() => setMobileOpen(false)} />;
+
   async function addProject(path: string) {
     try {
       await add(path);
@@ -133,6 +144,7 @@ function App() {
             {t("app.addProject")}
           </button>
         </div>
+        {mobileDialog}
       </main>
     );
   }
@@ -170,6 +182,7 @@ function App() {
           ))}
         {!active && <div className="workspace-empty">{t("app.selectProject")}</div>}
       </section>
+      {mobileDialog}
     </main>
   );
 }

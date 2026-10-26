@@ -682,6 +682,47 @@ ddak 앱
   "보고 있음" = 그 프로젝트의 채팅 패널이 열려 있고, 그 프로젝트가 보이고, 창이 앞에 있음 (`ChatPanel` watching). 보게 되면 지운다.
 - 자체 테스트(`DDAK_SELFTEST`)는 보내지 않고 기록한다 (`selftest_notifications`), 창 포커스는 `selftest_set_focused`로 정한다.
 
+## 모바일 연결 (`mobile.rs`)
+
+폰에서 프로젝트 채팅을 읽고 보낸다. 설계와 단계는 `docs/mobile-plan.md`, 실기기 실험은 `docs/reviews/2026-10-26-mobile-spike.md`.
+
+```
+폰 (PWA, 고정 주소: https://madsys11.github.io/ddak/, src/mobile)
+ └ HTTPS → https://<맥>.<tailnet>.ts.net (tailscale serve, 신원 헤더 Tailscale-User-Login)
+            → http://127.0.0.1:47320 (ddak 모바일 서버, tiny_http)
+```
+
+- 기본은 꺼짐. 앱 메뉴 "모바일 연결…"(`MobileDialog.tsx`)에서 켠다. 설정은 앱 데이터 `mobile/config.json`
+  (켬, 포트 47320, 화면 주소, 폰에 보일 이름 = 맥 이름, 컴퓨터 id). 포트를 열지 못하면 창에 이유를 보인다.
+- 창은 Tailscale 상태를 CLI(`tailscale status --json`, `serve status --json`)로 읽어 보인다: 설치·로그인, 이 이름의 HTTPS
+  인증서, `tailscale serve`가 이 포트를 가리키는지. 아니면 "Tailscale Serve로 연결" 버튼이 `tailscale serve --bg <포트>`를
+  실행한다 (누를 때만). funnel이 켜져 있으면 서버를 멈추고 경고한다.
+- 페어링: 창의 "폰 페어링"이 6자리 코드(5분, 1회용, 새로 만들면 이전 것은 버림)와 QR(`<화면 주소>#pair=<API 주소>&code=<코드>`)을
+  보인다. 폰이 코드를 기기 토큰(256비트)으로 바꾼다. 앱 데이터 `mobile/devices.json`(0600)에는 토큰의 SHA-256, 기기 이름,
+  페어링한 Tailscale 로그인, 만든 때·마지막 사용만 둔다. 창의 기기 목록에서 연결을 끊으면 그 토큰은 바로 거절되고, 그 기기의
+  열린 SSE도 닫는다. 기기 목록·설정은 상태 잠금을 쥔 채 저장한다 (바꾼 순서대로 디스크에).
+- 요청 검사 순서: 모든 요청에 Host(이 맥의 `*.ts.net` 이름, `127.0.0.1`·`localhost:<포트>`, 아니면 421). OPTIONS는
+  Origin(화면 주소의 출처)·메서드(GET·POST)·헤더(`authorization`·`content-type`)만 보고 데이터 없이 204 (아니면 403).
+  나머지는 Origin, `Tailscale-User-Login`이 이 맥의 로그인과 같음(아니면 403, Tailscale을 못 읽으면 503), 그다음
+  `/api/pair`는 코드, 그 밖에는 `Authorization: Bearer <토큰>`(기기의 로그인도 같아야 함, 아니면 401).
+  코드·토큰 실패가 1분에 10번이면 그 1분 동안 429.
+- API: `GET /api/info`(이름, id, 버전, API 버전 1), `POST /api/pair`, `GET /api/projects`(등록된 프로젝트: id = 채팅 파일 이름과
+  같은 `<이름>-<경로 해시>`, 세션 수, 멈춘 작업그룹), `GET /api/projects/<id>/messages?before=&limit=`(최신부터 50개, `more`),
+  `GET …/members`(참여자, 깨우기 대기, 멈춘 작업그룹), `POST …/messages`(사용자로 보냄 + `via`: 기기 이름), `POST …/resume`,
+  `GET /api/events`(SSE: `hello`, `message`, `members`, `waiting`, `cleared`. 25초마다 주석 줄. 연결마다 이벤트를 64개까지
+  쌓고 넘으면 그 연결을 끊는다. 재생은 없다: 폰이 이어질 때 다시 읽는다).
+- 폰에서 보낸 메시지는 `user`로 기록되고 `via`(기기 이름)가 붙는다. 채팅 패널은 보낸 사람 옆에 "<기기>에서"를 보인다.
+- 폰 화면 (`src/mobile`, `vite.mobile.config.ts`, `npm run build:mobile`): 컴퓨터 목록(하나면 건너뜀)·추가(QR 링크나 주소+코드) →
+  프로젝트 목록 → 채팅(이전 메시지 더 읽기, 멈춘 작업그룹 재개, 참여자 칩을 누르면 멘션, 보내기 버튼). 컴퓨터 목록(주소, 토큰)은
+  폰 저장소(localStorage)에. 언어는 폰 설정, 테마는 폰의 밝기 설정을 따라 Dark / Solarized Light. 화면이 숨으면 SSE를 끊고
+  보이면 다시 잇는다 (실패하면 1·3·10초 뒤 다시). 채팅은 처음 열 때·다시 이어질 때·지웠을 때 최신 50개로 통째로 바꾸고
+  (더 읽어 둔 이전 페이지는 버린다), 그 조회를 보낸 뒤 SSE로 온 메시지는 남긴다. 겹친 조회는 마지막 것만 쓴다. 최신 조회를 기다리는 동안은
+  이전 페이지를 읽지 않고, 이전 페이지 응답은 그 사이 최신 조회를 시작하거나 적용했으면 버린다 (`src/mobile/sync.ts`). 맥의 API 버전을 모르면 목록·채팅 대신 업데이트 안내.
+- 배포: main에 들어간 `src/mobile` 등이 바뀌면 GitHub Actions(`.github/workflows/mobile-pages.yml`)가 Pages에 올린다.
+- 자체 테스트는 Tailscale 없이 정한 이름·로그인(`DDAK_MOBILE_IDENTITY`), OS가 고른 포트(`DDAK_MOBILE_PORT=0`), 시험 화면 주소
+  (`DDAK_MOBILE_SCREEN`)로 띄우고, 폰 대신 `selftest_mobile_http`로 요청한다.
+- 아직 없는 것 (계획서 2·3단계): 폰 푸시 알림, 세션 상태(권한 확인 대기 등) 표시, 안 읽은 수, 폰에서 프로젝트 열기, 잠자기 막기.
+
 ## 미결정 사항
 
 (없음)

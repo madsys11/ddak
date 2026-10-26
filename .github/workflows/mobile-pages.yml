@@ -1,0 +1,45 @@
+# 폰 화면(src/mobile)을 GitHub Pages(https://madsys11.github.io/ddak/)에 올린다 (docs/mobile-plan.md D7).
+# 이 경로가 연결한 모든 맥의 원격 명령 권한이므로, main에 들어간 것만 올린다.
+name: Mobile screen
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/mobile/**"
+      - "src/i18n/**"
+      - "src/themes.ts"
+      - "vite.mobile.config.ts"
+      - "package-lock.json"
+      - ".github/workflows/mobile-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build:mobile
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-mobile
+      - id: deployment
+        uses: actions/deploy-pages@v4

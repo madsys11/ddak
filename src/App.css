@@ -821,6 +821,9 @@ button.secondary {
 .chat-paused span {
   flex: 1;
 }
+.chat-via {
+  color: var(--fg-dim);
+}
 .chat-held {
   padding: 0 4px;
   color: var(--fg-dim);
@@ -1196,4 +1199,61 @@ body.resizing {
 .terminal-search button.on {
   color: var(--fg);
   border-color: var(--accent);
+}
+
+/* 모바일 연결 창 (src/MobileDialog.tsx) */
+.mobile-dialog {
+  width: 520px;
+}
+.modal label.mobile-enable {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+}
+.modal label.mobile-enable input {
+  flex: none;
+}
+.mobile-checks,
+.mobile-devices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mobile-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mobile-row button {
+  margin-left: auto;
+}
+.mobile-ok {
+  color: var(--status-done);
+}
+.mobile-bad {
+  color: var(--error);
+}
+.mobile-pairing {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.mobile-qr {
+  width: 168px;
+  height: 168px;
+  flex: none;
+}
+.mobile-pairing-text {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.mobile-code {
+  font: 600 28px ui-monospace, monospace;
+  letter-spacing: 0.15em;
+}
+.mobile-device-name {
+  font-weight: 600;
 }

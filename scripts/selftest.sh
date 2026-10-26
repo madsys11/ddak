@@ -24,16 +24,18 @@ git -C "$root/server" worktree add -q "$root/web"
 git init -q "$base/linked"
 git -C "$base/linked" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
 
-# 개발용으로 띄워 둔 앱(1420)과 같이 돌 수 있게 포트를 따로 쓴다.
-port=1430
+# 개발용으로 띄워 둔 앱(1420)과 같이 돌 수 있게 포트를 따로 쓴다. 다른 worktree의 자체 테스트와 겹치면 SELFTEST_PORT로 바꾼다.
+port=${SELFTEST_PORT:-1430}
 config="{\"build\":{\"devUrl\":\"http://localhost:$port\",\"beforeDevCommand\":\"npm run dev -- --port $port\"}}"
 
 # 시나리오 하나 = 앱 한 번 실행. 앱 데이터 폴더를 시나리오마다 따로 둔다 (둘째 인자: 같이 쓸 폴더 이름).
 run() {
   local scenario=$1 dirs=${2:-$1}
   echo "--- $scenario" >&2
+  # 모바일 연결은 Tailscale 없이 정한 이름·로그인으로, OS가 고른 포트에서 (실제 앱과 겹치지 않게. src-tauri/src/mobile.rs)
   # claude 세션 표시(CLAUDE_CODE_CHILD_SESSION 등)는 터미널에 넘기지 않는지, 다른 CLAUDE 변수는 넘기는지 본다 (testTerminal)
   CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=selftest CLAUDE_CODE_DDAK_SELFTEST=keep \
+  DDAK_MOBILE_IDENTITY="selftest.tail0.ts.net|selftest@example.com" DDAK_MOBILE_PORT=0 DDAK_MOBILE_SCREEN="https://screen.example/ddak/" \
   DDAK_SELFTEST="$root" DDAK_SELFTEST_SCENARIO="$scenario" DDAK_SELFTEST_ONLY="${SELFTEST_ONLY:-}" DDAK_DATA_DIR="$base/data-$dirs" DDAK_HOME="$base/home-$dirs" \
     npx tauri dev --no-watch --config "$config" 2>&1 \
     | sed -n '/=== DDAK SELFTEST BEGIN ===/,/=== DDAK SELFTEST \(PASS\|FAIL\) ===/p' \

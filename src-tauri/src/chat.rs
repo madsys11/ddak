@@ -32,6 +32,9 @@ pub struct Message {
     // 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않았다 (to는 원래 받는 사람 그대로. WAKE_LIMIT)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
+    // 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 struct Member {
@@ -323,6 +326,11 @@ impl Chats {
 
     // 보낸다. 파일에 붙인 뒤에 목록에 넣고 알린다 (쓰지 못하면 오류, 목록도 그대로).
     pub fn post(&self, project: &Path, from: &str, text: &str) -> Result<Message, String> {
+        self.post_via(project, from, text, None)
+    }
+
+    // via: 폰에서 보낸 기기 이름 (mobile.rs)
+    pub fn post_via(&self, project: &Path, from: &str, text: &str, via: Option<&str>) -> Result<Message, String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("empty message".into());
@@ -352,7 +360,7 @@ impl Chats {
             let floor = inner.floors.get(project).copied().unwrap_or(0);
             let room = inner.rooms.get_mut(project).unwrap();
             let id = room.iter().map(|m| m.id).max().unwrap_or(0).max(floor) + 1;
-            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held };
+            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held, via: via.map(str::to_string) };
             let line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&self.dir).and_then(|()| append_line(&file, &line)).map_err(|e| e.to_string())?;
             room.push(message.clone());
@@ -640,6 +648,7 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
             for (pty, seq) in crate::pty::wake_all(&emitter.state::<crate::pty::Ptys>(), &items) {
                 let _ = emitter.emit("chat-wake", json!({ "pty": pty, "pending": true, "seq": seq }));
             }
+            crate::mobile::publish(&emitter, Some(project), "waiting", json!({}));
         };
         match change {
             Change::Message(message, released) => {
@@ -649,17 +658,21 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                     crate::notify::send(project, crate::notify::Kind::Chat, &format!("{}: {}", message.from, crate::notify::first_line(&message.text)), None);
                 }
                 let _ = emitter.emit("chat", json!({ "project": project, "message": message }));
+                crate::mobile::publish(&emitter, Some(project), "message", json!({ "message": message }));
                 wake(Some(message), released);
             }
             Change::Members => {
                 let _ = emitter.emit("chat-members", json!({ "project": project }));
+                crate::mobile::publish(&emitter, Some(project), "members", json!({}));
             }
             Change::Limits => {
                 let _ = emitter.emit("chat-limit", json!({ "project": project }));
+                crate::mobile::publish(&emitter, Some(project), "members", json!({}));
             }
             Change::Released(released) => wake(None, released),
             Change::Cleared => {
                 let _ = emitter.emit("chat", json!({ "project": project }));
+                crate::mobile::publish(&emitter, Some(project), "cleared", json!({}));
             }
             Change::Paused(group) => {
                 crate::notify::send(project, crate::notify::Kind::Chat, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]), None);
@@ -1006,7 +1019,7 @@ mod tests {
         let dir = temp("broken");
         let p = Path::new("/p/b");
         let chats = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
-        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![], held: false }).unwrap();
+        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![], held: false, via: None }).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let mut bytes = format!("{}\n", line(1)).into_bytes();
         bytes.extend(b"\xff\xfe broken\n");

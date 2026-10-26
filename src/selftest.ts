@@ -12,6 +12,7 @@ import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, pars
 import { findLinks, linkProvider } from "./terminalLinks";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
+import { MessageView } from "./mobile/sync";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
 import { screenPixelRatio } from "./zoom";
@@ -539,6 +540,135 @@ async function testNotifySound() {
   await clickMenu("ddak", "Notification Sound", "Glass");
   await waitMenu((m) => m.includes("ddak/Notification Sound/Glass [x]"));
   await notes();
+}
+
+// 폰 채팅이 보이는 메시지 (src/mobile/sync.ts): 서버에 재생이 없어서 처음·다시 이어짐·지움 때 최신 페이지로 바꾼다.
+// 리뷰 R2(첫 조회와 SSE hello가 겹쳐 more를 잃음)·R3(끊긴 동안 50개 넘게 생기면 가운데가 빠짐, 지운 것이 남음) 순서를 그대로 돌린다.
+function testMobileSyncUnit() {
+  const msg = (id: number) => ({ id, time: 0, from: "user", text: `m${id}`, to: [] });
+  const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => msg(a + i));
+  const ids = (v: MessageView) => `${v.messages[0]?.id ?? "-"}..${v.messages.at(-1)?.id ?? "-"}(${v.messages.length}) more=${v.more}`;
+
+  // R2: 처음 조회 중에 hello가 다시 조회 → 첫 응답은 늦은 것으로 버리고, 둘째 응답이 more까지 정한다 (어느 순서로 와도)
+  for (const order of ["first-then-second", "second-then-first"]) {
+    const v = new MessageView();
+    const first = v.begin();
+    const second = v.begin();
+    const answers: [number, boolean][] = order === "first-then-second" ? [[first, false], [second, true]] : [[second, true], [first, false]];
+    const used = answers.map(([load]) => v.latest(load, range(11, 60), true));
+    check(`폰 채팅: 겹친 조회는 마지막 것만 쓰고 이전 메시지 버튼을 지킴 (${order})`, used.join(",") === answers.map(([, u]) => u).join(",") && ids(v) === "11..60(50) more=true", `${used} ${ids(v)}`);
+  }
+  // R3a: 1~10을 본 뒤 끊긴 동안 11~70이 생김 → 다시 이으면 최신 50개(21~70)와 이전 버튼, 이전을 읽으면 1~20이 빠짐 없이
+  const a = new MessageView();
+  a.latest(a.begin(), range(1, 10), false);
+  a.latest(a.begin(), range(21, 70), true);
+  const { before, gen } = a.older();
+  a.earlier(gen, range(1, 20), false);
+  const continuous = a.messages.every((m, i) => m.id === i + 1);
+  check("폰 채팅: 끊긴 동안 많이 생겨도 다시 이으면 가운데가 빠지지 않음", before === 21 && continuous && ids(a) === "1..70(70) more=false", `${before} ${ids(a)}`);
+  // R3b: 끊긴 동안 맥에서 대화를 지우고 새 11번만 남음 → 다시 이으면 지운 것은 사라짐
+  const b = new MessageView();
+  b.latest(b.begin(), range(1, 10), false);
+  b.latest(b.begin(), [msg(11)], false);
+  check("폰 채팅: 끊긴 동안 지운 대화는 다시 이으면 사라짐", ids(b) === "11..11(1) more=false", ids(b));
+  // 조회를 보낸 뒤 SSE로 온 메시지는 응답에 없어도 남는다
+  const c = new MessageView();
+  const loading = c.begin();
+  c.event(msg(61));
+  c.latest(loading, range(11, 60), true);
+  check("폰 채팅: 조회 중에 온 새 메시지를 잃지 않음", ids(c) === "11..61(51) more=true", ids(c));
+  // 이전 페이지를 읽는 사이 최신으로 바뀌었으면 그 응답은 붙이지 않는다 (사이가 빈다)
+  const d = new MessageView();
+  d.latest(d.begin(), range(51, 100), true);
+  const old = d.older();
+  d.latest(d.begin(), range(81, 130), true);
+  const stale = d.earlier(old.gen, range(1, 50), false);
+  check("폰 채팅: 늦게 온 이전 페이지는 바뀐 목록에 붙이지 않음", !stale && ids(d) === "81..130(50) more=true", `${stale} ${ids(d)}`);
+  // 반대 순서 (재리뷰 R3): 최신 조회를 기다리는 동안에는 이전 페이지를 읽지 않는다. 읽었더라도 붙이지 않는다.
+  const e = new MessageView();
+  e.latest(e.begin(), range(51, 100), true);
+  const reload = e.begin();
+  const during = e.older();
+  e.latest(reload, range(151, 200), true);
+  const late = e.earlier(during.gen, range(1, 50), false);
+  check("폰 채팅: 최신 조회를 기다리는 동안 누른 이전 메시지는 읽지도 붙이지도 않음", during.before === undefined && !late && ids(e) === "151..200(50) more=true", `${during.before} ${late} ${ids(e)}`);
+  // 재리뷰 R6: 최신 조회가 실패하면 기다림을 풀어 이전 메시지를 다시 읽을 수 있다. 앞선 조회의 실패는 뒤 조회의 기다림을 풀지 않는다.
+  const f = new MessageView();
+  f.latest(f.begin(), range(51, 100), true);
+  const failed = f.begin();
+  f.fail(failed);
+  const afterFail = f.older().before;
+  const first = f.begin();
+  const second = f.begin();
+  f.fail(first);
+  const stillWaiting = f.older().before;
+  f.latest(second, range(101, 150), true);
+  check("폰 채팅: 최신 조회가 실패해도 이전 메시지를 읽을 수 있음 (늦은 실패는 새 조회를 풀지 않음)", afterFail === 51 && stillWaiting === undefined && ids(f) === "101..150(50) more=true", `${afterFail} ${stillWaiting} ${ids(f)}`);
+}
+
+// 모바일 연결 (src/MobileDialog.tsx, src-tauri/src/mobile.rs). Tailscale 대신 정한 이름·로그인(scripts/selftest.sh
+// DDAK_MOBILE_IDENTITY)으로 켜고, 폰 대신 Rust에서 HTTP를 보낸다 (Origin·신원 헤더를 넣으려고, selftest_mobile_http).
+async function testMobile(root: string) {
+  const ORIGIN = "https://screen.example";
+  const LOGIN = "selftest@example.com";
+  const http = (method: string, path: string, headers: Record<string, string> = {}, body = "") =>
+    invoke<[number, string]>("selftest_mobile_http", { method, path, headers: Object.entries({ Origin: ORIGIN, "Tailscale-User-Login": LOGIN, ...headers }), body });
+  const dialog = () => document.querySelector<HTMLElement>(".mobile-dialog");
+  const enable = () => dialog()!.querySelector<HTMLInputElement>("[data-action=mobile-enable]")!;
+  await waitMenu((m) => m.includes("ddak/Mobile Connection…"));
+  await clickMenu("ddak", "Mobile Connection…");
+  await waitFor("모바일 연결 창", () => dialog()?.querySelector("[data-action=mobile-enable]"), 5000);
+  check("모바일 연결: 앱 메뉴로 창을 열고 처음엔 꺼짐", !enable().checked, dialog()!.textContent ?? "");
+  enable().click();
+  const ready = await waitFor("켜짐", () => dialog()!.querySelector("[data-mobile-ready=true]"), 10000).then(() => true, () => false);
+  check("모바일 연결: 켜면 서버가 뜨고 준비됨 (HTTPS 인증서·serve)", ready && enable().checked, dialog()!.textContent ?? "");
+  dialog()!.querySelector<HTMLElement>("[data-action=mobile-pair]")!.click();
+  const codeEl = await waitFor("페어링 코드", () => dialog()!.querySelector<HTMLElement>("[data-pair-code]"), 5000);
+  const code = codeEl.dataset.pairCode!;
+  check("모바일 연결: 페어링 코드와 QR", /^\d{6}$/.test(code) && !!dialog()!.querySelector("svg.mobile-qr path[d^='M']"), dialog()!.textContent ?? "");
+
+  // 다른 Tailscale 로그인은 맞는 코드여도 거절, 같은 로그인이면 기기 토큰
+  const [other] = await http("POST", "/api/pair", { "Tailscale-User-Login": "someone@example.com" }, JSON.stringify({ code, device: "Selftest Phone" }));
+  const [paired, pairBody] = await http("POST", "/api/pair", {}, JSON.stringify({ code, device: "Selftest Phone" }));
+  const token = paired === 200 ? (JSON.parse(pairBody).token as string) : "";
+  check("모바일 연결: 다른 로그인 거절, 코드로 페어링", other === 403 && paired === 200 && token.length === 64, `${other} ${paired} ${pairBody}`);
+  const auth = { Authorization: `Bearer ${token}` };
+  const [listed, listBody] = await http("GET", "/api/projects", auth);
+  const project = listed === 200 ? (JSON.parse(listBody).projects as { id: string; name: string }[]).find((p) => p.name === root.split("/").pop()) : undefined;
+  check("모바일 연결: 프로젝트 목록", !!project, `${listed} ${listBody}`);
+  const [posted, postBody] = await http("POST", `/api/projects/${project?.id}/messages`, auth, JSON.stringify({ text: "hello from the phone" }));
+  const stored = await invoke<{ text: string; from: string; via?: string }[]>("chat_messages", { project: root });
+  const last = stored.at(-1);
+  check("모바일 연결: 폰에서 보낸 메시지는 사용자로, 기기 이름과 함께", posted === 200 && last?.from === "user" && last.text === "hello from the phone" && last.via === "Selftest Phone", `${posted} ${postBody} ${JSON.stringify(last)}`);
+
+  // 채팅 패널에 "폰에서" 표시
+  const ws = document.querySelector<HTMLElement>(`.project-workspace[data-project="${root}"]`);
+  const panel = () => ws?.querySelector<HTMLElement>(".chat-panel");
+  const wasOpen = !!panel() && panel()!.style.display !== "none";
+  // 창은 닫고 본다 (패널 버튼이 대화상자에 가리지 않게)
+  dialog()!.querySelector<HTMLElement>(".modal-actions button")!.click();
+  if (!wasOpen) ws?.querySelector<HTMLElement>("[data-action=chat]")?.click();
+  const via = await waitFor("폰 표시", () => panel()?.querySelector<HTMLElement>(".chat-msg:last-of-type [data-via]"), 5000).catch(() => null);
+  check("모바일 연결: 채팅 패널에 보낸 기기 표시", via?.textContent === "from Selftest Phone", via?.textContent ?? panel()?.innerHTML.slice(-300) ?? "패널 없음");
+  if (!wasOpen) ws?.querySelector<HTMLElement>("[data-action=chat]")?.click();
+
+  // 기기 목록에서 연결을 끊으면 그 토큰은 거절
+  await clickMenu("ddak", "Mobile Connection…");
+  const device = await waitFor("기기 목록", () => dialog()?.querySelector<HTMLElement>("[data-device]"), 5000).catch(() => null);
+  check("모바일 연결: 페어링한 기기를 보임", device?.querySelector(".mobile-device-name")?.textContent === "Selftest Phone", dialog()?.textContent ?? "");
+  device?.querySelector<HTMLElement>("button")?.click();
+  await waitFor("기기 지움", () => !dialog()!.querySelector("[data-device]"), 5000).catch(() => null);
+  const [after] = await http("GET", "/api/info", auth);
+  check("모바일 연결: 연결을 끊은 기기는 401", after === 401, String(after));
+  // 끄면 서버도 멈춘다
+  enable().click();
+  await waitFor("꺼짐", () => !enable().checked && !dialog()!.querySelector("[data-mobile-ready]"), 5000).catch(() => null);
+  const stopped = await http("GET", "/api/info", auth).then(() => false, () => true);
+  check("모바일 연결: 끄면 서버가 멈춤", stopped && !enable().checked, "");
+  dialog()!.querySelector<HTMLElement>(".modal-actions button")!.click();
+  await waitFor("창 닫힘", () => !dialog(), 3000).catch(() => null);
+  // 뒤 단계(채팅 패널)는 방이 비어 있다고 본다 (첫 메시지가 세션의 것)
+  await invoke("chat_clear", { project: root });
 }
 
 // 화면 배율: 보기 메뉴(⌘= ⌘- ⌘0)로 웹뷰 전체를 키우고 줄인다.
@@ -3535,6 +3665,8 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["tabRename", testTabRename],
     ["prefs", testPrefs],
     ["notifySound", testNotifySound],
+    ["mobile", () => testMobile(root)],
+    ["mobileSyncUnit", testMobileSyncUnit],
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],

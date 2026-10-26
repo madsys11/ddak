@@ -7,8 +7,8 @@ import { PANEL_SIZES, usePrefs } from "./prefs";
 import { Resizer } from "./Resizer";
 
 // src-tauri/src/chat.rs Message
-// held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음
-export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean };
+// held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음. via: 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
+export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string };
 
 // src-tauri/src/chat.rs WAKE_LIMIT
 const WAKE_LIMIT = 6;
@@ -201,6 +201,11 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
           <div key={m.id} className={`chat-msg${m.from === USER ? " mine" : ""}${m.to.includes(USER) ? " to-me" : ""}`} data-id={m.id}>
             <div className="chat-meta">
               <span className="chat-from">{m.from === USER ? t("chat.you") : m.from}</span>
+              {m.via && (
+                <span className="chat-via" data-via={m.via}>
+                  {t("chat.via", { device: m.via })}
+                </span>
+              )}
               {m.to.length > 0 && <span className="chat-to">→ {m.to.map((x) => (x === USER ? t("chat.you") : x)).join(", ")}</span>}
               {m.held && (
                 <span className="chat-held" data-held title={t("chat.heldHint")}>

@@ -8,6 +8,7 @@ mod git;
 mod groups;
 mod links;
 mod menu;
+mod mobile;
 mod notify;
 mod prepare;
 mod projects;
@@ -35,7 +36,10 @@ pub fn run() {
         .setup(|app| {
             menu::install(app.handle());
             notify::init(app.handle());
-            app.manage(chat::install(app.handle()));
+            let chats = chat::install(app.handle());
+            let mobile = mobile::install(app.handle(), chats.0.clone());
+            app.manage(chats);
+            app.manage(mobile);
             pty::start_waker(app.handle().clone());
             Ok(())
         })
@@ -92,6 +96,12 @@ pub fn run() {
             chat::chat_paused,
             chat::chat_clear,
             chat::chat_resume,
+            mobile::mobile_status,
+            mobile::mobile_set_enabled,
+            mobile::mobile_serve,
+            mobile::mobile_pair_code,
+            mobile::mobile_forget,
+            mobile::selftest_mobile_http,
             pty::pty_write,
             pty::pty_foreground,
             pty::pty_awaiting,

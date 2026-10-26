@@ -60,6 +60,11 @@ fn save(path: &std::path::Path, store: &Store) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
+// 등록된 프로젝트 경로 (모바일 연결이 목록을 보인다, mobile.rs)
+pub fn paths(app: &AppHandle) -> Result<Vec<String>, String> {
+    Ok(load(&store_path(app)?)?.projects.into_iter().map(|p| p.path).collect())
+}
+
 #[tauri::command]
 pub fn projects_load(app: AppHandle) -> Result<Store, String> {
     load(&store_path(&app)?)

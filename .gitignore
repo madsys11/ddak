@@ -2,6 +2,7 @@
 .env
 node_modules/
 dist/
+dist-mobile/
 __pycache__/
 .venv/
 # Logs
