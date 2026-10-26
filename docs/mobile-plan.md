@@ -260,6 +260,15 @@ ddak 앱
 6. 기기 목록과 해제 버튼. 해제하면 그 기기의 푸시 구독도 지운다.
 7. 페어링 시도·인증 실패를 세고 (예: 분당 10회) 넘으면 잠시 막는다. 모바일에서 보낸 메시지는 지금처럼 `user`로
    기록하되 출처(기기 이름)를 메시지에 남긴다 (`via` 필드, 데스크톱에는 작은 표시).
+8. **Tailnet Lock + 키 만료** (Tailscale 설정, 사용자가 켬): Tailscale 로그인(Google 등)이 털리거나 Tailscale
+   제어 서버가 공격받아도 남의 기기가 tailnet에 들어오지 못하게 한다. Tailnet Lock을 켜면 이미 믿는 기기가 서명해야 새 기기가
+   들어온다. 기기 키 만료도 켠다. 이것이 없으면 로그인 하나로 tailnet에 들어와 모바일 서버까지 닿고, 남는
+   방어는 기기 토큰(1번·2번) 한 겹이다. 관리 콘솔의 "새 기기 승인"은 Tailnet Lock과 함께 켤 수 없다 (2026-10-26 `lock init`이
+   "cannot use Tailnet Lock and device approval at the same time"으로 거절). 서명이 승인보다 강하므로(제어 서버를 믿지 않아도
+   됨) 승인은 끄고 Lock을 쓴다.
+9. **Tailscale 접근 규칙(ACL)**: 폰 → 맥의 HTTPS(443, `tailscale serve`)만 허용한다. 맥 → 폰이나 다른 포트는 열지 않는다.
+   모바일 연결 창은 이 규칙의 예시를 보여 준다 (규칙은 사용자가 관리 콘솔에 넣는다. ddak은 Tailscale 계정을 다루지 않는다).
+- 전제: Google·GitHub 계정은 패스키나 2단계 인증을 쓴다. GitHub는 화면 배포 경로(D7)라 특히 중요하다.
 
 ### 푸시 알림 (`push.rs`, `notify.rs`)
 
@@ -342,7 +351,14 @@ ddak 앱
 
 ### M0. 실험 (코드 반영 없음)
 
-실제 기기로 먼저 본다. 시험 기기는 **Android (Chrome)**. 결과는 `docs/reviews/<날짜>-mobile-spike.md`.
+실제 기기로 먼저 본다. 시험 기기는 **Android (Chrome)**, Galaxy Z Fold7 (Android 17)이다. Android 16 이상이라
+OS의 로컬 네트워크 권한이 있는 버전이므로, 1번에서 Chrome 권한과 함께 이 권한이 Tailscale 주소에 걸리는지도 본다. 결과는 `docs/reviews/<날짜>-mobile-spike.md`.
+
+준비:
+- 맥(A, B)과 폰에 Tailscale 설치, 같은 계정으로 로그인. 관리 콘솔에서 MagicDNS와 HTTPS 인증서 켜기.
+- Tailnet Lock 켜기 (서명 기기는 맥 A), 기기 키 만료 켜기. 새 기기 승인은 Lock과 함께 켤 수 없어 끈다. 맥 B는 맥 A의 서명을 받아 들어온다.
+- ACL: 폰 → 맥 443만 허용. 실험 1번 전에 넣어서, 규칙이 있는 상태에서 연결이 되는지도 같이 본다.
+- 공개 HTTPS 출처: 실험용 정적 페이지를 올릴 곳 (사용자 승인 필요).
 개발 서버가 아니라 실제 공개 HTTPS 출처(GitHub Pages의 시험 페이지)에서, 맥 두 대(A, B)의 `*.ts.net`으로 붙는다.
 
 1. **연결 (가장 먼저, 실패하면 설계가 바뀜)**: 고정 주소의 PWA가 A·B의 API를 CORS로 부를 수 있는지.
