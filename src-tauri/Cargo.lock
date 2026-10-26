@@ -695,6 +695,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tiny_http",
+ "url",
 ]
 
 [[package]]

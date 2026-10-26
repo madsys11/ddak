@@ -198,6 +198,7 @@ export const ko: Messages = {
   "group.createFailed": "작업그룹을 만들지 못했습니다: {detail}",
   "group.noRepos": "이 프로젝트에 worktree를 만들 git 저장소가 없습니다.",
 
+  "terminal.linkHint": "⌘+클릭으로 열기",
   "terminal.spawnFailed": "터미널 실행 실패: {error}",
 
   "theme.dark": "다크",

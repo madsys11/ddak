@@ -14,6 +14,7 @@ import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, pars
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 import { TerminalSearch } from "./TerminalSearch";
+import { linkProvider, oscLinkHandler } from "./terminalLinks";
 
 // xterm이 따로 보내지 않는 키 조합을 셸·CLI가 아는 입력으로 바꾼다.
 // - ⌘⌫ → Ctrl+U (커서 앞 지우기, zsh는 줄 전체). VS Code 터미널과 같은 값.
@@ -143,6 +144,10 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     // PTY가 생기면 풀린다 (그 전에 온 OSC 7501 물음의 답을 기다렸다 보낸다)
     let gotId: (id: number) => void = () => {};
     const idReady = new Promise<number>((resolve) => (gotId = resolve));
+    // 화면의 URL·파일 경로를 ⌘+클릭으로 연다 (src/terminalLinks.ts)
+    const linkContext = { id: () => id, cwd: () => cwd, hint: () => latest.current.t("terminal.linkHint") };
+    const links = term.registerLinkProvider(linkProvider(term, linkContext));
+    term.options.linkHandler = oscLinkHandler(term, linkContext);
     // 출력(바이트)과 마지막의 종료({exit})가 같은 채널로 순서대로 온다 (src-tauri/src/pty.rs pty_spawn).
     // 채널은 spawn 전에 만들어서, 생성 응답보다 먼저 끝나도 종료를 잃지 않는다.
     const onData = new Channel<ArrayBuffer | { exit: number | null }>();
@@ -339,6 +344,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       observer.disconnect();
       input.dispose();
       programStatus.dispose();
+      links.dispose();
       parsed.dispose();
       clearTimeout(dialogCheck);
       clearTimeout(dialogCap);

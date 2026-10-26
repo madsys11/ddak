@@ -54,6 +54,11 @@ const dark: Theme = {
     // 터미널 검색의 일치·지금 결과 (#RRGGBB만, xterm 검색 애드온. VS Code editor.findMatch(Highlight)Background를 배경에 섞은 색)
     "--search-match": "#4A3B22",
     "--search-match-active": "#9E6A03",
+    // 창 이름표의 프로그램 상태 (App.css .pane-badge.status)
+    "--status-working": "#4DAAFC",
+    "--status-done": "#3FB950",
+    "--status-awaiting-bg": "#E5A13A",
+    "--status-awaiting-fg": "#1A1A1A",
   },
   terminal: {
     background: "#1F1F1F",
@@ -119,6 +124,11 @@ const solarizedLight: Theme = {
     "--menu-hover-fg": "#6C6C6C",
     "--search-match": "#F0DFA8",
     "--search-match-active": "#E3B341",
+    // 솔라라이즈드 파랑·초록·주황을 이름표 배경(--sidebar-bg) 위 작은 글자 대비 4.5:1 이상으로 진하게 (리뷰 R3)
+    "--status-working": "#1B659A",
+    "--status-done": "#566300",
+    "--status-awaiting-bg": "#B5420F",
+    "--status-awaiting-fg": "#FDF6E3",
   },
   terminal: {
     background: "#FDF6E3",

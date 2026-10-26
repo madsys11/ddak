@@ -198,6 +198,7 @@ export const en = {
   "group.createFailed": "Could not create the work group: {detail}",
   "group.noRepos": "This project has no git repository to make a worktree from.",
 
+  "terminal.linkHint": "⌘-click to open",
   "terminal.spawnFailed": "Failed to start terminal: {error}",
 
   "theme.dark": "Dark",

@@ -6,6 +6,7 @@ mod clone;
 mod fs;
 mod git;
 mod groups;
+mod links;
 mod menu;
 mod notify;
 mod prepare;
@@ -53,6 +54,9 @@ pub fn run() {
             notify::selftest_click_notification,
             notify::real_path,
             notify::selftest_set_focused,
+            links::link_targets,
+            links::open_link,
+            links::selftest_opened_links,
             fs::list_dir,
             fs::fs_create,
             fs::fs_rename,

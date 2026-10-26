@@ -26,6 +26,8 @@ portable-pty = "0.9.0"
 tauri-plugin-dialog = "2.8.3"
 notify = "8"
 tiny_http = "0.12"
+# 터미널 링크의 file:// 주소를 경로로 (links.rs)
+url = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

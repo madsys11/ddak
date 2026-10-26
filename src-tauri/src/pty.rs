@@ -593,7 +593,7 @@ pub fn pty_foreground(ptys: State<'_, Ptys>, id: u32) -> Vec<String> {
 // 앞에서 도는 프로그램의 이름 후보: 띄울 때 쓴 이름(argv[0]의 마지막 부분), 커널이 기록한 실행 파일 이름 순.
 // 둘이 다를 수 있다: claude는 versions/2.1.310을 가리키는 링크라 커널 이름은 "2.1.310"이다 (2026-10-25).
 fn foreground(ptys: &Ptys, id: u32) -> Vec<String> {
-    let Some(pid) = ptys.sessions.lock().unwrap().get(&id).and_then(|s| s.master.process_group_leader()) else {
+    let Some(pid) = ptys.foreground_pid(id) else {
         return Vec::new();
     };
     let mut names = Vec::new();
@@ -833,6 +833,11 @@ impl Ptys {
                 let _ = child.wait();
             }
         }
+    }
+
+    // 터미널 앞에서 도는 프로그램(포그라운드 프로세스 그룹의 대표)의 pid (터미널 링크의 상대 경로 기준, links.rs)
+    pub fn foreground_pid(&self, id: u32) -> Option<libc::pid_t> {
+        self.sessions.lock().unwrap().get(&id).and_then(|s| s.master.process_group_leader())
     }
 
     // 이 채팅 토큰의 터미널 (알림을 누르면 보일 창)

@@ -2,13 +2,15 @@
 // 테스트용 폴더 구조는 그 스크립트가 만든다.
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ILink } from "@xterm/xterm";
 import { devHooks, liveTerms } from "./devHooks";
 import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus } from "./programStatus";
+import { findLinks, linkProvider } from "./terminalLinks";
+import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
@@ -1584,9 +1586,33 @@ async function testProgramStatus(root: string, term: Terminal) {
   await report(`state=blocked:kind=permission:msg=${btoa("approve Bash: ls")}`);
   const blocked = await waitAsync("권한 대기 표시", shows("waiting for permission", true), 3000).then(() => true, () => false);
   check("프로그램 상태: blocked(permission)이면 이름표에 권한 확인 대기, 깨우기 미룸", blocked && badge()?.title.startsWith("approve Bash: ls") === true, `${badge()?.textContent} ${await awaiting()} ${badge()?.title}`);
+  // 기다림은 색을 채운 칩 (다른 상태·배지와 구분, 상태 표시 가독성)
+  const looks = () => {
+    const css = getComputedStyle(badge()!);
+    return { color: css.color, bg: css.backgroundColor, border: css.borderTopStyle };
+  };
+  const awaitLook = blocked ? looks() : null;
+  check(
+    "프로그램 상태: 기다림은 색을 채운 칩 (--status-awaiting-bg·fg)",
+    awaitLook?.bg === tokenRgb("--status-awaiting-bg") && awaitLook?.color === tokenRgb("--status-awaiting-fg"),
+    JSON.stringify(awaitLook),
+  );
   await report("state=working");
   const working = await waitAsync("작업 중 표시", shows("working", false), 3000).then(() => true, () => false);
   check("프로그램 상태: working이면 작업 중, 깨우기 미루지 않음", working, `${badge()?.textContent} ${await awaiting()}`);
+  // 작업 중·완료는 테두리 없이 색 점 + 글자 (테두리 칩인 깨우기·준비 배지와 구분)
+  const workLook = working ? looks() : null;
+  await report("state=done");
+  const done = await waitAsync("완료 표시", shows("done", false), 3000).then(() => true, () => false);
+  const doneLook = done ? looks() : null;
+  await report("state=working");
+  await waitAsync("다시 작업 중", shows("working", false), 3000).catch(() => null);
+  check(
+    "프로그램 상태: 작업 중(--status-working)·완료(--status-done)는 테두리·배경 없는 색 글자",
+    workLook?.color === tokenRgb("--status-working") && doneLook?.color === tokenRgb("--status-done") &&
+      [workLook, doneLook].every((l) => l?.border === "none" && l?.bg === "rgba(0, 0, 0, 0)"),
+    JSON.stringify({ workLook, doneLook }),
+  );
   // 작업 중인 터미널이 있으면 잠자기를 막는다 (caffeinate, src-tauri/src/pty.rs keep_awake. 0.25초마다 맞춘다)
   const awake = () => invoke<boolean>("selftest_keep_awake");
   const kept = await waitAsync("잠자기 막음", async () => await awake(), 3000).then(() => true, () => false);
@@ -1625,6 +1651,151 @@ async function testProgramStatus(root: string, term: Terminal) {
   const resolved = await invoke<string>("real_path", { path: link });
   await run(term, `rm -f "${link}"`);
   check("알림 누르기: 링크 경로의 실제 경로", resolved === root && (await invoke<string>("real_path", { path: "/no/such/ddak" })) === "/no/such/ddak", resolved);
+}
+
+// 테마 토큰(#RRGGBB)의 계산된 색 모양 ("rgb(r, g, b)")
+function tokenRgb(name: string) {
+  const hex = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+// 상태 글자의 대비: 모든 테마에서 이름표 배경 위 작은 글자 4.5:1 이상 (WCAG AA, 리뷰 R3)
+function testStatusContrastUnit() {
+  const lum = (hex: string) => {
+    const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a: string, b: string) => {
+    const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+    return (hi + 0.05) / (lo + 0.05);
+  };
+  const low = Object.entries(THEMES).flatMap(([name, theme]) => {
+    const ui = theme.ui;
+    const pairs: [string, string, string][] = [
+      ["working", ui["--status-working"], ui["--sidebar-bg"]],
+      ["done", ui["--status-done"], ui["--sidebar-bg"]],
+      ["awaiting", ui["--status-awaiting-fg"], ui["--status-awaiting-bg"]],
+    ];
+    return pairs.filter(([, fg, bg]) => ratio(fg, bg) < 4.5).map(([what, fg, bg]) => `${name} ${what} ${ratio(fg, bg).toFixed(2)}`);
+  });
+  check("상태 표시: 모든 테마에서 상태 글자 대비 4.5:1 이상", low.length === 0, low.join(" | "));
+}
+
+// 터미널 링크 후보 (src/terminalLinks.ts findLinks): URL, 경로(줄 번호·문장 부호·조사), 경로가 아닌 것
+function testTerminalLinksUnit() {
+  const got = (text: string) => findLinks(text).map((f) => `${f.kind}:${f.target}@${text.slice(f.start, f.end)}`);
+  const cases: [string, string[]][] = [
+    ["see https://example.com/a?b=1. ok", ["url:https://example.com/a?b=1@https://example.com/a?b=1"]],
+    ["open docs/spec.md에 적었습니다", ["path:docs/spec.md에@docs/spec.md에", "path:docs/spec.md@docs/spec.md"]],
+    ["at src/x.ts:42:7, done", ["path:src/x.ts@src/x.ts:42:7"]],
+    ["(report.html) and `/tmp/a b`", ["path:report.html@report.html", "path:/tmp/a@/tmp/a"]],
+    ["version 2.1.310 and v1.0 then 10:41 PM", []],
+    ["mailto:x@y.z and file://x", []],
+  ];
+  const bad = cases.filter(([text, want]) => JSON.stringify(got(text)) !== JSON.stringify(want)).map(([text]) => `${text} → ${JSON.stringify(got(text))}`);
+  check("터미널 링크: 글자에서 URL·경로 후보 찾기 (줄 번호·문장 부호·조사, 버전·시각은 아님)", bad.length === 0, bad.join(" | "));
+}
+
+// 넘친 줄의 링크: 넓은 글자가 줄 끝 한 칸에 못 들어가 다음 줄로 넘어가도 링크가 끊기지 않는다 (리뷰 R1).
+// 화면 밖의 xterm에 직접 써서 링크 제공자에 줄마다 묻는다 (경로는 실제 파일로 link_targets)
+async function testTerminalLinkWrap(root: string, shell: Terminal) {
+  const dir = `${root}/lkw`;
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed; left:-3000px; top:0; width:900px; height:300px";
+  document.body.appendChild(box);
+  const results: string[] = [];
+  const cases: { cols: number; text: string; cwd: string; want: string; rows: number[] }[] = [
+    { cols: 80, text: `https://example.com/${"a".repeat(58)}/한글`, cwd: root, want: `https://example.com/${"a".repeat(58)}/한글`, rows: [1, 2] },
+    { cols: 3, text: "a/한.md", cwd: dir, want: "a/한.md", rows: [1, 2, 3] },
+  ];
+  try {
+    await run(shell, `mkdir -p "${dir}/a" && printf x > "${dir}/a/한.md"`);
+    for (const c of cases) {
+      const term = new Terminal({ cols: c.cols, rows: 6 });
+      term.open(box);
+      await new Promise<void>((r) => term.write(`${c.text}\r\n`, r));
+      const provider = linkProvider(term, { id: () => undefined, cwd: () => c.cwd, hint: () => "" });
+      for (const y of c.rows) {
+        const links = await new Promise<ILink[] | undefined>((r) => provider.provideLinks(y, r));
+        const got = links?.map((l) => `${l.text}@${l.range.start.x},${l.range.start.y}-${l.range.end.x},${l.range.end.y}`).join(" ") ?? "none";
+        results.push(`${c.cols}열 ${y}줄: ${got}`);
+        if (links?.length !== 1 || links[0].text !== c.want || links[0].range.start.y !== 1 || links[0].range.end.y !== c.rows.length) results.push("BAD");
+      }
+      term.dispose();
+    }
+  } finally {
+    box.remove();
+    await run(shell, `rm -rf "${dir}"`);
+  }
+  check("터미널 링크: 넓은 글자가 줄 끝에서 넘어가도 URL·경로가 한 링크 (모든 줄에서 같은 범위)", !results.includes("BAD"), results.join(" | "));
+}
+
+// 터미널 링크 (src/terminalLinks.ts, src-tauri/src/links.rs): 실제 화면에서 올리면 안내, ⌘+클릭하면 연다(자체 테스트는 기록).
+// 상대 경로는 셸이 cd 한 폴더 기준 (창을 띄운 폴더에는 없는 파일), 없는 파일은 링크가 아님, 실행될 수 있는 것은 Finder에서 보이기만
+async function testTerminalLinks(root: string, term: Terminal) {
+  const dir = `${root}/lk`;
+  await run(term, `mkdir -p "${dir}/sub" && printf x > "${dir}/report.html" && printf x > "${dir}/sub/notes.md" && printf x > "${dir}/run.sh" && cd "${dir}"`);
+  await invoke("selftest_opened_links");
+  await run(term, String.raw`printf '%s %s %s %s %s
+' 'LK report.html에' sub/notes.md:12 https://example.com/a. missing.md run.sh`);
+  const buf = term.buffer.active;
+  let row = -1;
+  for (let y = buf.length - 1; y >= 0 && row < 0; y--) if (buf.getLine(y)?.translateToString(true).startsWith("LK report")) row = y;
+  // 그 줄에서 글자의 칸 (넓은 글자 뒤는 한 칸씩 밀린다)
+  const columnOf = (text: string) => {
+    const line = buf.getLine(row)!;
+    let s = "";
+    const xs: number[] = [];
+    for (let x = 0; x < line.length; x++) {
+      const cell = line.getCell(x)!;
+      if (cell.getWidth() === 0) continue;
+      for (const ch of cell.getChars() || " ") (s += ch), xs.push(x);
+    }
+    return xs[s.indexOf(text)];
+  };
+  const screenEl = term.element!.querySelector<HTMLElement>(".xterm-screen")!;
+  const mouse = (type: string, x: number, meta = false) => {
+    const r = screenEl.getBoundingClientRect();
+    const [w, h] = [r.width / term.cols, r.height / term.rows];
+    const init = { bubbles: true, cancelable: true, button: 0, metaKey: meta, clientX: r.left + (x + 0.5) * w, clientY: r.top + (row - buf.viewportY + 0.5) * h };
+    screenEl.dispatchEvent(new MouseEvent(type, init));
+  };
+  const hint = "⌘-click to open";
+  const hovered = async (text: string) => {
+    mouse("mousemove", term.cols - 1);
+    await sleep(100);
+    mouse("mousemove", columnOf(text) + 1);
+    return waitFor(`링크 안내: ${text}`, () => term.element!.getAttribute("title") === hint, 2000).then(() => true, () => false);
+  };
+  const click = async (text: string, meta: boolean) => {
+    mouse("mousedown", columnOf(text) + 1, meta);
+    mouse("mouseup", columnOf(text) + 1, meta);
+    mouse("click", columnOf(text) + 1, meta);
+    await sleep(200);
+    return invoke<[string, string][]>("selftest_opened_links");
+  };
+  const results: Record<string, unknown> = {};
+  for (const text of ["report.html", "sub/notes.md", "https://example.com", "run.sh"]) {
+    const shown = await hovered(text);
+    const plain = await click(text, false);
+    const opened = await click(text, true);
+    results[text] = { shown, plain: plain.length, opened };
+  }
+  const missingShown = await hovered("missing.md");
+  const opened = (text: string) => (results[text] as { opened: [string, string][] }).opened;
+  const one = (text: string, kind: string, end: string) => {
+    const r = results[text] as { shown: boolean; plain: number; opened: [string, string][] };
+    return r.shown && r.plain === 0 && r.opened.length === 1 && r.opened[0][0] === kind && r.opened[0][1].endsWith(end);
+  };
+  check(
+    "터미널 링크: 올리면 안내, ⌘+클릭으로 연다 (그냥 클릭은 아님). 상대 경로는 셸의 현재 폴더 기준, 조사·줄 번호·마침표는 뺌",
+    one("report.html", "open", "/lk/report.html") && one("sub/notes.md", "open", "/lk/sub/notes.md") && opened("https://example.com")[0]?.[1] === "https://example.com/a" && one("https://example.com", "url", "/a"),
+    JSON.stringify(results),
+  );
+  check("터미널 링크: 실행될 수 있는 파일은 열지 않고 Finder에서 보이기, 없는 파일은 링크 아님", one("run.sh", "reveal", "/lk/run.sh") && !missingShown, JSON.stringify({ run: results["run.sh"], missingShown }));
+  mouse("mousemove", term.cols - 1);
+  await run(term, `cd "${root}" && rm -rf "${dir}"`);
 }
 
 function testTerminalReplyUnit() {
@@ -3364,6 +3535,10 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["claude", () => testClaude(t())],
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
     ["terminalSearch", () => testTerminalSearch(t())],
+    ["terminalLinksUnit", testTerminalLinksUnit],
+    ["statusContrastUnit", testStatusContrastUnit],
+    ["terminalLinkWrap", () => testTerminalLinkWrap(root, t())],
+    ["terminalLinks", () => testTerminalLinks(root, t())],
     ["programStatusUnit", testProgramStatusUnit],
     ["notifyClickUnit", testNotifyClickUnit],
     ["programStatus", () => testProgramStatus(root, t())],

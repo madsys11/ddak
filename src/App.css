@@ -866,10 +866,50 @@ button.secondary {
 .tabbar-btn.active {
   color: var(--fg);
 }
-/* 앞에서 도는 프로그램의 상태 (src/programStatus.ts). 사용자를 기다리면 강조색 */
+/* 앞에서 도는 프로그램의 상태 (src/programStatus.ts). 테두리 칩(깨우기·준비 배지)과 섞이지 않게 상태마다 색 점 + 글자로:
+   작업 중(파랑, 깜빡임), 완료(초록), 오류(빨강). 사용자를 기다리면 색을 채운 칩으로 가장 눈에 띄게 */
+.pane-badge.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+}
+.pane-badge.status::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.pane-badge.status[data-status="working"] {
+  color: var(--status-working);
+}
+.pane-badge.status[data-status="working"]::before {
+  animation: status-pulse 1.4s ease-in-out infinite;
+}
+.pane-badge.status[data-status="done"] {
+  color: var(--status-done);
+}
+.pane-badge.status.error {
+  color: var(--error);
+}
 .pane-badge.status.awaiting {
-  color: var(--accent);
-  border-color: var(--accent);
+  padding: 0 7px 0 5px;
+  border-radius: 8px;
+  font-weight: 600;
+  color: var(--status-awaiting-fg);
+  background: var(--status-awaiting-bg);
+}
+@keyframes status-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pane-badge.status[data-status="working"]::before {
+    animation: none;
+  }
 }
 /* 채팅 깨우기를 기다리는 창 (누르면 바로 깨움) */
 .pane-badge.wake {
