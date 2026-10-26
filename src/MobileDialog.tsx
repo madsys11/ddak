@@ -10,7 +10,8 @@ type Status = {
   port: number | null;
   error: string | null;
   tailscale: { installed: boolean; running: boolean; host: string | null; login: string | null; cert: boolean; serve: "off" | "ours" | "other"; funnel: boolean };
-  devices: { id: string; name: string; created: number; used: number }[];
+  // push: 폰 알림 (on, off, gone: 푸시 서비스가 구독을 없앰)
+  devices: { id: string; name: string; created: number; used: number; push: "on" | "off" | "gone" }[];
 };
 // mobile_pair_code
 type Pairing = { code: string; api: string; link: string; expires: number };
@@ -159,7 +160,9 @@ export function MobileDialog({ onClose }: { onClose: () => void }) {
             {status.devices.map((d) => (
               <div key={d.id} className="mobile-row" data-device={d.id}>
                 <span className="mobile-device-name">{d.name}</span>
-                <span className="modal-hint">{t("mobile.used", { time: date(d.used) })}</span>
+                <span className="modal-hint">
+                  {t("mobile.used", { time: date(d.used) })} · {t(d.push === "on" ? "mobile.pushOn" : d.push === "gone" ? "mobile.pushGone" : "mobile.pushOff")}
+                </span>
                 <button className="secondary" disabled={busy} onClick={() => run("mobile_forget", { id: d.id })}>
                   {t("mobile.forget")}
                 </button>

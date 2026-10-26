@@ -61,10 +61,22 @@ pub fn set_focused(focused: bool) {
     with_view(|v| v.focused = focused);
 }
 
-// 알림 종류. 채팅은 그 프로젝트의 채팅 패널까지 보고 있어야, 권한 확인은 그 프로젝트를 보고 있으면 생략한다.
+// 알림 종류. 채팅(메시지, 자동 깨우기 멈춤)은 그 프로젝트의 채팅 패널까지 보고 있어야, 권한 확인은 그 프로젝트를 보고 있으면
+// 생략한다. 폰은 종류로 무엇을 보여야 알림을 닫을지 정한다 (mobile.rs notify).
 pub enum Kind {
     Chat,
+    Paused,
     Attention,
+}
+
+impl Kind {
+    fn name(&self) -> &'static str {
+        match self {
+            Kind::Chat => "message",
+            Kind::Paused => "paused",
+            Kind::Attention => "attention",
+        }
+    }
 }
 
 fn watching(project: &Path, kind: &Kind) -> bool {
@@ -89,10 +101,14 @@ pub fn text(key: &str, vars: &[(&str, &str)]) -> String {
     s
 }
 
-// 알린다 (보고 있으면 생략). 제목은 "ddak · <프로젝트 폴더 이름>". pty: 누르면 보일 터미널 (없으면 채팅 패널)
+// 알린다 (보고 있으면 생략). 제목은 "ddak · <프로젝트 폴더 이름>". pty: 누르면 보일 터미널 (없으면 채팅 패널).
+// 같은 조건으로 연결된 폰에도 푸시를 보낸다 (mobile.rs, 맥 배너를 보내지 못하는 개발 실행에서도).
 pub fn send(project: &Path, kind: Kind, body: &str, pty: Option<u32>) {
     if watching(project, &kind) {
         return;
+    }
+    if let Some(app) = APP.get() {
+        crate::mobile::push(app, project, kind.name(), body);
     }
     let name = project.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     post(&format!("ddak · {name}"), body, Some(Target { project: project.to_string_lossy().into_owned(), pty }));
@@ -338,6 +354,20 @@ pub fn selftest_click_notification(prefix: String) -> bool {
     }
 }
 
+// 자체 테스트: 알림 하나를 보낸다 (보고 있으면 생략하는 조건과 폰 푸시까지, 채팅을 거치지 않고)
+#[tauri::command]
+pub fn selftest_notify(project: String, kind: String, body: String) {
+    if selftest() {
+        let real = std::fs::canonicalize(&project).unwrap_or_else(|_| PathBuf::from(project));
+        let kind = match kind.as_str() {
+            "attention" => Kind::Attention,
+            "paused" => Kind::Paused,
+            _ => Kind::Chat,
+        };
+        send(&real, kind, &body, None);
+    }
+}
+
 #[tauri::command]
 pub fn selftest_set_focused(focused: bool) {
     if selftest() {
@@ -356,12 +386,14 @@ mod tests {
         with_view(|v| *v = View { focused: true, active: Some(p.to_path_buf()), chat_open: false });
         assert!(!watching(p, &Kind::Chat) && watching(p, &Kind::Attention));
         with_view(|v| v.chat_open = true);
-        assert!(watching(p, &Kind::Chat) && !watching(Path::new("/p/y"), &Kind::Chat));
+        assert!(watching(p, &Kind::Chat) && watching(p, &Kind::Paused) && !watching(Path::new("/p/y"), &Kind::Chat));
         with_view(|v| v.focused = false);
         assert!(!watching(p, &Kind::Chat) && !watching(p, &Kind::Attention));
         assert_eq!(first_line("\n  hello\nworld"), "hello");
         assert_eq!(first_line(&"가".repeat(130)).chars().count(), 121);
         assert_eq!(text("attention", &[("name", "g/dev")]), "g/dev is waiting for your permission");
+        // 폰이 알림을 닫을 조건을 고르는 종류 이름 (src/mobile/push.ts confirmed)
+        assert_eq!([Kind::Chat.name(), Kind::Paused.name(), Kind::Attention.name()], ["message", "paused", "attention"]);
     }
 
     // 고른 시스템 소리를 ddak-<이름>.aiff로 복사하고, 전에 고른 ddak-*.aiff만 지운다. 이상한 이름·없는 소리는 실패

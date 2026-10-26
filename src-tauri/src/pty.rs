@@ -58,6 +58,8 @@ struct Session {
     // awaiting_changed: 마지막으로 바뀐 때, awaiting_changes: 바뀐 횟수 (기다리는 동안 친 키를 초안과 구분한다. 확인 사이에
     // 기다림이 시작되고 끝나도 횟수로 안다)
     awaiting: bool,
+    // 무엇을 기다리는지 (permission·question·auth·dialog·blocked. 폰의 참여자 칩, mobile.rs)
+    awaiting_kind: String,
     awaiting_changed: Option<Instant>,
     awaiting_changes: u64,
     // 알림을 쓰고 Enter를 보낼 차례를 기다린다 (wake_tick)
@@ -276,7 +278,7 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None, working: false })
+    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_kind: String::new(), awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None, working: false })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -755,11 +757,13 @@ pub fn start_waker(app: tauri::AppHandle) {
 }
 
 // 앞에서 도는 프로그램이 작업 중인지 (프론트 src/Terminal.tsx: OSC 7501 working)
+// 바뀔 때만 온다: 폰은 참여자 상태를 다시 읽는다 (mobile.rs)
 #[tauri::command]
-pub fn pty_working(ptys: State<'_, Ptys>, id: u32, working: bool) {
+pub fn pty_working(app: tauri::AppHandle, ptys: State<'_, Ptys>, id: u32, working: bool) {
     if let Some(s) = ptys.sessions.lock().unwrap().get_mut(&id) {
         s.working = working;
     }
+    crate::mobile::publish(&app, None, "status", serde_json::json!({}));
 }
 
 // 자체 테스트: 잠자기를 막고 있는지 (caffeinate가 떠 있는지)
@@ -772,17 +776,26 @@ pub fn selftest_keep_awake(ptys: State<'_, Ptys>) -> bool {
 // 사용자를 기다리게 되면 (kind: permission·question·auth·dialog) 채팅방 참여자의 터미널이면 사용자에게 알린다 (chat.rs
 // Change::Attention, 보고 있으면 생략). claude·codex 모두 된다 (codex는 권한 확인 훅이 없다)
 #[tauri::command]
-pub fn pty_awaiting(ptys: State<'_, Ptys>, chats: State<'_, crate::chat::ChatsState>, id: u32, awaiting: bool, kind: Option<String>) {
+pub fn pty_awaiting(app: tauri::AppHandle, ptys: State<'_, Ptys>, chats: State<'_, crate::chat::ChatsState>, id: u32, awaiting: bool, kind: Option<String>) {
+    let kind = kind.as_deref().unwrap_or("dialog");
+    ptys.set_awaiting_kind(id, kind);
     // 알림은 잠금 밖에서
     if let (Some(token), Some(chats)) = (ptys.set_awaiting(id, awaiting), chats.0.as_ref()) {
-        chats.attention(&token, kind.as_deref().unwrap_or("dialog"), false);
+        chats.attention(&token, kind, false);
     }
+    crate::mobile::publish(&app, None, "status", serde_json::json!({}));
 }
 
 // 자체 테스트: 그 터미널이 사용자를 기다린다고 알려졌는지
 #[tauri::command]
 pub fn selftest_pty_awaiting(ptys: State<'_, Ptys>, id: u32) -> Option<bool> {
     ptys.sessions.lock().unwrap().get(&id).map(|s| s.awaiting)
+}
+
+// 자체 테스트: 그 터미널이 기다리는 종류 (기다리지 않으면 없음)
+#[tauri::command]
+pub fn selftest_pty_awaiting_kind(ptys: State<'_, Ptys>, id: u32) -> Option<String> {
+    ptys.sessions.lock().unwrap().get(&id).filter(|s| s.awaiting).map(|s| s.awaiting_kind.clone())
 }
 
 // 깨우기를 기다리는 터미널을 사용자가 눌러 바로 깨운다 (다음 확인 때)
@@ -862,6 +875,24 @@ impl Ptys {
             s.hook_attention = Some(now);
         }
         true
+    }
+
+    fn set_awaiting_kind(&self, id: u32, kind: &str) {
+        if let Some(s) = self.sessions.lock().unwrap().get_mut(&id) {
+            s.awaiting_kind = kind.to_string();
+        }
+    }
+
+    // 채팅에 참여한 터미널의 상태: (토큰, 사용자를 기다리면 그 종류, 작업 중이면 "working"). 둘 다 아니면 빠진다 (폰, mobile.rs)
+    pub fn statuses(&self) -> Vec<(String, String)> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions
+            .values()
+            .filter_map(|s| {
+                let status = if s.awaiting { s.awaiting_kind.clone() } else if s.working { "working".into() } else { return None };
+                Some((s.chat_token.clone()?, status))
+            })
+            .collect()
     }
 
     // 깨우기를 기다리는 터미널의 채팅 토큰 (채팅 패널의 대기 표시, chat.rs chat_waiting)
@@ -1314,6 +1345,31 @@ mod tests {
         wake(&ptys, &["tok".into()], "origin/e");
         close(&ptys, id);
         assert_eq!(wake_tick(&ptys, Instant::now() + WAKE_IDLE).iter().map(|w| w.0).collect::<Vec<_>>(), [id], "없어진 터미널을 그만두지 않음");
+    }
+
+    // 폰에 보일 참여자 상태: 기다리면 그 종류, 아니면 작업 중, 둘 다 아니거나 채팅에 없는 터미널은 빠진다
+    #[test]
+    fn statuses_of_chat_terminals() {
+        let ptys = Ptys::default();
+        let argv: Vec<String> = ["/bin/sh", "-c", "sleep 5"].iter().map(|a| a.to_string()).collect();
+        let joined = Joined { leave: Box::new(|| ()), token: "tok".into() };
+        let id = open(&ptys, "/", Some(&argv), None, false, SIZE, |_| true, |_| (), Some(joined)).unwrap();
+        let other = open(&ptys, "/", Some(&argv), None, false, SIZE, |_| true, |_| (), None).unwrap();
+        assert!(ptys.statuses().is_empty());
+        ptys.sessions.lock().unwrap().get_mut(&id).unwrap().working = true;
+        ptys.sessions.lock().unwrap().get_mut(&other).unwrap().working = true;
+        assert_eq!(ptys.statuses(), [("tok".to_string(), "working".to_string())]);
+        ptys.set_awaiting_kind(id, "permission");
+        assert_eq!(ptys.set_awaiting(id, true).as_deref(), Some("tok"));
+        assert_eq!(ptys.statuses(), [("tok".to_string(), "permission".to_string())]);
+        // 기다리는 동안 종류만 바뀌면 상태만 바뀌고 다시 알리지 않는다 (리뷰 R4)
+        ptys.set_awaiting_kind(id, "question");
+        assert_eq!(ptys.set_awaiting(id, true), None);
+        assert_eq!(ptys.statuses(), [("tok".to_string(), "question".to_string())]);
+        ptys.set_awaiting(id, false);
+        assert_eq!(ptys.statuses(), [("tok".to_string(), "working".to_string())]);
+        close(&ptys, id);
+        close(&ptys, other);
     }
 
     // 프로그램이 사용자를 기다리는 동안(선택 창 등)은 알림도 Enter도 미루고, 끝나면 보낸다 (Enter가 선택 창의 답을 고르지

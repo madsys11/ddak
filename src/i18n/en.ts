@@ -228,6 +228,9 @@ export const en = {
   "mobile.devices": "Paired phones",
   "mobile.used": "last used {time}",
   "mobile.forget": "Disconnect",
+  "mobile.pushOn": "notifications on",
+  "mobile.pushOff": "notifications off",
+  "mobile.pushGone": "notifications stopped (turn them on again on the phone)",
 
   // 폰 화면 (src/mobile)
   "phone.computers": "Computers",
@@ -257,6 +260,13 @@ export const en = {
   "phone.earlier": "Earlier messages",
   "phone.placeholder": "Message everyone (@name to notify only them)",
   "phone.send": "Send",
+  "phone.awaitingBadge": "{n} waiting for you",
+  "phone.notifyOff": "Get notifications on this phone when a session needs you.",
+  "phone.notifyOn": "Turn On",
+  "phone.notifyDenied": "Notifications are blocked. Allow them for this site in the browser settings.",
+  "phone.notifyFailed": "Couldn't turn on notifications: {detail}",
+  "phone.keyFailed": "Couldn't change this phone's notification key, so a removed computer may still send notifications: {detail}",
+  "phone.retry": "Retry",
 
   // 네이티브 메뉴 (src-tauri/src/menu.rs가 "menu." 뒤의 이름으로 찾는다)
   "menu.about": "About ddak",

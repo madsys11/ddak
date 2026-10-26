@@ -228,6 +228,9 @@ export const ko: Messages = {
   "mobile.devices": "페어링한 폰",
   "mobile.used": "마지막 사용 {time}",
   "mobile.forget": "연결 끊기",
+  "mobile.pushOn": "알림 켜짐",
+  "mobile.pushOff": "알림 꺼짐",
+  "mobile.pushGone": "알림 끊김 (폰에서 다시 켜기)",
 
   // 폰 화면 (src/mobile)
   "phone.computers": "컴퓨터",
@@ -257,6 +260,13 @@ export const ko: Messages = {
   "phone.earlier": "이전 메시지",
   "phone.placeholder": "모두에게 보내기 (@이름은 그 세션에만 알림)",
   "phone.send": "보내기",
+  "phone.awaitingBadge": "{n}개가 기다림",
+  "phone.notifyOff": "세션이 나를 찾을 때 이 폰에 알림을 받습니다.",
+  "phone.notifyOn": "켜기",
+  "phone.notifyDenied": "알림이 막혀 있습니다. 브라우저 설정에서 이 사이트의 알림을 허용하세요.",
+  "phone.notifyFailed": "알림을 켜지 못했습니다: {detail}",
+  "phone.keyFailed": "알림 키를 바꾸지 못해 뺀 컴퓨터가 아직 알림을 보낼 수 있습니다: {detail}",
+  "phone.retry": "다시 시도",
 
   "menu.about": "ddak에 관하여",
   "menu.edit_groups": "작업그룹 설정…",

@@ -675,7 +675,7 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                 crate::mobile::publish(&emitter, Some(project), "cleared", json!({}));
             }
             Change::Paused(group) => {
-                crate::notify::send(project, crate::notify::Kind::Chat, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]), None);
+                crate::notify::send(project, crate::notify::Kind::Paused, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]), None);
             }
             Change::Attention { name, token, kind, hook } => {
                 let ptys = emitter.state::<crate::pty::Ptys>();

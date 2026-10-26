@@ -2,6 +2,8 @@
 // 테스트용 폴더 구조는 그 스크립트가 만든다.
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { Terminal, type ILink } from "@xterm/xterm";
 import { devHooks, liveTerms } from "./devHooks";
 import type { Groups } from "./useGroups";
@@ -13,6 +15,9 @@ import { findLinks, linkProvider } from "./terminalLinks";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
 import { MessageView } from "./mobile/sync";
+import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
+import { KeyProblem } from "./mobile/MobileApp";
+import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
 import { screenPixelRatio } from "./zoom";
@@ -604,6 +609,178 @@ function testMobileSyncUnit() {
   const stillWaiting = f.older().before;
   f.latest(second, range(101, 150), true);
   check("폰 채팅: 최신 조회가 실패해도 이전 메시지를 읽을 수 있음 (늦은 실패는 새 조회를 풀지 않음)", afterFail === 51 && stillWaiting === undefined && ids(f) === "101..150(50) more=true", `${afterFail} ${stillWaiting} ${ids(f)}`);
+
+  // 폰 알림 구독 맞추기 (src/mobile/push.ts plan): 맥이 가진 것과 같으면 그대로, 다르면 보냄, 푸시 서비스가 없앤 구독이면 새로
+  const plans = [
+    pushPlan("a", { endpoint: "a", gone: null }),
+    pushPlan("a", { endpoint: null, gone: null }),
+    pushPlan("a", { endpoint: "old", gone: null }),
+    pushPlan("a", { endpoint: null, gone: "a" }),
+    pushPlan("a", { endpoint: null, gone: "old" }),
+    pushPlan(null, { endpoint: "a", gone: null }),
+    pushPlan("a", undefined),
+  ].join(",");
+  check("폰 알림: 구독 맞추기 (같음·없음·다름·없어짐·예전 것이 없어짐·폰에 없음·푸시를 모르는 ddak)", plans === "none,send,send,renew,send,none,none", plans);
+}
+
+// 폰 알림의 실제 코드를 브라우저·네트워크 대역과 돌린다: 맥마다 구독 맞추기 (src/mobile/push.ts reconcile)와 서비스 워커
+// (src/mobile/public/sw.js)
+async function testMobilePushUnit() {
+  const computer = (id: string) => ({ id, name: id, api: `https://${id}.example`, token: "t" });
+  const [a, b] = [computer("a"), computer("b")];
+  const later = <T,>() => {
+    let resolve!: (v: T) => void;
+    return { promise: new Promise<T>((r) => (resolve = r)), resolve };
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 10));
+  const info = (push: PushInfo): Info => ({ id: "x", name: "x", version: "", api: 1, push });
+  // 리뷰 R3: 답하지 않는 맥(b)이 답한 맥(a)에 구독을 보내는 것을 붙잡지 않는다
+  {
+    const sent: string[] = [];
+    const slow = later<Info | null>();
+    const done = reconcile([a, b], { endpoint: "e1" }, {
+      info: (c) => (c === a ? Promise.resolve(info({ endpoint: null, gone: null })) : slow.promise),
+      send: async (c, s) => sent.push(`${c.id}:${s.endpoint}`),
+      renew: async () => ({ endpoint: "e2" }),
+    });
+    await settle();
+    const early = sent.join(",");
+    slow.resolve(info({ endpoint: "old", gone: null }));
+    await done;
+    check("폰 알림: 답하지 않는 맥이 답한 맥의 구독 보내기를 붙잡지 않음", early === "a:e1" && sent.join(",") === "a:e1,b:e1", `${early} / ${sent}`);
+  }
+  // 한 맥이 이 구독이 없어졌다고 하면 한 번만 새로 구독해 모든 맥에 보낸다. 늦게 답한 맥에 예전 구독을 보내지 않는다
+  {
+    const sent: string[] = [];
+    let renews = 0;
+    const slow = later<Info | null>();
+    const done = reconcile([a, b], { endpoint: "e1" }, {
+      info: (c) => (c === a ? Promise.resolve(info({ endpoint: null, gone: "e1" })) : slow.promise),
+      send: async (c, s) => sent.push(`${c.id}:${s.endpoint}`),
+      renew: async () => {
+        renews++;
+        return { endpoint: "e2" };
+      },
+    });
+    await settle();
+    slow.resolve(info({ endpoint: "old", gone: null }));
+    await done;
+    check("폰 알림: 없어진 구독은 한 번만 새로 구독해 모든 맥에 (늦게 답한 맥에 예전 것을 보내지 않음)", renews === 1 && [...sent].sort().join(",") === "a:e2,b:e2", `${renews} ${sent}`);
+  }
+  // 재리뷰 R6: a에 예전 구독(e1)을 보내는 중에 b가 없어졌다고 하면, 새 구독(e2)은 a의 앞 쓰기가 끝난 뒤에 쓴다 (맥에 남는 것은 e2)
+  {
+    const stored: Record<string, string> = {};
+    const first = later<void>();
+    const slow = later<Info | null>();
+    let firstA = true;
+    const done = reconcile([a, b], { endpoint: "e1" }, {
+      info: (c) => (c === a ? Promise.resolve(info({ endpoint: null, gone: null })) : slow.promise),
+      send: async (c, s) => {
+        if (c === a && firstA) {
+          firstA = false;
+          await first.promise;
+        }
+        stored[c.id] = s.endpoint;
+      },
+      renew: async () => ({ endpoint: "e2" }),
+    });
+    await settle();
+    slow.resolve(info({ endpoint: null, gone: "e1" }));
+    await settle();
+    first.resolve();
+    await done;
+    check("폰 알림: 늦게 끝난 예전 구독 쓰기가 새 구독을 덮지 않음 (맥마다 쓰기를 차례로)", stored.a === "e2" && stored.b === "e2", JSON.stringify(stored));
+  }
+  // 재리뷰 R3: 컴퓨터를 빼고 키를 바꾸지 못하면 화면이 바뀌어도 (2→1대는 프로젝트 목록, 마지막이면 추가 화면) 알린다
+  {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    root.render(createElement(KeyProblem, { computers: [b] }));
+    await removeComputer(a, [b], async () => {
+      throw new Error("permission denied");
+    });
+    await settle();
+    const shownAfterTwoToOne = host.textContent ?? "";
+    await removeComputer(b, [], async () => {
+      throw new Error("still denied");
+    });
+    await settle();
+    const shownAfterLast = host.textContent ?? "";
+    await changeKey([], async () => {});
+    await settle();
+    check(
+      "폰 알림: 컴퓨터를 빼고 키를 바꾸지 못하면 화면이 바뀌어도 알리고, 다시 시도해 성공하면 지움",
+      shownAfterTwoToOne.includes("permission denied") && shownAfterLast.includes("still denied") && keyProblem() === null && host.textContent === "",
+      `${shownAfterTwoToOne} | ${shownAfterLast} | ${host.textContent}`,
+    );
+    root.unmount();
+    host.remove();
+  }
+  // 재리뷰 R2: 보고 있는 채팅의 알림은 그 종류가 알린 것을 다시 읽어 보였을 때만 닫는다
+  const m = (status: Record<string, string>, paused: string[] = []) => ({ members: [], waiting: [], status, paused });
+  const closes = [
+    confirmed("message", true, null),
+    confirmed("message", false, null),
+    confirmed("attention", false, m({ dev: "permission" })),
+    confirmed("attention", true, m({ dev: "working" })),
+    confirmed("attention", true, null),
+    confirmed("paused", false, m({}, ["g"])),
+    confirmed("paused", false, m({})),
+    confirmed("other", true, m({ dev: "permission" })),
+  ].join(",");
+  check("폰 알림: 보고 있는 채팅의 알림은 그 종류를 보였을 때만 닫음 (메시지·권한 확인·멈춤)", closes === "true,false,true,false,false,true,false,false", closes);
+
+  // 서비스 워커: 실제 sw.js를 가짜 self(창 목록, 알림, 창 열기)로 실행한다
+  const source = await fetch("/src/mobile/public/sw.js").then((r) => r.text());
+  const scope = "https://user.example/ddak/";
+  type Win = { url: string; visibilityState: string; posted: { type: string; kind?: string; id?: string }[]; focused: boolean; postMessage: (m: { type: string }) => void; focus: () => Promise<void> };
+  const win = (url: string, visible: boolean): Win => {
+    const w: Win = { url, visibilityState: visible ? "visible" : "hidden", posted: [], focused: false, postMessage: (m) => w.posted.push(m), focus: async () => void (w.focused = true) };
+    return w;
+  };
+  let wins: Win[] = [];
+  const shown: [string, NotificationOptions & { renotify?: boolean }][] = [];
+  const opened: string[] = [];
+  const handlers: Record<string, (e: object) => void> = {};
+  const fakeSelf = {
+    addEventListener: (kind: string, f: (e: object) => void) => (handlers[kind] = f),
+    skipWaiting: () => {},
+    crypto,
+    registration: { scope, showNotification: async (title: string, o: NotificationOptions) => void shown.push([title, o]) },
+    clients: { claim: async () => {}, matchAll: async () => wins, openWindow: async (u: string) => void opened.push(u) },
+  };
+  new Function("self", source)(fakeSelf);
+  const fire = async (kind: string, e: object) => {
+    let wait: Promise<unknown> = Promise.resolve();
+    handlers[kind]({ ...e, waitUntil: (p: Promise<unknown>) => (wait = p) });
+    await wait;
+  };
+  const chat = "#/c/c1/p/proj-1";
+  const push = () => fire("push", { data: { json: () => ({ title: "Mac · proj", body: "dev: done", kind: "attention", computer: "c1", project: "proj-1" }) } });
+  const click = () => fire("notificationclick", { notification: { close: () => {}, data: { path: chat } } });
+  // 리뷰 R1: 같은 출처의 다른 앱 창은 ddak 창이 아니다 (같은 주소 조각이 보여도 알림을 띄우고, 누르면 ddak 창으로)
+  const other = win(`https://user.example/other-app/${chat}`, true);
+  const ours = win(`${scope}${chat}`, false);
+  wins = [other, ours];
+  await push();
+  check("폰 알림: 다른 앱 창이 같은 주소 조각을 보여도 알림을 띄움 (소리 있게)", shown.length === 1 && shown[0][1].silent === false && shown[0][1].tag === "c1/proj-1" && other.posted.length === 0, JSON.stringify(shown));
+  await click();
+  check("폰 알림: 누르면 다른 앱이 아니라 ddak 창을 앞으로 가져와 그 채팅으로", ours.focused && ours.posted.some((m) => m.type === "open") && !other.focused && other.posted.length === 0 && opened.length === 0, `${ours.focused} ${JSON.stringify(ours.posted)} ${other.focused}`);
+  wins = [other];
+  await click();
+  check("폰 알림: ddak 창이 없으면 그 채팅을 새로 엶", opened.join() === `${scope}${chat}`, opened.join());
+  // 리뷰 R2: 그 채팅이 보여도 알림은 띄운다 (소리 없이). 창에 알려 실제로 다시 읽었을 때 창이 닫는다
+  shown.length = 0;
+  const viewing = win(`${scope}${chat}`, true);
+  wins = [viewing];
+  await push();
+  const note = viewing.posted.find((x) => x.type === "shown");
+  check(
+    "폰 알림: 보고 있는 채팅이어도 알림은 띄우고 (소리 없이) 창에 종류와 그 알림 id를 알림",
+    shown.length === 1 && shown[0][1].silent === true && note?.kind === "attention" && !!note.id && (shown[0][1].data as { id?: string }).id === note.id,
+    `${JSON.stringify(shown)} ${JSON.stringify(viewing.posted)}`,
+  );
 }
 
 // 모바일 연결 (src/MobileDialog.tsx, src-tauri/src/mobile.rs). Tailscale 대신 정한 이름·로그인(scripts/selftest.sh
@@ -652,10 +829,46 @@ async function testMobile(root: string) {
   check("모바일 연결: 채팅 패널에 보낸 기기 표시", via?.textContent === "from Selftest Phone", via?.textContent ?? panel()?.innerHTML.slice(-300) ?? "패널 없음");
   if (!wasOpen) ws?.querySelector<HTMLElement>("[data-action=chat]")?.click();
 
+  // 폰 알림 (src-tauri/src/push.rs): 폰이 넘긴 구독(폰이 만든 키)을 기기에 두고, 맥이 알릴 때 같은 생략 조건으로 폰에도 보낸다
+  // (자체 테스트는 보내지 않고 기록한다)
+  const b64u = (b: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const ua = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const vapid = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign"]);
+  const sub = {
+    endpoint: "https://push.example/sub/1",
+    p256dh: b64u(await crypto.subtle.exportKey("raw", ua.publicKey)),
+    auth: b64u(crypto.getRandomValues(new Uint8Array(16))),
+    publicKey: b64u(await crypto.subtle.exportKey("raw", vapid.publicKey)),
+    privateKey: (await crypto.subtle.exportKey("jwk", vapid.privateKey)).d!,
+  };
+  const [mismatched] = await http("POST", "/api/push", auth, JSON.stringify({ ...sub, publicKey: sub.p256dh }));
+  const [subscribed, subBody] = await http("POST", "/api/push", auth, JSON.stringify(sub));
+  const [, infoBody] = await http("GET", "/api/info", auth);
+  check("모바일 알림: 폰의 구독을 받고 (VAPID 키 짝이 안 맞으면 거절) 정보에 그 주소", mismatched === 400 && subscribed === 200 && JSON.parse(infoBody).push?.endpoint === sub.endpoint, `${mismatched} ${subscribed} ${subBody} ${infoBody}`);
+  const pushes = () => invoke<[string, { title: string; body: string; kind: string; computer: string; project: string }][]>("selftest_mobile_pushes");
+  await pushes();
+  await invoke("selftest_set_focused", { focused: false });
+  await invoke("selftest_notify", { project: root, kind: "message", body: "dev: done" });
+  const sent = await pushes();
+  const computerId = paired === 200 ? JSON.parse(pairBody).id : "";
+  check(
+    "모바일 알림: 맥이 알릴 때 폰에도 (제목 컴퓨터 · 프로젝트, 누르면 열 채팅)",
+    sent.length === 1 && sent[0][0] === "Selftest Phone" && sent[0][1].body === "dev: done" && sent[0][1].kind === "message" && sent[0][1].title.endsWith(` · ${root.split("/").pop()}`) && sent[0][1].computer === computerId && sent[0][1].project === project?.id,
+    JSON.stringify(sent),
+  );
+  // 맥에서 그 프로젝트를 보고 있으면 폰에도 보내지 않는다 (권한 확인은 그 프로젝트만 보고 있어도 생략, notify.rs)
+  await invoke("selftest_set_focused", { focused: true });
+  await invoke("selftest_notify", { project: root, kind: "attention", body: "dev is waiting" });
+  const quiet = await pushes();
+  await invoke("selftest_set_focused", { focused: false });
+  await invoke("selftest_notifications");
+  check("모바일 알림: 맥에서 보고 있으면 폰에도 보내지 않음", quiet.length === 0, JSON.stringify(quiet));
+
   // 기기 목록에서 연결을 끊으면 그 토큰은 거절
   await clickMenu("ddak", "Mobile Connection…");
   const device = await waitFor("기기 목록", () => dialog()?.querySelector<HTMLElement>("[data-device]"), 5000).catch(() => null);
   check("모바일 연결: 페어링한 기기를 보임", device?.querySelector(".mobile-device-name")?.textContent === "Selftest Phone", dialog()?.textContent ?? "");
+  check("모바일 알림: 기기 목록에 알림 켜짐", !!device?.textContent?.includes("notifications on"), device?.textContent ?? "");
   device?.querySelector<HTMLElement>("button")?.click();
   await waitFor("기기 지움", () => !dialog()!.querySelector("[data-device]"), 5000).catch(() => null);
   const [after] = await http("GET", "/api/info", auth);
@@ -1716,6 +1929,14 @@ async function testProgramStatus(root: string, term: Terminal) {
   await report(`state=blocked:kind=permission:msg=${btoa("approve Bash: ls")}`);
   const blocked = await waitAsync("권한 대기 표시", shows("waiting for permission", true), 3000).then(() => true, () => false);
   check("프로그램 상태: blocked(permission)이면 이름표에 권한 확인 대기, 깨우기 미룸", blocked && badge()?.title.startsWith("approve Bash: ls") === true, `${badge()?.textContent} ${await awaiting()} ${badge()?.title}`);
+  // 기다리는 채 종류만 바뀌어도 Rust가 안다 (폰의 참여자 상태, 리뷰 R4)
+  const kindOf = () => invoke<string | null>("selftest_pty_awaiting_kind", { id: ptyId });
+  const permissionKind = await kindOf();
+  await report("state=blocked:kind=question");
+  const questionKind = await waitAsync("답 기다림 종류", async () => (await kindOf()) === "question", 3000).then(() => "question", async () => await kindOf());
+  check("프로그램 상태: 기다리는 채 종류가 바뀌면 Rust에도 (권한 확인 → 답 기다림)", permissionKind === "permission" && questionKind === "question", `${permissionKind} ${questionKind}`);
+  await report(`state=blocked:kind=permission:msg=${btoa("approve Bash: ls")}`);
+  await waitAsync("다시 권한 대기", async () => (await kindOf()) === "permission", 3000).catch(() => null);
   // 기다림은 색을 채운 칩 (다른 상태·배지와 구분, 상태 표시 가독성)
   const looks = () => {
     const css = getComputedStyle(badge()!);
@@ -3667,6 +3888,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["notifySound", testNotifySound],
     ["mobile", () => testMobile(root)],
     ["mobileSyncUnit", testMobileSyncUnit],
+    ["mobilePushUnit", testMobilePushUnit],
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],

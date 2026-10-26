@@ -254,6 +254,8 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     let dialogSince: number | undefined;
     let dialogCap: ReturnType<typeof setTimeout> | undefined;
     let awaiting = false;
+    // 마지막으로 보낸 기다림의 종류
+    let awaitingKind = "";
     // 작업 중인지 (Rust가 하나라도 있으면 잠자기를 막는다, pty_working). 사용자를 기다리는 동안(선택 창 포함)은 작업 중이 아니다
     let working = false;
     // 상태는 보낸 순서대로 도착해야 한다 (invoke는 호출마다 따로 가서 순서가 보장되지 않는다. 늦게 온 오래된 값이 남으면 잠자기
@@ -273,9 +275,12 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     const awaitKind = () => (status?.state === "blocked" ? (status.kind ?? "blocked") : "dialog");
     const report = () => {
       const next = awaitingUser(status, dialogSince, Date.now());
-      if (next !== awaiting) {
+      const kind = awaitKind();
+      // 기다리는 동안 종류만 바뀌어도 보낸다 (폰의 참여자 상태, 리뷰 R4). Rust는 이어지는 기다림을 다시 알리지 않는다
+      if (next !== awaiting || (next && kind !== awaitingKind)) {
         awaiting = next;
-        sendStatus("pty_awaiting", { awaiting: next, kind: awaitKind() });
+        awaitingKind = kind;
+        sendStatus("pty_awaiting", { awaiting: next, kind });
       }
       const nowWorking = status?.state === "working" && !next;
       if (nowWorking !== working) {

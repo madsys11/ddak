@@ -7,6 +7,8 @@
 //   맞아야 하고, /api/pair는 1회용 페어링 코드, 그 밖에는 기기 토큰(Bearer)으로 인증한다.
 // - 기기 토큰은 해시만 앱 데이터 mobile/devices.json에 둔다. 실패(코드·토큰)가 1분에 FAIL_LIMIT번을 넘으면 그 1분 동안 막는다.
 // - 새 메시지·참여자 변화는 /api/events(SSE)로 보낸다. 폰은 이벤트를 받으면 보고 있는 것을 다시 읽는다 (재생은 하지 않는다).
+// - 맥이 사용자에게 알릴 때(notify.rs) 푸시 구독이 있는 기기마다 Web Push도 보낸다 (push.rs). 폰이 그 채팅을 보고 있으면
+//   폰의 서비스 워커가 알림을 띄우지 않는다 (docs/mobile-plan.md "2단계 세부").
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::chat::{Chats, USER};
+use crate::push::{self, Subscription};
 
 // 폰 화면이 아는 API 버전 (모르는 버전이면 화면이 "ddak 업데이트 필요"로 보인다)
 pub const API_VERSION: u32 = 1;
@@ -67,6 +70,12 @@ struct Device {
     created: u64,
     // 마지막 사용 (메모리에서 갱신하고 기기 목록을 저장할 때 같이 쓴다)
     used: u64,
+    // Web Push 구독 (폰이 넘긴다, /api/push)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push: Option<Subscription>,
+    // 푸시 서비스가 없어졌다고 답한 구독 주소 (폰이 같은 구독을 다시 보내지 않고 다시 켜기를 보인다)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push_gone: Option<String>,
 }
 
 // 이 맥의 Tailscale 신원: *.ts.net 이름과 로그인
@@ -83,6 +92,8 @@ pub struct Ctx {
     pub projects: Box<dyn Fn() -> Vec<PathBuf> + Send + Sync>,
     // 그 프로젝트에서 깨우기를 기다리는 참여자
     pub waiting: Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>,
+    // 그 프로젝트 참여자의 상태: (이름, 사용자를 기다리는 종류 또는 "working") (pty.rs statuses)
+    pub status: Box<dyn Fn(&Path) -> Vec<(String, String)> + Send + Sync>,
     // 앱 데이터 mobile 폴더
     pub dir: PathBuf,
 }
@@ -101,6 +112,8 @@ struct State {
     streams: Vec<(String, mpsc::SyncSender<String>)>,
     // 서버를 띄우지 못한 이유 (포트 사용 중, funnel 켜짐 등)
     error: Option<String>,
+    // 자체 테스트: 보내지 않고 모은 푸시 (기기 이름, 내용)
+    pushes: Vec<(String, Value)>,
 }
 
 pub struct Mobile {
@@ -110,6 +123,10 @@ pub struct Mobile {
 
 // 앱 상태 (채팅 서버가 없으면 None)
 pub struct MobileState(pub Option<Arc<Mobile>>);
+
+fn selftest() -> bool {
+    std::env::var_os("DDAK_SELFTEST").is_some()
+}
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -123,6 +140,17 @@ fn random_hex(n: usize) -> String {
 
 fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+// 데스크톱 기기 목록에 보일 알림 상태: on, gone (푸시 서비스가 없앰), off
+fn push_state(d: &Device) -> &'static str {
+    if d.push.is_some() {
+        "on"
+    } else if d.push_gone.is_some() {
+        "gone"
+    } else {
+        "off"
+    }
 }
 
 // 6자리 숫자 코드 (폰에서 치기 쉽게. 5분 1회용 + 실패 제한)
@@ -307,7 +335,7 @@ impl Mobile {
 
     pub fn devices(&self) -> Vec<Value> {
         let st = self.state.lock().unwrap();
-        st.devices.iter().map(|d| json!({ "id": d.id, "name": d.name, "created": d.created, "used": d.used })).collect()
+        st.devices.iter().map(|d| json!({ "id": d.id, "name": d.name, "created": d.created, "used": d.used, "push": push_state(d) })).collect()
     }
 
     // 기기 연결을 끊는다: 그 토큰은 더 쓰지 못하고, 열려 있는 SSE도 닫는다 (리뷰 R1)
@@ -316,6 +344,56 @@ impl Mobile {
         st.devices.retain(|d| d.id != id);
         st.streams.retain(|(device, _)| device != id);
         self.save_devices(&st)
+    }
+
+    // 이 기기의 푸시 구독을 바꾼다 (None: 지움). 저장하지 못하면 오류
+    fn set_push(&self, device: &str, sub: Option<Subscription>) -> Result<(), String> {
+        let mut st = self.state.lock().unwrap();
+        let d = st.devices.iter_mut().find(|d| d.id == device).ok_or("token")?;
+        d.push = sub;
+        d.push_gone = None;
+        self.save_devices(&st)
+    }
+
+    // 푸시 서비스가 그 구독이 없어졌다고 답했다: 아직 같은 구독이면 지우고 끊김으로 남긴다
+    fn push_gone(&self, device: &str, endpoint: &str) {
+        let mut st = self.state.lock().unwrap();
+        let Some(d) = st.devices.iter_mut().find(|d| d.id == device && d.push.as_ref().is_some_and(|p| p.endpoint == endpoint)) else { return };
+        d.push = None;
+        d.push_gone = Some(endpoint.to_string());
+        if let Err(e) = self.save_devices(&st) {
+            eprintln!("모바일 기기 목록을 쓰지 못함: {e}");
+        }
+    }
+
+    // 사용자에게 알린다 (notify.rs가 맥 배너와 같은 생략 조건을 본 뒤). 구독이 있는 기기마다 따로 보낸다 (기다리지 않는다).
+    // 제목: <컴퓨터 이름> · <프로젝트>. 누르면 그 채팅을 연다 (폰 서비스 워커가 computer·project로 주소를 만든다).
+    // kind: message·paused·attention (그 채팅을 보고 있는 폰이 무엇을 보인 뒤 알림을 닫을지 정한다)
+    pub fn notify(self: &Arc<Self>, project: &Path, kind: &str, body: &str) {
+        let (config, targets) = {
+            let st = self.state.lock().unwrap();
+            let targets: Vec<(String, String, Subscription)> = st.devices.iter().filter_map(|d| Some((d.id.clone(), d.name.clone(), d.push.clone()?))).collect();
+            (st.config.clone(), targets)
+        };
+        if !config.enabled || targets.is_empty() {
+            return;
+        }
+        let r = real(project);
+        let id = project_id(&r);
+        let name = self.projects().into_iter().find(|(p, _, _)| *p == id).map(|(_, n, _)| n).unwrap_or_else(|| r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        let payload = json!({ "title": format!("{} · {name}", config.name), "body": body, "kind": kind, "computer": config.id, "project": id });
+        for (device, device_name, sub) in targets {
+            if selftest() {
+                self.state.lock().unwrap().pushes.push((device_name, payload.clone()));
+                continue;
+            }
+            let (me, payload, screen) = (self.clone(), payload.to_string(), config.screen.clone());
+            std::thread::spawn(move || match push::send(&sub, payload.as_bytes(), &screen) {
+                push::Sent::Ok => {}
+                push::Sent::Gone => me.push_gone(&device, &sub.endpoint),
+                push::Sent::Failed(e) => eprintln!("푸시 실패 ({device_name}): {e}"),
+            });
+        }
     }
 
     // 방에 생긴 일을 SSE로 보낸다. project: 채팅의 실제 경로 (없으면 모든 프로젝트에 해당)
@@ -374,14 +452,14 @@ impl Mobile {
         }
         // 2. CORS 미리 보내기: 토큰이 실리지 않는다. 허용 출처·메서드·헤더만 보고 데이터 없이 답한다.
         if *request.method() == tiny_http::Method::Options {
-            let method_ok = header("Access-Control-Request-Method").is_some_and(|m| m == "GET" || m == "POST");
+            let method_ok = header("Access-Control-Request-Method").is_some_and(|m| m == "GET" || m == "POST" || m == "DELETE");
             let headers_ok = header("Access-Control-Request-Headers").unwrap_or_default().split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).all(|h| ALLOW_HEADERS.contains(&h.as_str()));
             if origin.as_deref() != Some(allowed.as_str()) || !method_ok || !headers_ok {
                 let _ = request.respond(tiny_http::Response::empty(403));
                 return;
             }
             let r = cors(tiny_http::Response::from_data(Vec::new()).with_status_code(204))
-                .with_header("Access-Control-Allow-Methods: GET, POST".parse::<tiny_http::Header>().unwrap())
+                .with_header("Access-Control-Allow-Methods: GET, POST, DELETE".parse::<tiny_http::Header>().unwrap())
                 .with_header(tiny_http::Header::from_bytes("Access-Control-Allow-Headers", ALLOW_HEADERS.join(", ")).unwrap())
                 .with_header("Access-Control-Max-Age: 600".parse::<tiny_http::Header>().unwrap());
             let _ = request.respond(r);
@@ -463,7 +541,7 @@ impl Mobile {
         let id = random_hex(6);
         let name: String = device.trim().chars().take(60).collect();
         let now = now_ms();
-        st.devices.push(Device { id: id.clone(), name: if name.is_empty() { "phone".into() } else { name }, hash: hash(&token), login: login.to_string(), created: now, used: now });
+        st.devices.push(Device { id: id.clone(), name: if name.is_empty() { "phone".into() } else { name }, hash: hash(&token), login: login.to_string(), created: now, used: now, push: None, push_gone: None });
         if let Err(e) = self.save_devices(&st) {
             eprintln!("모바일 기기 목록을 쓰지 못함: {e}");
             // 저장하지 못한 토큰은 앱을 다시 켜면 사라진다. 그래도 이번 실행에서는 쓴다.
@@ -495,10 +573,27 @@ impl Mobile {
     }
 
     fn route(&self, method: &tiny_http::Method, path: &str, query: &str, body: &Value, device: &Device, config: &Config) -> (u16, Value) {
-        use tiny_http::Method::{Get, Post};
+        use tiny_http::Method::{Delete, Get, Post};
         let chats = &self.ctx.chats;
         if *method == Get && path == "/api/info" {
-            return (200, json!({ "id": config.id, "name": config.name, "version": env!("CARGO_PKG_VERSION"), "api": API_VERSION }));
+            // push: 이 기기의 구독 주소와 끊긴 구독 주소 (폰이 자기 구독과 비교한다)
+            let push = json!({ "endpoint": device.push.as_ref().map(|p| &p.endpoint), "gone": device.push_gone });
+            return (200, json!({ "id": config.id, "name": config.name, "version": env!("CARGO_PKG_VERSION"), "api": API_VERSION, "push": push }));
+        }
+        if path == "/api/push" && (*method == Post || *method == Delete) {
+            let sub = if *method == Post {
+                match serde_json::from_value::<Subscription>(body.clone()).map_err(|_| "body".to_string()).and_then(|s| s.check().map(|()| s)) {
+                    Ok(s) => Some(s),
+                    Err(e) => return (400, json!({ "error": e })),
+                }
+            } else {
+                None
+            };
+            return match self.set_push(&device.id, sub) {
+                Ok(()) => (200, json!({})),
+                Err(e) if e == "token" => (401, json!({ "error": e })),
+                Err(e) => (500, json!({ "error": e })),
+            };
         }
         if *method == Get && path == "/api/projects" {
             let list: Vec<Value> = self
@@ -506,7 +601,9 @@ impl Mobile {
                 .into_iter()
                 .map(|(id, name, r)| {
                     let sessions = chats.members(&r).len().saturating_sub(1);
-                    json!({ "id": id, "name": name, "sessions": sessions, "paused": chats.paused(&r) })
+                    // 사용자를 기다리는 세션 수 (권한 확인 등)
+                    let awaiting = (self.ctx.status)(&r).iter().filter(|(_, s)| s != "working").count();
+                    json!({ "id": id, "name": name, "sessions": sessions, "awaiting": awaiting, "paused": chats.paused(&r) })
                 })
                 .collect();
             return (200, json!({ "projects": list }));
@@ -528,7 +625,16 @@ impl Mobile {
                 }
                 Err(e) => (500, json!({ "error": e })),
             },
-            (Get, "members") => (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "paused": chats.paused(&project) })),
+            (Get, "members") => {
+                // 이름마다 상태 하나 (같은 이름의 터미널이 여럿이면 기다리는 쪽)
+                let mut status = serde_json::Map::new();
+                for (name, s) in (self.ctx.status)(&project) {
+                    if s != "working" || !status.contains_key(&name) {
+                        status.insert(name, json!(s));
+                    }
+                }
+                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project) }))
+            }
             (Post, "messages") => match body.get("text").and_then(Value::as_str) {
                 Some(text) => match chats.post_via(&project, USER, text, Some(&device.name)) {
                     Ok(m) => (200, json!(m)),
@@ -684,7 +790,8 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             return MobileState(None);
         }
     };
-    let (a, b) = (app.clone(), app.clone());
+    let (a, b, c) = (app.clone(), app.clone(), app.clone());
+    let members = chats.clone();
     let ctx = Ctx {
         chats: chats.clone(),
         projects: Box::new(move || crate::projects::paths(&a).unwrap_or_default().into_iter().map(PathBuf::from).collect()),
@@ -695,6 +802,10 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             names.sort();
             names.dedup();
             names
+        }),
+        status: Box::new(move |project| {
+            let statuses = c.state::<crate::pty::Ptys>().statuses();
+            members.member_tokens(project).into_iter().filter_map(|(t, n)| statuses.iter().find(|(s, _)| *s == t).map(|(_, s)| (n, s.clone()))).collect()
         }),
         dir,
     };
@@ -714,6 +825,14 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
         });
     }
     MobileState(Some(mobile))
+}
+
+// 사용자에게 알릴 것을 폰에도 (notify.rs send. 맥 배너와 같은 생략 조건을 본 뒤)
+pub fn push(app: &tauri::AppHandle, project: &Path, kind: &str, body: &str) {
+    use tauri::Manager;
+    if let Some(Some(m)) = app.try_state::<MobileState>().map(|s| s.0.clone()) {
+        m.notify(project, kind, body);
+    }
 }
 
 // 채팅방에 생긴 일을 폰에 (chat.rs install). waiting: 깨우기 대기가 바뀜 (pty.rs, 프로젝트를 모른다)
@@ -814,6 +933,12 @@ fn raw_http(port: u16, method: &str, path: &str, headers: &[(String, String)], b
     Ok((code, body))
 }
 
+// 자체 테스트: 보내지 않고 모은 푸시 (가져가면 비운다)
+#[tauri::command]
+pub fn selftest_mobile_pushes(state: tauri::State<'_, MobileState>) -> Result<Vec<(String, Value)>, String> {
+    Ok(std::mem::take(&mut mobile_of(&state)?.state.lock().unwrap().pushes))
+}
+
 // 자체 테스트: 모바일 서버에 요청 하나 (Origin·신원 헤더를 마음대로 넣으려고 웹뷰가 아니라 Rust에서 보낸다)
 #[tauri::command(async)]
 pub fn selftest_mobile_http(state: tauri::State<'_, MobileState>, method: String, path: String, headers: Vec<(String, String)>, body: String) -> Result<(u16, String), String> {
@@ -848,6 +973,10 @@ mod tests {
     }
 
     fn fixture(name: &str) -> Fixture {
+        fixture_with(name, Box::new(|_| vec![]))
+    }
+
+    fn fixture_with(name: &str, status: Box<dyn Fn(&Path) -> Vec<(String, String)> + Send + Sync>) -> Fixture {
         let dir = std::env::temp_dir().join(format!("ddak-mobile-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let project = dir.join("proj");
@@ -855,7 +984,7 @@ mod tests {
         let project = real(&project);
         let chats = Chats::new(dir.join("chats"), Box::new(|_, _| {}), 0);
         let p = project.clone();
-        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), dir: dir.join("mobile") };
+        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status, dir: dir.join("mobile") };
         let mobile = Mobile::new(ctx);
         {
             let mut st = mobile.state.lock().unwrap();
@@ -1068,7 +1197,7 @@ mod tests {
         f.mobile.forget(&id_a).unwrap();
         let p = f.project.clone();
         let chats = Chats::new(f.dir.join("chats"), Box::new(|_, _| {}), 0);
-        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), dir: f.dir.join("mobile") });
+        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status: Box::new(|_| vec![]), dir: f.dir.join("mobile") });
         assert!(again.device(&a, LOGIN).is_none());
         assert!(again.device(&b, LOGIN).is_some());
     }
@@ -1085,6 +1214,95 @@ mod tests {
         assert_eq!(f.mobile.state.lock().unwrap().streams.len(), 1);
         f.mobile.publish(None, "waiting", json!({}));
         assert!(f.mobile.state.lock().unwrap().streams.is_empty());
+    }
+
+    fn authed(token: &str) -> String {
+        format!("Bearer {token}")
+    }
+
+    // 구독을 받아 두고, 알릴 때 푸시 서비스에 암호화한 내용과 VAPID 서명을 보낸다. 410이면 구독을 지우고 끊김으로 남긴다.
+    #[test]
+    fn sends_push_and_remembers_gone_subscription() {
+        let f = fixture("push");
+        f.mobile.state.lock().unwrap().config.enabled = true;
+        let token = pair(&f);
+        let auth = authed(&token);
+        let mut h = base();
+        h.push(("Authorization", &auth));
+        // CORS 미리 보내기에 DELETE도 받는다
+        let pre = [("Host", HOST), ("Origin", ORIGIN), ("Access-Control-Request-Method", "DELETE"), ("Access-Control-Request-Headers", "authorization")];
+        assert_eq!(http(f.port, "OPTIONS", "/api/push", &pre, "").0, 204);
+        let service = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://127.0.0.1:{}/push/abc", service.server_addr().to_ip().unwrap().port());
+        let (sub, ua, ua_auth) = push::tests::subscription(&endpoint);
+        assert_eq!(http(f.port, "POST", "/api/push", &h, r#"{"endpoint":"https://x.example/"}"#).0, 400);
+        let (status, body) = http(f.port, "POST", "/api/push", &h, &serde_json::to_string(&sub).unwrap());
+        assert_eq!(status, 200, "{body}");
+        let info = |h: &[(&str, &str)]| serde_json::from_str::<Value>(&http(f.port, "GET", "/api/info", h, "").1).unwrap()["push"].clone();
+        assert_eq!(info(&h), json!({ "endpoint": endpoint, "gone": null }));
+        assert_eq!(f.mobile.devices()[0]["push"], "on");
+
+        f.mobile.notify(&f.project, "message", "dev: done");
+        let mut req = service.recv_timeout(Duration::from_secs(10)).unwrap().expect("push request");
+        let header = |r: &tiny_http::Request, n: &'static str| r.headers().iter().find(|x| x.field.equiv(n)).map(|x| x.value.as_str().to_string()).unwrap_or_default();
+        assert_eq!((header(&req, "Content-Encoding").as_str(), header(&req, "TTL").as_str()), ("aes128gcm", "86400"));
+        let claims = push::tests::verify_vapid(&header(&req, "Authorization"), &sub.public_key);
+        assert_eq!((claims["aud"].as_str(), claims["sub"].as_str()), (Some(endpoint.trim_end_matches("/push/abc")), Some(format!("{ORIGIN}/app/").as_str())));
+        let mut sealed = Vec::new();
+        req.as_reader().read_to_end(&mut sealed).unwrap();
+        let payload: Value = serde_json::from_slice(&push::tests::decrypt(&ua, &ua_auth, &sealed)).unwrap();
+        let config = f.mobile.config();
+        assert_eq!(payload, json!({ "title": format!("{} · proj", config.name), "body": "dev: done", "kind": "message", "computer": config.id, "project": project_id(&f.project) }));
+        req.respond(tiny_http::Response::empty(201)).unwrap();
+
+        // 푸시 서비스가 410: 구독을 지우고 끊김으로 (폰이 같은 구독을 다시 보내지 않게)
+        f.mobile.notify(&f.project, "message", "again");
+        let req = service.recv_timeout(Duration::from_secs(10)).unwrap().expect("second push");
+        req.respond(tiny_http::Response::empty(410)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while f.mobile.devices()[0]["push"] != "gone" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(info(&h), json!({ "endpoint": null, "gone": endpoint }));
+        let saved: Vec<Device> = read_json(&f.dir.join("mobile/devices.json"));
+        assert_eq!((saved[0].push.is_none(), saved[0].push_gone.as_deref()), (true, Some(endpoint.as_str())));
+        // 구독이 없으면 보내지 않는다
+        f.mobile.notify(&f.project, "message", "nobody");
+        assert!(service.recv_timeout(Duration::from_millis(300)).unwrap().is_none());
+
+        // 다시 켜면 끊김이 풀리고, DELETE로 지운다
+        assert_eq!(http(f.port, "POST", "/api/push", &h, &serde_json::to_string(&sub).unwrap()).0, 200);
+        assert_eq!(info(&h), json!({ "endpoint": endpoint, "gone": null }));
+        assert_eq!(http(f.port, "DELETE", "/api/push", &h, "").0, 200);
+        assert_eq!(info(&h), json!({ "endpoint": null, "gone": null }));
+    }
+
+    // 모바일 연결을 끄면 구독이 있어도 보내지 않는다
+    #[test]
+    fn no_push_while_disabled() {
+        let f = fixture("push-off");
+        let token = pair(&f);
+        let service = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let (sub, _, _) = push::tests::subscription(&format!("http://127.0.0.1:{}/p", service.server_addr().to_ip().unwrap().port()));
+        f.mobile.set_push(f.mobile.device(&token, LOGIN).unwrap().id.as_str(), Some(sub)).unwrap();
+        f.mobile.notify(&f.project, "message", "x");
+        assert!(service.recv_timeout(Duration::from_millis(300)).unwrap().is_none());
+    }
+
+    // 참여자 상태: 이름마다 하나 (기다리는 쪽 우선). 프로젝트 목록에는 기다리는 세션 수
+    #[test]
+    fn members_carry_session_status() {
+        let f = fixture_with("status", Box::new(|_| vec![("dev".into(), "working".into()), ("dev".into(), "permission".into()), ("rev".into(), "working".into()), ("qa".into(), "question".into())]));
+        let token = pair(&f);
+        let auth = authed(&token);
+        let mut h = base();
+        h.push(("Authorization", &auth));
+        let id = project_id(&f.project);
+        let (_, body) = http(f.port, "GET", &format!("/api/projects/{id}/members"), &h, "");
+        let members: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(members["status"], json!({ "dev": "permission", "rev": "working", "qa": "question" }));
+        let (_, body) = http(f.port, "GET", "/api/projects", &h, "");
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["projects"][0]["awaiting"], 2);
     }
 
     #[test]

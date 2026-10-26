@@ -13,6 +13,7 @@ mod notify;
 mod prepare;
 mod projects;
 mod pty;
+mod push;
 mod repos;
 mod selftest;
 mod setup;
@@ -58,6 +59,7 @@ pub fn run() {
             notify::selftest_click_notification,
             notify::real_path,
             notify::selftest_set_focused,
+            notify::selftest_notify,
             links::link_targets,
             links::open_link,
             links::selftest_opened_links,
@@ -102,10 +104,12 @@ pub fn run() {
             mobile::mobile_pair_code,
             mobile::mobile_forget,
             mobile::selftest_mobile_http,
+            mobile::selftest_mobile_pushes,
             pty::pty_write,
             pty::pty_foreground,
             pty::pty_awaiting,
             pty::selftest_pty_awaiting,
+            pty::selftest_pty_awaiting_kind,
             pty::pty_working,
             pty::selftest_keep_awake,
             pty::pty_resize,

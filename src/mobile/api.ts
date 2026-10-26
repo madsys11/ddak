@@ -8,8 +8,15 @@ export type Computer = { id: string; name: string; api: string; token: string };
 
 // src-tauri/src/chat.rs Message
 export type Message = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string };
-export type Project = { id: string; name: string; sessions: number; paused: string[] };
-export type Members = { members: string[]; waiting: string[]; paused: string[] };
+// awaiting: 사용자를 기다리는 세션 수 (예전 ddak에는 없다)
+export type Project = { id: string; name: string; sessions: number; awaiting?: number; paused: string[] };
+// status: 참여자마다 "working"이나 기다리는 종류 (permission·question·auth·dialog·blocked). 없으면 쉬는 중
+export type Members = { members: string[]; waiting: string[]; status?: Record<string, string>; paused: string[] };
+// 맥이 가진 이 폰의 푸시 구독 주소와, 푸시 서비스가 없앴다고 답한 주소 (푸시를 모르는 ddak에는 없다)
+export type PushInfo = { endpoint: string | null; gone: string | null };
+export type Info = { id: string; name: string; version: string; api: number; push?: PushInfo };
+// src-tauri/src/push.rs Subscription
+export type PushBody = { endpoint: string; p256dh: string; auth: string; publicKey: string; privateKey: string };
 
 const KEY = "ddak.computers";
 
@@ -40,15 +47,17 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(api: string, path: string, token: string | null, body?: unknown, signal?: AbortSignal): Promise<T> {
+// 요청 기한: 닿지 않는 맥 하나가 다른 맥의 일(알림 구독 맞추기 등)을 붙잡지 않게 (리뷰 R3)
+const TIMEOUT_MS = 15_000;
+
+async function request<T>(api: string, path: string, token: string | null, body?: unknown, method?: "DELETE"): Promise<T> {
   const headers: Record<string, string> = {};
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
   let r: Response;
   try {
-    r = await fetch(api + path, { method: body === undefined ? "GET" : "POST", headers, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", signal });
+    r = await fetch(api + path, { method: method ?? (body === undefined ? "GET" : "POST"), headers, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store", signal: AbortSignal.timeout(TIMEOUT_MS) });
   } catch (e) {
-    if (e instanceof DOMException && e.name === "AbortError") throw e;
     throw new ApiError(0, "unreachable");
   }
   const data = await r.json().catch(() => null);
@@ -57,13 +66,15 @@ async function request<T>(api: string, path: string, token: string | null, body?
 }
 
 export const api = {
-  info: (c: Computer) => request<{ id: string; name: string; version: string; api: number }>(c.api, "/api/info", c.token),
+  info: (c: Computer) => request<Info>(c.api, "/api/info", c.token),
   projects: (c: Computer) => request<{ projects: Project[] }>(c.api, "/api/projects", c.token).then((r) => r.projects),
   messages: (c: Computer, project: string, before?: number) =>
     request<{ name: string; messages: Message[]; more: boolean }>(c.api, `/api/projects/${encodeURIComponent(project)}/messages?limit=50${before ? `&before=${before}` : ""}`, c.token),
   members: (c: Computer, project: string) => request<Members>(c.api, `/api/projects/${encodeURIComponent(project)}/members`, c.token),
   post: (c: Computer, project: string, text: string) => request<Message>(c.api, `/api/projects/${encodeURIComponent(project)}/messages`, c.token, { text }),
   resume: (c: Computer, project: string, group: string) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/resume`, c.token, { group }),
+  setPush: (c: Computer, body: PushBody) => request<unknown>(c.api, "/api/push", c.token, body),
+  deletePush: (c: Computer) => request<unknown>(c.api, "/api/push", c.token, undefined, "DELETE"),
 };
 
 // 페어링: 맥의 "모바일 연결…" 창에 뜬 주소와 코드 → 이 폰의 기기 토큰

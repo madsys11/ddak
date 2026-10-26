@@ -1,11 +1,23 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { MessageKey } from "../i18n";
 import { API_VERSION, ApiError, api, events, loadComputers, pair, saveComputers, type Computer, type Members, type Message, type Project } from "./api";
 import { locale, t } from "./i18n";
+import { changeKey, confirmed, enablePush, keyProblem, onKeyProblem, pushState, removeComputer, syncPush } from "./push";
 import { MessageView } from "./sync";
 
 const USER = "user";
 // src-tauri/src/chat.rs WAKE_LIMIT
 const WAKE_LIMIT = 6;
+
+// 참여자 상태 (src-tauri/src/pty.rs statuses): 작업 중이거나 사용자를 기다리는 종류
+const STATUS: Record<string, MessageKey> = {
+  working: "status.working",
+  permission: "status.permission",
+  question: "status.question",
+  auth: "status.auth",
+  dialog: "status.dialog",
+  blocked: "status.blocked",
+};
 
 // 주소(hash): #/ 처음, #/add 컴퓨터 추가, #/c/<컴퓨터 id> 프로젝트 목록, #/c/<컴퓨터 id>/p/<프로젝트 id> 채팅.
 // 맥의 QR은 #pair=<API 주소>&code=<코드>로 연다 (추가 화면에 채워 넣는다).
@@ -127,6 +139,7 @@ export function MobileApp() {
     const r = route.view === "add" ? route : { address: "", code: "" };
     return (
       <AddComputer
+        computers={computers}
         key={`${r.address}|${r.code}`}
         address={r.address}
         code={r.code}
@@ -140,14 +153,21 @@ export function MobileApp() {
   }
   // 컴퓨터가 하나면 목록을 건너뛴다
   if (route.view === "home" && computers.length === 1) return <Redirect to={`/c/${encodeURIComponent(computers[0].id)}`} />;
-  if (route.view === "home") return <ComputerList computers={computers} onRemove={(id) => update(computers.filter((c) => c.id !== id))} />;
+  // 알림 키를 바꾸지 못하면 (뺀 맥이 예전 구독으로 보낼 수 있다) 어느 화면에서든 알린다 (KeyProblem)
+  const remove = (id: string) => {
+    const rest = computers.filter((c) => c.id !== id);
+    const removed = computers.find((c) => c.id === id);
+    update(rest);
+    if (removed) removeComputer(removed, rest);
+  };
+  if (route.view === "home") return <ComputerList computers={computers} onRemove={remove} />;
   const computer = computers.find((c) => c.id === route.computer);
   if (!computer) return <Redirect to="/" />;
-  if (route.view === "projects") return <ProjectList computer={computer} many={computers.length > 1} />;
+  if (route.view === "projects") return <ProjectList computer={computer} computers={computers} />;
   return <Chat key={`${computer.id}/${route.project}`} computer={computer} project={route.project} />;
 }
 
-function AddComputer({ address: initialAddress, code: initialCode, canCancel, onPaired }: { address: string; code: string; canCancel: boolean; onPaired: (c: Computer) => void }) {
+function AddComputer({ computers, address: initialAddress, code: initialCode, canCancel, onPaired }: { computers: Computer[]; address: string; code: string; canCancel: boolean; onPaired: (c: Computer) => void }) {
   const [address, setAddress] = useState(initialAddress);
   const [code, setCode] = useState(initialCode);
   const [busy, setBusy] = useState(false);
@@ -173,6 +193,7 @@ function AddComputer({ address: initialAddress, code: initialCode, canCancel, on
         )}
         <h1>{t("phone.addComputer")}</h1>
       </header>
+      <KeyProblem computers={computers} />
       <main className="form">
         <p className="hint">{t("phone.pairHint")}</p>
         <label>
@@ -188,6 +209,64 @@ function AddComputer({ address: initialAddress, code: initialCode, canCancel, on
           {busy ? t("phone.pairing") : t("phone.pair")}
         </button>
       </main>
+    </div>
+  );
+}
+
+// 알림 키를 바꾸지 못했다 (src/mobile/push.ts keyProblem): 다시 시도할 수 있게
+export function KeyProblem({ computers }: { computers: Computer[] }) {
+  const problem = useSyncExternalStore(onKeyProblem, keyProblem);
+  if (!problem) return null;
+  return (
+    <div className="banner bad push-banner">
+      <span>{t("phone.keyFailed", { detail: problem })}</span>
+      <button onClick={() => changeKey(computers)}>{t("phone.retry")}</button>
+    </div>
+  );
+}
+
+// 이 폰의 알림: 권한이 있으면 구독을 맞추고 (src/mobile/push.ts), 없으면 켜기를 보인다. 화면이 다시 보일 때마다 맞춘다.
+function PushBanner({ computers }: { computers: Computer[] }) {
+  const [state, setState] = useState(pushState);
+  const [error, setError] = useState<string | null>(null);
+  const failed = (e: unknown) => setError(t("phone.notifyFailed", { detail: e instanceof Error ? e.message : String(e) }));
+  useEffect(() => {
+    const check = () => {
+      if (document.hidden) return;
+      setState(pushState());
+      syncPush(computers).then(() => setError(null), failed);
+    };
+    check();
+    document.addEventListener("visibilitychange", check);
+    return () => document.removeEventListener("visibilitychange", check);
+  }, [computers]);
+  const enable = () =>
+    enablePush(computers).then((s) => {
+      setState(s);
+      setError(null);
+    }, failed);
+  const problem = <KeyProblem computers={computers} />;
+  if (error)
+    return (
+      <>
+        {problem}
+        <div className="banner bad">{error}</div>
+      </>
+    );
+  if (state === "denied")
+    return (
+      <>
+        {problem}
+        <div className="banner">{t("phone.notifyDenied")}</div>
+      </>
+    );
+  if (state !== "off") return problem;
+  return (
+    <div className="banner push-banner">
+      <span>{t("phone.notifyOff")}</span>
+      <button className="primary" onClick={enable}>
+        {t("phone.notifyOn")}
+      </button>
     </div>
   );
 }
@@ -212,6 +291,7 @@ function ComputerList({ computers, onRemove }: { computers: Computer[]; onRemove
       <header className="bar">
         <h1>{t("phone.computers")}</h1>
       </header>
+      <PushBanner computers={computers} />
       <main className="list">
         {computers.map((c) => (
           <div key={c.id} className="row">
@@ -232,7 +312,8 @@ function ComputerList({ computers, onRemove }: { computers: Computer[]; onRemove
   );
 }
 
-function ProjectList({ computer, many }: { computer: Computer; many: boolean }) {
+function ProjectList({ computer, computers }: { computer: Computer; computers: Computer[] }) {
+  const many = computers.length > 1;
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const n = useRef(0);
@@ -273,6 +354,7 @@ function ProjectList({ computer, many }: { computer: Computer; many: boolean }) 
       </header>
       {live !== "live" && !error && <div className="banner">{t("phone.reconnecting")}</div>}
       {error && <div className="banner bad">{error}</div>}
+      <PushBanner computers={computers} />
       <main className="list">
         {projects?.length === 0 && <p className="hint">{t("phone.noProjects")}</p>}
         {projects?.map((p) => (
@@ -280,6 +362,7 @@ function ProjectList({ computer, many }: { computer: Computer; many: boolean }) 
             <span className="row-title">{p.name}</span>
             <span className="row-sub">
               {p.sessions > 0 ? t("phone.sessions", { n: p.sessions }) : t("phone.noSessions")}
+              {!!p.awaiting && <span className="badge">{t("phone.awaitingBadge", { n: p.awaiting })}</span>}
               {p.paused.length > 0 && <span className="badge">{t("phone.pausedBadge")}</span>}
             </span>
           </button>
@@ -305,27 +388,54 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const atBottom = useRef(true);
-  // 최신 페이지로 바꾼다 (처음, 다시 이어짐, 지움)
+  // 최신 페이지로 바꾼다 (처음, 다시 이어짐, 지움, 이 채팅의 알림이 옴). 화면에 적용했으면 true
   const loadLatest = useCallback(() => {
     const load = view.current.begin();
-    api.messages(computer, project).then(
+    return api.messages(computer, project).then(
       (r) => {
-        if (!view.current.latest(load, r.messages, r.more)) return;
+        if (!view.current.latest(load, r.messages, r.more)) return false;
         setName(r.name);
         setError(null);
         changed();
+        return true;
       },
       (e) => {
         view.current.fail(load);
         setError(errorText(e, computer.name));
+        return false;
       },
     );
   }, [computer, project]);
   const nb = useRef(0);
+  // 참여자를 다시 읽는다. 화면에 적용했으면 그 값
   const loadMembers = useCallback(() => {
     const mine = ++nb.current;
-    api.members(computer, project).then((m) => mine === nb.current && setMembers(m), () => {});
+    return api.members(computer, project).then(
+      (m) => {
+        if (mine !== nb.current) return null;
+        setMembers(m);
+        return m;
+      },
+      () => null,
+    );
   }, [computer, project]);
+  // 보고 있는 이 채팅의 알림이 왔다 (main.tsx, sw.js): 그 종류가 알린 것을 다시 읽어 보였으면 그 알림을 닫는다
+  // (SSE만 끊겼거나 읽지 못하면 알림이 남는다. 재리뷰 R2)
+  useEffect(() => {
+    const on = (e: Event) => {
+      const { tag, kind, id } = (e as CustomEvent<{ tag: string; kind: string; id: string }>).detail;
+      if (tag !== `${computer.id}/${project}`) return;
+      Promise.all([kind === "message" ? loadLatest() : false, kind === "message" ? null : loadMembers()]).then(([latest, m]) => {
+        if (!confirmed(kind, latest, m) || document.hidden) return;
+        navigator.serviceWorker
+          ?.getRegistration()
+          .then((r) => r?.getNotifications({ tag }))
+          .then((ns) => ns?.filter((n) => n.data?.id === id).forEach((n) => n.close()), () => {});
+      });
+    };
+    addEventListener("ddak-shown", on);
+    return () => removeEventListener("ddak-shown", on);
+  }, [computer, project, loadLatest, loadMembers]);
   useEffect(() => {
     api.info(computer).then((info) => setOutdated(info.api !== API_VERSION), () => {});
     loadLatest();
@@ -339,7 +449,7 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
         view.current.event(data.message as Message);
         changed();
       } else if (kind === "cleared") loadLatest();
-      else if (kind === "members" || kind === "waiting") loadMembers();
+      else if (kind === "members" || kind === "waiting" || kind === "status") loadMembers();
     },
     () => {
       loadLatest();
@@ -443,12 +553,17 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
           <div className="chips">
             {members.members
               .filter((m) => m !== USER)
-              .map((m) => (
-                <button key={m} className={`chip${members.waiting.includes(m) ? " waiting" : ""}`} onClick={() => mention(m)}>
-                  {m}
-                  {members.waiting.includes(m) && <span className="chip-note">{t("chat.waiting")}</span>}
-                </button>
-              ))}
+              .map((m) => {
+                const status = members.status?.[m];
+                const look = status === "working" ? " working" : status ? " awaiting" : members.waiting.includes(m) ? " waiting" : "";
+                return (
+                  <button key={m} className={`chip${look}`} onClick={() => mention(m)}>
+                    {m}
+                    {status && STATUS[status] && <span className="chip-note">{t(STATUS[status])}</span>}
+                    {members.waiting.includes(m) && <span className="chip-note">{t("chat.waiting")}</span>}
+                  </button>
+                );
+              })}
             {members.members.length <= 1 && <span className="hint">{t("chat.noMembers")}</span>}
           </div>
           <div className="composer">
