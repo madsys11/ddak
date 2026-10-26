@@ -1708,6 +1708,11 @@ async function testTerminalLinkWrap(root: string, shell: Terminal) {
   const cases: { cols: number; text: string; cwd: string; want: string; rows: number[] }[] = [
     { cols: 80, text: `https://example.com/${"a".repeat(58)}/한글`, cwd: root, want: `https://example.com/${"a".repeat(58)}/한글`, rows: [1, 2] },
     { cols: 3, text: "a/한.md", cwd: dir, want: "a/한.md", rows: [1, 2, 3] },
+    // 스스로 줄을 잘라 그리는 프로그램(claude): 별개의 두 줄에 이어 그린 경로. 앞 조각(a/)도 있는 폴더지만 이어 붙인 것 하나만
+    { cols: 20, text: "  x a/\r\n  한.md에 끝", cwd: dir, want: "a/한.md", rows: [1, 2] },
+    // 경로가 끝난 줄 다음에 설명·프롬프트가 와도 (리뷰 R1)
+    { cols: 20, text: "  x a/\r\n  한.md\r\nNext step", cwd: dir, want: "a/한.md", rows: [1, 2] },
+    { cols: 20, text: "  x a/\r\n  한.md\r\n❯", cwd: dir, want: "a/한.md", rows: [1, 2] },
   ];
   try {
     await run(shell, `mkdir -p "${dir}/a" && printf x > "${dir}/a/한.md"`);
@@ -1728,17 +1733,16 @@ async function testTerminalLinkWrap(root: string, shell: Terminal) {
     box.remove();
     await run(shell, `rm -rf "${dir}"`);
   }
-  check("터미널 링크: 넓은 글자가 줄 끝에서 넘어가도 URL·경로가 한 링크 (모든 줄에서 같은 범위)", !results.includes("BAD"), results.join(" | "));
+  check("터미널 링크: 넓은 글자가 줄 끝에서 넘어가거나 프로그램이 다음 줄에 이어 그려도 한 링크 (모든 줄에서 같은 범위)", !results.includes("BAD"), results.join(" | "));
 }
 
 // 터미널 링크 (src/terminalLinks.ts, src-tauri/src/links.rs): 실제 화면에서 올리면 안내, ⌘+클릭하면 연다(자체 테스트는 기록).
 // 상대 경로는 셸이 cd 한 폴더 기준 (창을 띄운 폴더에는 없는 파일), 없는 파일은 링크가 아님, 실행될 수 있는 것은 Finder에서 보이기만
 async function testTerminalLinks(root: string, term: Terminal) {
   const dir = `${root}/lk`;
-  await run(term, `mkdir -p "${dir}/sub" && printf x > "${dir}/report.html" && printf x > "${dir}/sub/notes.md" && printf x > "${dir}/run.sh" && cd "${dir}"`);
+  await run(term, `mkdir -p "${dir}/sub" "${dir}/repo/.git" "${dir}/repo/docs" && printf x > "${dir}/report.html" && printf x > "${dir}/sub/notes.md" && printf x > "${dir}/run.sh" && printf x > "${dir}/repo/docs/guide.md" && cd "${dir}"`);
   await invoke("selftest_opened_links");
-  await run(term, String.raw`printf '%s %s %s %s %s
-' 'LK report.html에' sub/notes.md:12 https://example.com/a. missing.md run.sh`);
+  await run(term, String.raw`printf '%s %s %s %s %s %s\n' 'LK report.html에' sub/notes.md:12 https://example.com/a. missing.md run.sh docs/guide.md`);
   const buf = term.buffer.active;
   let row = -1;
   for (let y = buf.length - 1; y >= 0 && row < 0; y--) if (buf.getLine(y)?.translateToString(true).startsWith("LK report")) row = y;
@@ -1776,7 +1780,7 @@ async function testTerminalLinks(root: string, term: Terminal) {
     return invoke<[string, string][]>("selftest_opened_links");
   };
   const results: Record<string, unknown> = {};
-  for (const text of ["report.html", "sub/notes.md", "https://example.com", "run.sh"]) {
+  for (const text of ["report.html", "sub/notes.md", "https://example.com", "run.sh", "docs/guide.md"]) {
     const shown = await hovered(text);
     const plain = await click(text, false);
     const opened = await click(text, true);
@@ -1794,6 +1798,7 @@ async function testTerminalLinks(root: string, term: Terminal) {
     JSON.stringify(results),
   );
   check("터미널 링크: 실행될 수 있는 파일은 열지 않고 Finder에서 보이기, 없는 파일은 링크 아님", one("run.sh", "reveal", "/lk/run.sh") && !missingShown, JSON.stringify({ run: results["run.sh"], missingShown }));
+  check("터미널 링크: 그 폴더에 없는 상대 경로는 바로 아래 git 저장소에서 찾음", one("docs/guide.md", "open", "/lk/repo/docs/guide.md"), JSON.stringify(results["docs/guide.md"]));
   mouse("mousemove", term.cols - 1);
   await run(term, `cd "${root}" && rm -rf "${dir}"`);
 }

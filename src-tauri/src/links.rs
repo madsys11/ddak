@@ -24,8 +24,54 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-// 후보 하나를 실제 있는 절대 경로로. `~/`는 홈, 상대 경로는 bases를 차례로.
-fn resolve(candidate: &str, bases: &[PathBuf]) -> Option<PathBuf> {
+// 상대 경로의 기준: 폴더들 (앞의 것부터), 그 바로 아래 git 저장소들 (처음 필요할 때 한 번 구해 후보들이 같이 쓴다)
+struct Bases {
+    dirs: Vec<PathBuf>,
+    repos: std::cell::OnceCell<Option<Vec<PathBuf>>>,
+}
+
+// 저장소가 이보다 많으면 모두 보지 않고 모른다고 한다 (일부만 보고 "한 곳"이라 정하면 다른 파일을 열 수 있다, 리뷰 R2)
+const MAX_REPOS: usize = 256;
+
+impl Bases {
+    fn new(dirs: Vec<PathBuf>) -> Self {
+        // 같은 폴더가 두 번이면 한 번만 (프로그램의 현재 폴더 = 창의 폴더인 흔한 경우)
+        let mut unique: Vec<PathBuf> = Vec::new();
+        for d in dirs {
+            if !unique.iter().any(|u| u == &d || same_file(u, &d)) {
+                unique.push(d);
+            }
+        }
+        Bases { dirs: unique, repos: std::cell::OnceCell::new() }
+    }
+
+    // 폴더들 바로 아래의 git 저장소 (`.git`이 폴더거나 worktree의 파일). MAX_REPOS를 넘으면 None (모름)
+    fn repos(&self) -> Option<&[PathBuf]> {
+        self.repos
+            .get_or_init(|| {
+                let mut repos = Vec::new();
+                for dir in &self.dirs {
+                    let Ok(entries) = std::fs::read_dir(dir) else { continue };
+                    for p in entries.flatten().map(|e| e.path()) {
+                        if p.is_dir() && p.join(".git").exists() {
+                            repos.push(p);
+                            if repos.len() > MAX_REPOS {
+                                return None;
+                            }
+                        }
+                    }
+                }
+                Some(repos)
+            })
+            .as_deref()
+    }
+}
+
+// 후보 하나를 실제 있는 절대 경로로. `~/`는 홈, 상대 경로는 기준 폴더를 차례로.
+// 어디에도 없으면 그 바로 아래 git 저장소 기준으로도 본다: 작업그룹 세션은 저장소들의 위 폴더에서 돌고, 에이전트는 저장소
+// 안의 경로(`docs/spec.md`)로 말한다. 저장소 한 곳에서만 찾아질 때만 (여러 곳이면 어느 것인지 몰라 링크로 보지 않는다.
+// 같은 실제 대상을 가리키는 저장소 링크는 한 곳)
+fn resolve(candidate: &str, bases: &Bases) -> Option<PathBuf> {
     let path = if let Some(rest) = candidate.strip_prefix("~/") {
         home()?.join(rest)
     } else {
@@ -34,7 +80,26 @@ fn resolve(candidate: &str, bases: &[PathBuf]) -> Option<PathBuf> {
     if path.is_absolute() {
         return path.exists().then_some(path);
     }
-    bases.iter().map(|b| b.join(&path)).find(|p| p.exists())
+    if let Some(found) = bases.dirs.iter().map(|b| b.join(&path)).find(|p| p.exists()) {
+        return Some(found);
+    }
+    let mut found: Option<PathBuf> = None;
+    for repo in bases.repos()? {
+        let p = repo.join(&path);
+        if !p.exists() {
+            continue;
+        }
+        match &found {
+            None => found = Some(p),
+            Some(f) if same_file(f, &p) => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(x), Ok(y)) if x == y)
 }
 
 #[cfg(target_os = "macos")]
@@ -64,6 +129,7 @@ pub fn link_targets(ptys: State<'_, Ptys>, id: Option<u32>, cwd: String, candida
         bases.push(dir);
     }
     bases.push(PathBuf::from(cwd));
+    let bases = Bases::new(bases);
     candidates.iter().map(|c| resolve(c, &bases).map(|p| p.to_string_lossy().into_owned())).collect()
 }
 
@@ -146,10 +212,55 @@ mod tests {
         std::fs::create_dir(b.join("docs")).unwrap();
         std::fs::write(b.join("docs/spec.md"), "").unwrap();
         let bases = [a.clone(), b.clone()];
-        assert_eq!(resolve("docs/spec.md", &bases), Some(b.join("docs/spec.md")));
-        assert_eq!(resolve("docs/none.md", &bases), None);
+        assert_eq!(resolve("docs/spec.md", &Bases::new(bases.to_vec())), Some(b.join("docs/spec.md")));
+        assert_eq!(resolve("docs/none.md", &Bases::new(bases.to_vec())), None);
         let abs = b.join("docs/spec.md");
-        assert_eq!(resolve(abs.to_str().unwrap(), &[]), Some(abs.clone()));
+        assert_eq!(resolve(abs.to_str().unwrap(), &Bases::new(Vec::new())), Some(abs.clone()));
+        // 저장소들의 위 폴더: 바로 아래 git 저장소 한 곳에만 있으면 그것, 여러 곳이면 모름, 저장소가 아닌 폴더는 보지 않음
+        for (repo, git_dir) in [("one", true), ("two", false)] {
+            std::fs::create_dir_all(a.join(repo).join("src")).unwrap();
+            if git_dir {
+                std::fs::create_dir(a.join(repo).join(".git")).unwrap();
+            } else {
+                std::fs::write(a.join(repo).join(".git"), "gitdir: elsewhere\n").unwrap();
+            }
+        }
+        std::fs::create_dir_all(a.join("plain/src")).unwrap();
+        std::fs::write(a.join("one/src/a.rs"), "").unwrap();
+        std::fs::write(a.join("plain/src/b.rs"), "").unwrap();
+        assert_eq!(resolve("src/a.rs", &Bases::new(vec![a.clone()])), Some(a.join("one/src/a.rs")));
+        assert_eq!(resolve("src/b.rs", &Bases::new(vec![a.clone()])), None);
+        std::fs::write(a.join("two/src/a.rs"), "").unwrap();
+        assert_eq!(resolve("src/a.rs", &Bases::new(vec![a.clone()])), None);
+        // 폴더 자체에 있으면 저장소보다 먼저
+        std::fs::create_dir(a.join("src")).unwrap();
+        std::fs::write(a.join("src/a.rs"), "").unwrap();
+        assert_eq!(resolve("src/a.rs", &Bases::new(vec![a.clone()])), Some(a.join("src/a.rs")));
+        // 같은 실제 저장소를 가리키는 링크는 한 곳으로 친다
+        let c = scratch("base-c");
+        std::fs::create_dir_all(c.join("real/.git")).unwrap();
+        std::fs::create_dir_all(c.join("real/docs")).unwrap();
+        std::fs::write(c.join("real/docs/x.md"), "").unwrap();
+        std::os::unix::fs::symlink(c.join("real"), c.join("alias")).unwrap();
+        assert_eq!(resolve("docs/x.md", &Bases::new(vec![c.clone()])).map(|p| p.canonicalize().unwrap()), Some(c.join("real/docs/x.md")));
+        // 이름 순으로 멀리 떨어진 두 저장소(첫째와 서른셋째)에 같은 경로가 있으면 모름. 저장소가 너무 많으면 모름
+        let d = scratch("base-d");
+        for i in 0..40 {
+            std::fs::create_dir_all(d.join(format!("r{i:02}/.git"))).unwrap();
+        }
+        for i in [0, 32] {
+            std::fs::create_dir_all(d.join(format!("r{i:02}/docs"))).unwrap();
+            std::fs::write(d.join(format!("r{i:02}/docs/guide.md")), "").unwrap();
+        }
+        assert_eq!(resolve("docs/guide.md", &Bases::new(vec![d.clone()])), None);
+        std::fs::write(d.join("r05/only.md"), "").unwrap();
+        assert_eq!(resolve("only.md", &Bases::new(vec![d.clone()])), Some(d.join("r05/only.md")));
+        for i in 40..=MAX_REPOS {
+            std::fs::create_dir_all(d.join(format!("r{i:03}/.git"))).unwrap();
+        }
+        assert_eq!(resolve("only.md", &Bases::new(vec![d.clone()])), None);
+        let _ = std::fs::remove_dir_all(c);
+        let _ = std::fs::remove_dir_all(d);
         let _ = std::fs::remove_dir_all(a);
         let _ = std::fs::remove_dir_all(b);
     }

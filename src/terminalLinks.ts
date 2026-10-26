@@ -46,17 +46,20 @@ export function findLinks(text: string): FoundLink[] {
   return out.slice(0, MAX_LINKS);
 }
 
-// 이어진(줄바꿈 없이 넘친) 줄들을 한 줄로: 글자와 글자마다의 칸 (1부터, 넓은 글자는 두 칸)
+// 이어진(줄바꿈 없이 넘친) 줄들을 한 줄로: 글자와 글자마다의 칸 (1부터, 넓은 글자는 두 칸). first·last는 버퍼 줄 (0부터)
 type Cell = { x: number; y: number; w: number };
-function logicalLine(term: XTerm, y: number): { text: string; cells: Cell[] } {
+type Line = { text: string; cells: Cell[]; first: number; last: number };
+function logicalLine(term: XTerm, y: number): Line {
   const buf = term.buffer.active;
   let first = y - 1;
   while (first > 0 && buf.getLine(first)?.isWrapped && y - 1 - first < 50) first--;
   let text = "";
   const cells: Cell[] = [];
+  let last = first;
   for (let row = first; row < first + 50; row++) {
     const line = buf.getLine(row);
     if (!line || (row > first && !line.isWrapped)) break;
+    last = row;
     // 다음 줄로 넘친 줄의 끝에 남은 빈 칸은 공백이 아니다: 넓은 글자가 마지막 한 칸에 못 들어가면 xterm은 그 칸을 비우고
     // 다음 줄에 쓴다 (리뷰 R1: 공백으로 붙이니 URL·경로가 끊겼다). 쓴 공백은 글자(" ")가 있다
     let end = line.length;
@@ -70,7 +73,41 @@ function logicalLine(term: XTerm, y: number): { text: string; cells: Cell[] } {
       text += ch;
     }
   }
-  return { text, cells };
+  return { text, cells, first, last };
+}
+
+// 스스로 줄을 잘라 그리는 프로그램(claude)의 긴 경로: 창 폭을 넘는 낱말을 다음 줄에 이어 그려서 터미널에는 별개의 줄이다.
+// 한 줄의 마지막 낱말과 다음 줄의 (들여쓰기 뒤) 첫 낱말을 이어 붙인 글자를 만든다. 다음 줄이 그 낱말 하나뿐이면 그다음 줄로
+// 계속 잇는다. 이을 때마다 그때까지를 하나씩 낸다 (경로가 끝난 줄 뒤의 설명·프롬프트까지 붙은 것만 내면 경로를 놓친다,
+// 리뷰 R1). split: 첫 줄 부분의 길이 (이음을 지나는 후보만 쓴다). 붙인 경로는 실제로 있어야 링크다 (link_targets)
+const WORD = String.raw`[^\s"'\`<>()[\]{}|,;]+`;
+const TAIL_RE = new RegExp(`(${WORD})\\s*$`);
+const HEAD_RE = new RegExp(`^\\s*(${WORD})`);
+const NEAR_LINES = 3;
+type Joined = { text: string; cells: Cell[]; split: number };
+function joinedAround(term: XTerm, here: Line): Joined[] {
+  const lines: Line[] = [here];
+  for (let i = 0; i < NEAR_LINES && lines[0].first > 0; i++) lines.unshift(logicalLine(term, lines[0].first));
+  for (let i = 0; i < NEAR_LINES && term.buffer.active.getLine(lines[lines.length - 1].last + 1); i++) lines.push(logicalLine(term, lines[lines.length - 1].last + 2));
+  const out: Joined[] = [];
+  for (let i = 0; i + 1 < lines.length; i++) {
+    const tail = TAIL_RE.exec(lines[i].text);
+    if (!tail) continue;
+    let text = tail[1];
+    let cells = lines[i].cells.slice(tail.index, tail.index + text.length);
+    const split = text.length;
+    for (let j = i + 1; j < lines.length; j++) {
+      const head = HEAD_RE.exec(lines[j].text);
+      if (!head) break;
+      const start = head[0].length - head[1].length;
+      text += head[1];
+      cells = cells.concat(lines[j].cells.slice(start, head[0].length));
+      out.push({ text, cells, split });
+      // 그 줄이 낱말 하나뿐일 때만 다음 줄로 더 잇는다
+      if (lines[j].text.trimEnd().length !== head[0].length) break;
+    }
+  }
+  return out;
 }
 
 const range = (cells: Cell[], start: number, end: number): IBufferRange => {
@@ -94,8 +131,12 @@ export function linkProvider(term: XTerm, ctx: Context): ILinkProvider {
   const KEEP_MS = 3000;
   return {
     provideLinks(y, callback) {
-      const { text, cells } = logicalLine(term, y);
-      const found = findLinks(text);
+      const here = logicalLine(term, y);
+      type Item = FoundLink & { text: string; cells: Cell[] };
+      const found: Item[] = findLinks(here.text).map((f) => ({ ...f, text: here.text, cells: here.cells }));
+      // 다음 줄에 이어 그린 경로 (URL은 있는지 확인할 수 없어 잇지 않는다)
+      for (const j of joinedAround(term, here))
+        for (const f of findLinks(j.text)) if (f.kind === "path" && f.start < j.split && f.end > j.split) found.push({ ...f, text: j.text, cells: j.cells });
       if (!found.length) return callback(undefined);
       const key = (target: string) => `${ctx.id()}\0${ctx.cwd()}\0${target}`;
       const now = Date.now();
@@ -106,25 +147,28 @@ export function linkProvider(term: XTerm, ctx: Context): ILinkProvider {
             .catch(() => {})
         : Promise.resolve();
       asked.then(() => {
+        const at = (p: { x: number; y: number }) => p.y * 100_000 + p.x;
         const links: ILink[] = [];
-        // 같은 자리에서 시작하는 후보는 앞의 것(긴 것)부터 보고 처음 열 수 있는 것 하나만
-        const used = new Set<number>();
         for (const f of found) {
-          if (used.has(f.start)) continue;
           const target = f.kind === "url" ? f.target : known.get(key(f.target))?.path;
           if (!target) continue;
-          used.add(f.start);
-          const r = range(cells, f.start, f.end);
-          if (r.start.y > y || r.end.y < y) continue;
+          const r = range(f.cells, f.start, f.end);
           links.push({
             range: r,
-            text: text.slice(f.start, f.end),
+            text: f.text.slice(f.start, f.end),
             decorations: { underline: true, pointerCursor: true },
             activate: (e) => e.metaKey && openLink(target),
             ...hover(term, ctx),
           });
         }
-        callback(links.length ? links : undefined);
+        // 다른 링크 안에 든 것은 뺀다: 조사를 붙인 것과 뗀 것이 둘 다 있으면 긴 것, 이어 붙인 경로가 있으면 줄마다의 조각은
+        // 버림. 범위가 같으면 앞의 것 하나만
+        const inside = (a: ILink, b: ILink) => at(b.range.start) <= at(a.range.start) && at(a.range.end) <= at(b.range.end);
+        const same = (a: ILink, b: ILink) => inside(a, b) && inside(b, a);
+        const shown = links.filter(
+          (l, i) => !links.some((o, j) => j !== i && inside(l, o) && (!same(l, o) || j < i)) && l.range.start.y <= y && l.range.end.y >= y,
+        );
+        callback(shown.length ? shown : undefined);
       });
     },
   };
