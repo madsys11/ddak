@@ -474,6 +474,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   `~/Library/Application Support/<식별자>`에 있어서 식별자를 바꾸면 이어 쓰지 못한다.
 - 개발 빌드는 따로 지정하지 않으면(`DDAK_DATA_DIR`) 설치한 앱의 폴더 옆 `<식별자>-dev`를 쓴다. 설치한 ddak 안에서 개발 빌드를
   띄워도 두 앱이 같은 상태 파일을 서로 덮어쓰지 않는다. `~/.ddak`(작업그룹 worktree)은 같이 쓴다.
+- 앱 아이콘: 쌍디귿 ㄸ을 ㄷ 두 개(민트·노랑, 두 세션)로 그린 것. 원본은 `src-tauri/app-icon.svg`(macOS 아이콘 격자: 1024 안에
+  824 몸체, 모서리 185, 그림자 포함)이고, `npx tauri icon src-tauri/app-icon.svg`로 `src-tauri/icons`를 만든다. 데스크톱용만 두므로
+  함께 생기는 `android/`·`ios/`·`64x64.png`는 지운다.
 - 테마·언어·배율(localStorage)은 출처(origin)별이라 개발 빌드(`http://localhost:1420`)와 설치한 앱(`tauri://localhost`)이 따로다.
 
 ### 1단계: 혼자 쓰기 (지금)

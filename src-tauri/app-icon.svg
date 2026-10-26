@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- 앱 아이콘 원본: 쌍디귿 ㄸ = ㄷ 두 개 (개발·리뷰 두 세션). macOS 아이콘 격자(1024 안에 824 몸체, 모서리 185).
+       바꾼 뒤 `npx tauri icon src-tauri/app-icon.svg`로 src-tauri/icons를 다시 만든다 -->
+  <defs>
+    <!-- 그림자만 흐린다. 몸체에 필터를 걸면 어두운 바탕이 linearRGB 8비트를 거치며 줄무늬가 생긴다 -->
+    <filter id="blur" x="-10%" y="-10%" width="120%" height="125%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#15294a"/>
+      <stop offset="1" stop-color="#0a1526"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="114" width="824" height="824" rx="185" fill="#000" fill-opacity="0.22" filter="url(#blur)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <path d="M470 330 H250 V694 H470" fill="none" stroke="#5eead4" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M774 330 H554 V694 H774" fill="none" stroke="#fbbf24" stroke-width="74" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
