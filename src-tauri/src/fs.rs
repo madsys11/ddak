@@ -90,13 +90,16 @@ pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
 // - 링크가 "있음"으로 거절되면, 그 이름으로 찾은 항목의 저장된 이름이 원래 이름과 똑같을 때만 같은 항목(대소문자를
 //   구분하지 않는 폴더의 대소문자 바꾸기)으로 보고 이름을 바꾼다. 폴더별 대소문자 구분이 켜진 폴더에서 따로 있는 항목은
 //   저장된 이름이 달라 "있음"이다 (리뷰 R2).
-// - 링크를 더 만들 수 없으면 (링크 수 상한, 리뷰 R5) 이 파일의 이름 목록은 그동안 늘지도 줄지도 않는다. 하드 링크를
-//   지원하지 않는 파일 시스템은 다른 이름이 없다. 이때와 폴더는 위와 같이 같은 이름인지 보고 이름을 바꾼다.
+// - 링크를 만들 수 없으면 위와 같이 같은 이름인지 보고 이름을 바꾼다. 링크 수 상한(리뷰 R5)이면 이 파일의 이름 목록은
+//   그동안 늘지도 줄지도 않는다. 하드 링크를 지원하지 않는 파일 시스템은 다른 이름이 없다. 속성 쓰기 권한이 없으면 링크를
+//   만들 수 없다 (2026-10-28 CI: CreateHardLinkW도 거절, MoveFileExW와 핸들 이름 바꾸기는 됨. 리뷰 R6). 이때는 속성 쓰기
+//   권한이 있는 다른 사용자가 확인과 이름 바꾸기 사이에 같은 파일의 링크를 그 이름으로 만드는 경우만 막지 못한다
+//   (MoveFileExW만 쓰던 때와 같다). 폴더도 같은 길이다.
 // - 이름 바꾸기는 대상이 있으면 실패하게 한다 (ReplaceIfExists 없음). 확인 뒤에 생긴 다른 파일은 여기서 막힌다.
 #[cfg(windows)]
 pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
     use windows_sys::Wdk::Storage::FileSystem::{FileLinkInformation, FileRenameInformation};
-    use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_TOO_MANY_LINKS};
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_TOO_MANY_LINKS};
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
     let file = open_exclusive(src)?;
     #[cfg(test)]
@@ -110,7 +113,10 @@ pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
             Ok(()) => return mark_deleted(&file),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && !same_entry() => return Err(e),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) if [ERROR_TOO_MANY_LINKS, ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION].map(|c| c as i32).contains(&e.raw_os_error().unwrap_or(0)) => {
+            Err(e) if [ERROR_TOO_MANY_LINKS, ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION, ERROR_ACCESS_DENIED]
+                .map(|c| c as i32)
+                .contains(&e.raw_os_error().unwrap_or(0)) =>
+            {
                 if dest.symlink_metadata().is_ok() && !same_entry() {
                     return Err(std::io::ErrorKind::AlreadyExists.into());
                 }
@@ -793,18 +799,21 @@ mod tests {
         perm.set_readonly(false);
         std::fs::set_permissions(d.join("ro2.txt"), perm).unwrap();
 
-        // 속성 쓰기만 ACL로 막은 파일·폴더도 바뀐다 (리뷰 R6)
+        // 속성 쓰기만 ACL로 막은 파일·폴더도 바뀌고 (리뷰 R6: 링크를 만들 수 없음), 같은 파일의 다른 이름으로는 "있음"
         let d = sub("acl");
         std::fs::write(d.join("wa.txt"), "W").unwrap();
+        std::fs::hard_link(d.join("wa.txt"), d.join("walink.txt")).unwrap();
         std::fs::create_dir(d.join("wadir")).unwrap();
         let user = std::env::var("USERNAME").unwrap();
         for name in ["wa.txt", "wadir"] {
             let deny = std::process::Command::new("icacls.exe").arg(d.join(name)).args(["/deny", &format!("{user}:(WA)")]).output().unwrap();
             assert!(deny.status.success(), "{deny:?}");
         }
+        assert!(std::fs::hard_link(d.join("wa.txt"), d.join("probe.txt")).is_err(), "속성 쓰기를 막아도 링크가 만들어짐");
+        assert!(exists(rename_excl(&d.join("wa.txt"), &d.join("walink.txt")).unwrap_err()));
         rename_excl(&d.join("wa.txt"), &d.join("wa2.txt")).unwrap();
         rename_excl(&d.join("wadir"), &d.join("wadir2")).unwrap();
-        assert_eq!(names(&d), ["wa2.txt", "wadir2"]);
+        assert_eq!(names(&d), ["wa2.txt", "wadir2", "walink.txt"]);
         for name in ["wa2.txt", "wadir2"] {
             let _ = std::process::Command::new("icacls.exe").arg(d.join(name)).args(["/remove:d", &user]).output();
         }
