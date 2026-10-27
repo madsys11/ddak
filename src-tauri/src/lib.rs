@@ -105,6 +105,8 @@ pub fn run() {
             chat::chat_paused,
             chat::chat_clear,
             chat::chat_resume,
+            chat::selftest_chat_join,
+            chat::selftest_chat_leave,
             mobile::mobile_status,
             mobile::mobile_set_enabled,
             mobile::mobile_serve,

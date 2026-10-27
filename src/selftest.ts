@@ -813,10 +813,19 @@ async function testMobile(root: string) {
   const [listed, listBody] = await http("GET", "/api/projects", auth);
   const project = listed === 200 ? (JSON.parse(listBody).projects as { id: string; name: string }[]).find((p) => p.name === root.split("/").pop()) : undefined;
   check("모바일 연결: 프로젝트 목록", !!project, `${listed} ${listBody}`);
-  const [posted, postBody] = await http("POST", `/api/projects/${project?.id}/messages`, auth, JSON.stringify({ text: "hello from the phone" }));
-  const stored = await invoke<{ text: string; from: string; via?: string }[]>("chat_messages", { project: root });
+  // 받는 사람이 없으면 보내지 않는다 (예전 폰 화면이 멘션 없이 보내도). 받을 참여자를 넣은 뒤 @all로 보낸다
+  const [refused, refusedBody] = await http("POST", `/api/projects/${project?.id}/messages`, auth, JSON.stringify({ text: "hello from the phone" }));
+  const reader = await invoke<string>("selftest_chat_join", { project: root, name: "origin/phone-reader" });
+  const [posted, postBody] = await http("POST", `/api/projects/${project?.id}/messages`, auth, JSON.stringify({ text: "@all hello from the phone" }));
+  await invoke("selftest_chat_leave", { token: reader });
+  const stored = await invoke<{ text: string; from: string; to: string[]; via?: string }[]>("chat_messages", { project: root });
   const last = stored.at(-1);
-  check("모바일 연결: 폰에서 보낸 메시지는 사용자로, 기기 이름과 함께", posted === 200 && last?.from === "user" && last.text === "hello from the phone" && last.via === "Selftest Phone", `${posted} ${postBody} ${JSON.stringify(last)}`);
+  check(
+    "모바일 연결: 받는 사람이 없으면 거절, 폰에서 보낸 메시지는 사용자로, 기기 이름과 함께",
+    refused === 400 && JSON.parse(refusedBody).error === "no-recipient" && !stored.some((m) => m.text === "hello from the phone") &&
+      posted === 200 && last?.from === "user" && last.text === "@all hello from the phone" && last.to.join() === "origin/phone-reader" && last.via === "Selftest Phone",
+    `${refused} ${refusedBody} ${posted} ${postBody} ${JSON.stringify(last)}`,
+  );
 
   // 채팅 패널에 "폰에서" 표시
   const ws = document.querySelector<HTMLElement>(`.project-workspace[data-project="${root}"]`);
@@ -1158,9 +1167,11 @@ async function testProjects(root: string, first: Terminal) {
   devHooks.workspaceLoad = undefined;
   // 패널이 뜬 뒤 등록하기 전 (1.5초 안)에 보낸다
   await waitFor("두 번째 프로젝트 채팅 패널", otherChat, 1000);
-  await invoke("chat_post", { project: other, text: "early message" });
+  // 사용자 메시지는 받을 참여자가 있어야 보낸다 (터미널 없이 넣는다. 아래 "@all after removal"까지 둔다)
+  const reader = await invoke<string>("selftest_chat_join", { project: other, name: "origin/reader" });
+  await invoke("chat_post", { project: other, text: "@all early message" });
   devHooks.chatListenDelay = undefined;
-  await waitFor("처음 읽기 전에 온 메시지", () => [...otherChat()!.querySelectorAll(".chat-text")].some((el) => el.textContent === "early message"), 4000).then(
+  await waitFor("처음 읽기 전에 온 메시지", () => [...otherChat()!.querySelectorAll(".chat-text")].some((el) => el.textContent === "@all early message"), 4000).then(
     () => check("채팅 패널: 이벤트를 등록하기 전에 온 메시지도 보임", true),
     () => check("채팅 패널: 이벤트를 등록하기 전에 온 메시지도 보임", false, otherChat()!.textContent ?? ""),
   );
@@ -1308,13 +1319,14 @@ async function testProjects(root: string, first: Terminal) {
   await devHooks.addProject!(other);
   const otherPanel = () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(other)}"] .chat-panel`);
   const shownError = await waitFor("등록 실패 알림", () => otherPanel()?.querySelector("[data-listen-error]"), 5000).catch(() => null);
-  const firstRead = await waitFor("처음 읽기", () => [...(otherPanel()?.querySelectorAll(".chat-text") ?? [])].some((el) => el.textContent === "early message"), 3000).catch(() => false);
+  const firstRead = await waitFor("처음 읽기", () => [...(otherPanel()?.querySelectorAll(".chat-text") ?? [])].some((el) => el.textContent === "@all early message"), 3000).catch(() => false);
   devHooks.chatListenFail = undefined;
   await removeOther();
   await sleep(300);
   const reads = () => devHooks.chatLoads?.[other] ?? 0;
   const readsBefore = reads();
-  await invoke("chat_post", { project: other, text: "after removal" });
+  await invoke("chat_post", { project: other, text: "@all after removal" });
+  await invoke("selftest_chat_leave", { token: reader });
   await sleep(500);
   check(
     "채팅 패널: 이벤트 등록이 일부 실패하면 알리고 처음 읽기는 하고, 사라진 뒤 남은 리스너가 없음",
@@ -3158,7 +3170,7 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   check(
     "채팅 패널: 탭 바 버튼으로 열고, 세션이 보낸 메시지(나에게)와 참여자를 보임, 입력란에 포커스",
     first.querySelector(".chat-from")?.textContent === "origin/poster" && /^\d\d:\d\d( [AP]M)?$/.test(first.querySelector("time")?.textContent ?? "") && first.classList.contains("to-me") && first.querySelector(".chat-text")?.textContent === "@user hello from poster" &&
-      chips === "origin/poster,origin/reviewer,origin/writer,origin/writer-2" && document.activeElement === input(),
+      chips === "all,origin/poster,origin/reviewer,origin/writer,origin/writer-2" && document.activeElement === input(),
     `${first.textContent} | ${chips}`,
   );
   // 참여자 칩은 메시지 목록 아래, 입력란 바로 위에 있다 (멘션을 넣는 곳 가까이)
@@ -3188,17 +3200,38 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
 
   // 보내는 동안 새로 쓴 초안은 응답이 와도 남는다 (리뷰 P2)
   devHooks.chatPostDelay = 1000;
-  type("slow one");
+  type("@all slow one");
   enter(13);
   await sleep(100);
   type("next draft");
-  await waitAsync("늦게 보낸 메시지", async () => (await stored()).some((m) => m.text === "slow one"), 5000).catch(() => null);
+  await waitAsync("늦게 보낸 메시지", async () => (await stored()).some((m) => m.text === "@all slow one"), 5000).catch(() => null);
   await sleep(200);
   devHooks.chatPostDelay = undefined;
   check("채팅 패널: 보내는 동안 새로 쓴 초안은 남음", input().value === "next draft", input().value);
-  // 아무도 멘션하지 않은 사용자 메시지는 모두에게 (매번 @all을 치지 않게)
-  const slow = (await stored()).find((m) => m.text === "slow one");
-  check("채팅 패널: 멘션 없는 메시지는 모두에게", slow?.to.join(",") === chips, `${slow?.to.join(",")} / ${chips}`);
+  // @all은 모두에게
+  const slow = (await stored()).find((m) => m.text === "@all slow one");
+  const sessions = chips.split(",").filter((c) => c !== "all").join(",");
+  check("채팅 패널: @all은 모두에게", slow?.to.join(",") === sessions, `${slow?.to.join(",")} / ${sessions}`);
+  // 아무도 멘션하지 않으면 보내지 않고 받는 사람을 고르라고 알린다 (초안은 남음). @all 칩을 누르면 넣어지고 보내진다
+  type("");
+  const beforeNone = (await stored()).length;
+  type("to nobody");
+  enter(13);
+  const hint = await waitFor("받는 사람 안내", () => panel()!.querySelector(".chat-error")?.textContent?.startsWith("Not sent: choose who gets it"), 3000).then(() => true, () => false);
+  const keptDraft = input().value === "to nobody" && (await stored()).length === beforeNone;
+  type("");
+  panel()!.querySelector<HTMLElement>("[data-member='all']")!.click();
+  await waitFor("@all 넣기", () => input().value === "@all ", 2000).catch(() => null);
+  const allChip = input().value;
+  type(`${input().value}to everyone`);
+  enter(13);
+  const toAll = await waitAsync("@all 칩으로 보냄", async () => (await stored()).find((m) => m.text === "@all to everyone"), 5000).catch(() => undefined);
+  await waitFor("안내 사라짐", () => !panel()!.querySelector(".chat-error"), 2000).catch(() => null);
+  check(
+    "채팅 패널: 멘션 없으면 보내지 않고 안내·초안 남김, @all 칩으로 모두에게 보내면 안내가 사라짐",
+    hint && keptDraft && allChip === "@all " && toAll?.to.join(",") === sessions && !panel()!.querySelector(".chat-error"),
+    `${hint} ${keptDraft} "${allChip}" ${JSON.stringify(toAll?.to)} ${panel()!.querySelector(".chat-error")?.textContent}`,
+  );
   type("");
 
   // 닫으면 선택된 터미널로 포커스가 돌아간다 (리뷰 P2: 숨은 입력란에 남았다)

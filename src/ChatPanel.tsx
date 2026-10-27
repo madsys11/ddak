@@ -16,6 +16,8 @@ export type ChatMessage = { id: number; time: number; from: string; text: string
 const WAKE_LIMIT = 6;
 
 const USER = "user";
+// src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
+const NO_RECIPIENT = "no-recipient";
 
 // 프로젝트 채팅방 (docs/spec.md "채팅방 설계"): 오른쪽 패널. 사용자(user)로 읽고 쓴다.
 // 닫혀 있어도 떠 있으면서 새 메시지를 받고, 닫혀 있는 동안 세션이 사용자에게 보낸 메시지 수를 onUnread로 알린다
@@ -166,8 +168,10 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
       // 보내는 동안 새로 쓴 것은 남긴다 (리뷰 P2: 응답이 오면서 다음 초안을 지웠다)
       setDraft((d) => (d === sent ? "" : d));
       atBottom.current = true;
+      setError(null);
     } catch (e) {
-      setError(String(e));
+      // 받는 사람이 없으면 보내지 않았다 (src-tauri/src/chat.rs NO_RECIPIENT). 초안은 그대로 둔다
+      setError(String(e) === NO_RECIPIENT ? t("chat.noRecipient") : String(e));
     } finally {
       setSending(false);
     }
@@ -253,6 +257,12 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
       {listenError && <div className="chat-error" data-listen-error>{t("chat.listenError", { detail: listenError })}</div>}
       {/* 참여자 칩은 입력란 바로 위에 둔다 (누르면 멘션을 넣으므로 쓰는 곳 가까이) */}
       <div className="chat-members" title={t("chat.membersHint")}>
+        {/* 모두에게는 @all을 골라야 한다 (멘션이 없으면 보내지 않는다) */}
+        {members.length > 1 && (
+          <button className="chat-member" data-member="all" onClick={() => mention("all")}>
+            {t("chat.all")}
+          </button>
+        )}
         {members
           .filter((m) => m !== USER)
           .map((m) => (

@@ -5,8 +5,8 @@
 //   누가 보냈는지 안다. 터미널을 닫으면 참여자에서 빠진다. ddak은 CLI를 해석하지 않는다: MCP를 붙이는 인자는 설정에 있다.
 // - 참여자 이름은 `작업그룹/역할` (원본 작업그룹은 origin). 사용자는 `user`. 창마다 고정인 키(창의 세션 ID)에 이름을
 //   정해 두고 (<slug>.names.json, 앱을 다시 켜도 같다) 다른 키에는 주지 않는다: 겹치면 `-2`를 붙인다.
-// - 메시지는 일반 텍스트. @이름·@all로 멘션하고, 멘션된 참여자만 알림을 받는다. 사용자가 아무도 멘션하지 않으면 @all과
-//   같다 (매번 @all을 치지 않게). 스레드는 없다.
+// - 메시지는 일반 텍스트. @이름·@all로 멘션하고, 멘션된 참여자만 알림을 받는다. 사용자 메시지는 받을 참여자가 없으면
+//   보내지 않는다 (모두에게는 @all). 스레드는 없다.
 //   이름에 공백·문장부호가 있어도 그대로 멘션한다 (지금 참여자 이름 중 @ 뒤에 가장 길게 맞는 것).
 // - 앱 데이터 chats/<프로젝트 이름>-<경로 해시>.jsonl에 한 줄씩 붙인다. 깨진 줄(JSON·UTF-8)은 건너뛰고, 끊긴 마지막 줄
 //   뒤에는 줄을 바꾼 뒤 붙인다. 파일을 읽지 못하면 (없음 말고) 그 방은 읽기·쓰기를 모두 멈춘다 (번호가 겹치지 않게).
@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 pub const USER: &str = "user";
+// 사용자 메시지에 받을 참여자가 없음 (화면이 문구로 바꾼다)
+pub const NO_RECIPIENT: &str = "no-recipient";
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Message {
@@ -27,7 +29,7 @@ pub struct Message {
     pub time: u64,
     pub from: String,
     pub text: String,
-    // 멘션된 참여자 (보낼 때 있던 참여자 중에서. @all이거나 사용자가 아무도 멘션하지 않았으면 보낸 사람 말고 모두)
+    // 멘션된 참여자 (보낼 때 있던 참여자 중에서. @all이면 보낸 사람 말고 모두)
     pub to: Vec<String>,
     // 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않았다 (to는 원래 받는 사람 그대로. WAKE_LIMIT)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -407,14 +409,16 @@ impl Chats {
             let mut known = present.clone();
             known.extend(self.names(&mut inner, project).by_key.values().cloned());
             let said = mentions(text, &known);
-            // 사용자 메시지에 멘션이 없으면 모두에게 (모르는 이름만 멘션했어도). 세션의 메시지는 멘션된 참여자에게만.
-            let mut to: Vec<String> = if said.iter().any(|m| m == "all") || (from == USER && said.is_empty()) {
-                present.into_iter().filter(|n| n != from).collect()
-            } else {
-                present.into_iter().filter(|n| said.contains(n) && n != from).collect()
-            };
+            // 멘션된 참여자에게만 (@all이면 모두). 세션의 메시지는 받는 사람이 없으면 기록만.
+            let all = said.iter().any(|m| m == "all");
+            let mut to: Vec<String> = present.into_iter().filter(|n| n != from && (all || said.contains(n))).collect();
             to.sort();
             to.dedup();
+            // 사용자 메시지는 지금 받을 참여자가 있어야 보낸다 (멘션이 없으면 모두에게 가던 때 실수로 모든 세션을 깨웠다.
+            // 끝난 세션만 멘션했어도 막는다). 화면은 초안을 남기고 받는 사람을 고르게 한다
+            if from == USER && to.is_empty() {
+                return Err(NO_RECIPIENT.into());
+            }
             // 자동 깨우기 제한: 세션이 다른 세션에게 보낸 것만 센다. 셈과 보류는 이 잠금 안에서 정한다 (동시에 보내도 넘지 않게)
             let counted = (from != USER && to.iter().any(|n| n != USER)).then(|| group_of(from)).flatten().map(|g| (project.to_path_buf(), g.to_string()));
             let held = counted.as_ref().is_some_and(|k| inner.limits.get(k).is_some_and(|l| l.count >= WAKE_LIMIT));
@@ -788,6 +792,20 @@ pub fn chat_post(state: tauri::State<'_, ChatsState>, project: String, text: Str
     chats_of(&state)?.post(&real(&project), USER, &text)
 }
 
+// 자체 테스트: 터미널 없이 참여자를 넣고 뺀다 (폰에서 보내기에 받는 사람이 있게). 자체 테스트가 아니면 아무것도 하지 않는다
+#[tauri::command]
+pub fn selftest_chat_join(state: tauri::State<'_, ChatsState>, project: String, name: String) -> Option<String> {
+    let chats = std::env::var_os("DDAK_SELFTEST").and(state.0.as_ref())?;
+    Some(chats.join(&real(&project), &name, "").0)
+}
+
+#[tauri::command]
+pub fn selftest_chat_leave(state: tauri::State<'_, ChatsState>, token: String) {
+    if let Some(chats) = std::env::var_os("DDAK_SELFTEST").and(state.0.as_ref()) {
+        chats.leave(&token);
+    }
+}
+
 // 대화를 모두 지운다 (사용자. 채팅 패널에서 확인을 받은 뒤)
 #[tauri::command]
 pub fn chat_clear(state: tauri::State<'_, ChatsState>, project: String) -> Result<(), String> {
@@ -894,8 +912,9 @@ mod tests {
         assert_eq!((m1.id, m1.to.clone()), (1, vec!["origin/dev".to_string()]));
         assert_eq!(m2.to, ["origin/dev-2", "user", "user-2"]);
         assert!(chats.post(a, USER, "   ").is_err());
-        // 사용자가 아무도 멘션하지 않으면 모두에게, 세션이 멘션하지 않으면 아무에게도
-        let m3 = chats.post(a, USER, "everyone, mail me at a@b.c").unwrap();
+        // 사용자가 아무도 멘션하지 않으면 보내지 않는다 (기록·알림 없음). @all이면 모두에게. 세션이 멘션하지 않으면 아무에게도
+        assert_eq!(chats.post(a, USER, "everyone, mail me at a@b.c").unwrap_err(), NO_RECIPIENT);
+        let m3 = chats.post(a, USER, "@all mail me at a@b.c").unwrap();
         let m4 = chats.post(a, "origin/dev", "note to self").unwrap();
         assert_eq!(m3.to, ["origin/dev", "origin/dev-2", "user-2"]);
         assert!(m4.to.is_empty());
@@ -926,7 +945,7 @@ mod tests {
         chats.clear(p).unwrap();
         assert_eq!(*cleared.lock().unwrap(), 0, "빈 방을 지움");
         for t in ["one", "two", "three"] {
-            chats.post(p, USER, t).unwrap();
+            chats.post(p, "origin/dev", t).unwrap();
         }
         chats.clear(p).unwrap();
         assert!(chats.messages(p).unwrap().is_empty());
@@ -934,12 +953,12 @@ mod tests {
         let kept: Vec<_> = std::fs::read_dir(dir.join("cleared")).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(load_messages(&kept[0].path()).unwrap().0.len(), 3);
-        assert_eq!(chats.post(p, USER, "four").unwrap().id, 4);
+        assert_eq!(chats.post(p, "origin/dev", "four").unwrap().id, 4);
         let again = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
         assert_eq!(again.messages(p).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(), [4]);
         // 다시 켠 뒤 또 지워도 이어서
         again.clear(p).unwrap();
-        assert_eq!(again.post(p, USER, "five").unwrap().id, 5);
+        assert_eq!(again.post(p, "origin/dev", "five").unwrap().id, 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1022,8 +1041,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // 리뷰 P2: 사용자가 멘션한 세션이 보내기 전에 나갔으면 아무도 깨우지 않는다 (멘션이 없는 것으로 보고 모두에게 보내지 않게).
-    // 한 번도 없던 이름만 멘션했으면 멘션이 없는 것과 같다.
+    // 리뷰 P2: 사용자가 멘션한 세션이 보내기 전에 나갔으면 모두에게 보내지 않는다. 나간 세션·모르는 이름만이면 받을 사람이
+    // 없어 보내지 않는다.
     #[test]
     fn mention_of_left_session_is_not_broadcast() {
         let dir = temp("left");
@@ -1032,8 +1051,11 @@ mod tests {
         chats.join(p, "origin/dev", "k1");
         let (t, _, _) = chats.join(p, "origin/reviewer", "k2");
         chats.leave(&t);
-        assert!(chats.post(p, USER, "@origin/reviewer 확인해 줘").unwrap().to.is_empty());
-        assert_eq!(chats.post(p, USER, "@origin/nobody hi").unwrap().to, ["origin/dev"]);
+        // 나간 세션이나 모르는 이름만 멘션하면 받을 사람이 없어 보내지 않는다 (모두에게 가지 않는다)
+        assert_eq!(chats.post(p, USER, "@origin/reviewer 확인해 줘").unwrap_err(), NO_RECIPIENT);
+        assert_eq!(chats.post(p, USER, "@origin/nobody hi").unwrap_err(), NO_RECIPIENT);
+        assert!(chats.messages(p).unwrap().is_empty());
+        assert_eq!(chats.post(p, USER, "@origin/reviewer @origin/dev 확인해 줘").unwrap().to, ["origin/dev"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1091,7 +1113,7 @@ mod tests {
         bytes.extend(format!("{}\n{{\"id\":3,\"ti", line(2)).into_bytes());
         std::fs::write(chats.file(p), &bytes).unwrap();
         assert_eq!(chats.messages(p).unwrap().iter().map(|m| m.id).collect::<Vec<_>>(), [1, 2]);
-        assert_eq!(chats.post(p, USER, "new").unwrap().id, 3);
+        assert_eq!(chats.post(p, "origin/dev", "new").unwrap().id, 3);
         let again = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
         assert_eq!(again.messages(p).unwrap().iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["m1", "m2", "new"]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1105,17 +1127,17 @@ mod tests {
         let dir = temp("unreadable");
         let p = Path::new("/p/u");
         let first = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
-        first.post(p, USER, "one").unwrap();
-        first.post(p, USER, "two").unwrap();
+        first.post(p, "origin/dev", "one").unwrap();
+        first.post(p, "origin/dev", "two").unwrap();
         let file = first.file(p);
         let before = std::fs::read(&file).unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o200)).unwrap();
         let chats = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
-        let (read, post) = (chats.messages(p).is_err(), chats.post(p, USER, "three").is_err());
+        let (read, post) = (chats.messages(p).is_err(), chats.post(p, "origin/dev", "three").is_err());
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert!(read && post, "읽기 {read}, 쓰기 {post}");
         assert_eq!(std::fs::read(&file).unwrap(), before);
-        assert_eq!(chats.post(p, USER, "three").unwrap().id, 3);
+        assert_eq!(chats.post(p, "origin/dev", "three").unwrap().id, 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1174,9 +1196,8 @@ mod tests {
         let first = call("read_messages", json!({}));
         assert!(first.contains("#1 user → origin/dev: @origin/dev first") && first.contains("#2 origin/dev → user: @user ok"), "{first}");
         assert_eq!(call("read_messages", json!({})), "No new messages.");
-        chats.post(project, USER, "third").unwrap();
-        // 사용자가 아무도 멘션하지 않으면 모두에게
-        assert_eq!(call("read_messages", json!({})), "#3 user → origin/dev: third");
+        chats.post(project, USER, "@all third").unwrap();
+        assert_eq!(call("read_messages", json!({})), "#3 user → origin/dev: @all third");
         assert!(call("read_messages", json!({ "since": 1 })).starts_with("#2 "));
         assert!(call("list_members", json!({})).contains("origin/dev (you)"));
         assert_eq!(rpc(json!({ "jsonrpc": "2.0", "id": 3, "method": "nope" })).1["error"]["code"], -32601);

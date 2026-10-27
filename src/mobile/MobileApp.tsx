@@ -7,6 +7,8 @@ import { MessageView } from "./sync";
 import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 
 const USER = "user";
+// src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
+const NO_RECIPIENT = "no-recipient";
 // src-tauri/src/chat.rs WAKE_LIMIT
 const WAKE_LIMIT = 6;
 
@@ -492,7 +494,8 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
       atBottom.current = true;
       setError(null);
     } catch (e) {
-      setError(errorText(e, computer.name));
+      // 받는 사람이 없으면 보내지 않았다. 초안은 그대로 둔다
+      setError(e instanceof ApiError && e.code === NO_RECIPIENT ? t("chat.noRecipient") : errorText(e, computer.name));
     } finally {
       setSending(false);
     }
@@ -566,6 +569,12 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
             </div>
           ))}
           <div className="chips">
+            {/* 모두에게는 @all을 골라야 한다 (멘션이 없으면 보내지 않는다) */}
+            {members.members.length > 1 && (
+              <button className="chip" data-member="all" onClick={() => mention("all")}>
+                {t("chat.all")}
+              </button>
+            )}
             {members.members
               .filter((m) => m !== USER)
               .map((m) => {

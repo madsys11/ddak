@@ -1138,7 +1138,7 @@ mod tests {
         let id = projects["projects"][0]["id"].as_str().unwrap().to_string();
         assert_eq!(id, project_id(&f.project));
         for i in 1..=5 {
-            f.mobile.ctx.chats.post(&f.project, USER, &format!("m{i}")).unwrap();
+            f.mobile.ctx.chats.post(&f.project, "origin/dev", &format!("m{i}")).unwrap();
         }
         // 최신부터 limit개, 더 있으면 more. before로 이전 페이지
         let (_, body) = http(f.port, "GET", &format!("/api/projects/{id}/messages?limit=2"), &h, "");
@@ -1149,11 +1149,14 @@ mod tests {
         let page: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(page["messages"].as_array().unwrap().len(), 3);
         assert_eq!(page["more"], false);
-        // 보내기: 사용자로, 보낸 기기를 남긴다
+        // 보내기: 사용자로, 보낸 기기를 남긴다. 받을 세션이 없으면 보내지 않는다 (예전 화면이 멘션 없이 보내도)
         let (status, body) = http(f.port, "POST", &format!("/api/projects/{id}/messages"), &h, r#"{"text":"hello from phone"}"#);
+        assert_eq!((status, body.as_str()), (400, r#"{"error":"no-recipient"}"#));
+        f.mobile.ctx.chats.join(&f.project, "origin/dev", "k1");
+        let (status, body) = http(f.port, "POST", &format!("/api/projects/{id}/messages"), &h, r#"{"text":"@origin/dev hello from phone"}"#);
         assert_eq!(status, 200, "{body}");
         let last = f.mobile.ctx.chats.messages(&f.project).unwrap().pop().unwrap();
-        assert_eq!((last.from.as_str(), last.text.as_str(), last.via.as_deref()), (USER, "hello from phone", Some("phone")));
+        assert_eq!((last.from.as_str(), last.text.as_str(), last.via.as_deref(), last.to.clone()), (USER, "@origin/dev hello from phone", Some("phone"), vec!["origin/dev".to_string()]));
         // 모르는 프로젝트
         assert_eq!(http(f.port, "GET", "/api/projects/nope-000000/messages", &h, "").0, 404);
     }
