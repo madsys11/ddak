@@ -126,13 +126,15 @@ const RULES: &str = "Work group rules.\n\
 (3) Give each review finding an ID (R1, R2, ...) and a severity: P0 data loss or must stop now; P1 severe failure on a main path; P2 bug or regression with evidence, within the change; P3 improvement or preference. P0 to P2 block, P3 does not. An unproven possibility is a question, not a finding.\n\
 (4) A change gets one review and at most two re-reviews. A re-review checks only the earlier findings and regressions caused by the fixes; mark any newly found blocking problem as new scope. If blocking findings remain after the second re-review, stop the exchange and report once to the user: the open findings, the evidence of both sides, and the options. Running out of rounds is not approval.\n\
 (5) A review request names its target: the repository, the base commit, and whether uncommitted changes are included. Do not change the target while it is under review, or say which state a result covers.\n\
-(6) After a restart, read the chat with read_messages (pass since to read further back) before continuing.";
+(6) After a restart, read the chat with read_messages (pass since to read further back) before continuing.\n\
+(7) Every piece of work gets a review before it goes to the user for approval: code changes, and also plans and design documents (a new plan, or a change to a decision or the spec). Request it from the reviewer yourself as soon as the draft is ready; do not wait to be asked.";
 
 const DEV_ROLE: &str = "You are the planner and developer in this work group. A read-only reviewer works in the same folder. \
 Never follow a review finding just because it was reported. Check each one against the code or an experiment and judge it valid, partly valid or not valid. Fix only what you judged valid, and record your decision, evidence and fix. When you report back to the reviewer, give your judgement for every finding ID; for anything you did not fix, say why with evidence.";
 
 const REVIEWER_ROLE: &str = "You are the reviewer and QA in this work group. Do not modify files. \
-When asked, review the requested target and report every finding with its ID, severity, evidence (file and line, or reproduction steps) and whether it blocks. When the developer disputes a finding, weigh the evidence: withdraw the finding if the developer's evidence shows it is invalid; otherwise keep it open with your counter-evidence.";
+When asked, review the requested target and report every finding with its ID, severity, evidence (file and line, or reproduction steps) and whether it blocks. When the developer disputes a finding, weigh the evidence: withdraw the finding if the developer's evidence shows it is invalid; otherwise keep it open with your counter-evidence. \
+For a plan or design document, check it against the code and the user's request: missing cases, wrong assumptions, risks, and simpler alternatives.";
 
 // 파일이 없을 때 써 두는 기본 설정 (TEMPLATE에 규약·역할을 JSON 문자열로 넣는다)
 pub fn default_config() -> String {
@@ -230,6 +232,10 @@ mod tests {
             assert!(args.contains(&"developer_instructions={prompt:toml}".to_string()));
         }
         assert!(["@RULES@", "@DEV_ROLE@", "@REVIEWER_ROLE@"].iter().all(|p| !default_config().contains(p)), "자리표시자가 남음");
+        // 코드뿐 아니라 계획·설계 문서도 사용자 승인 전에 리뷰를 받는다 (규약 7번, 리뷰어는 계획을 보는 기준)
+        let rules = g.groups[0].rules.as_deref().unwrap();
+        assert!(rules.ends_with("do not wait to be asked.") && rules.contains("\n(7) Every piece of work gets a review"), "{rules}");
+        assert!(reviewer.role.as_deref().unwrap().contains("For a plan or design document"));
     }
 
     // 규약·역할·shiftEnterFor가 없는 예전 파일도 읽힌다 (shiftEnterFor는 기본값: claude·codex는 ESC CR)
