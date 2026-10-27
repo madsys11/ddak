@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { devHooks } from "./devHooks";
-import { draggedPath, isPathDrag } from "./dragPath";
+import { draggedPath, droppedFiles, insertAt, isFileDrag, isPathDrag, noteFileDrag } from "./dragPath";
 import { PANEL_SIZES, usePrefs } from "./prefs";
 import { PromptChoices, answerText, lastAnswers, type Answer, type Prompt } from "./PromptChoices";
 import { Resizer } from "./Resizer";
@@ -46,7 +46,14 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   const [error, setError] = useState<string | null>(null);
   // 이벤트를 등록하지 못함: 새 메시지를 스스로 다시 읽지 못한다
   const [listenError, setListenError] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraftState] = useState("");
+  // 초안을 바꿀 때마다 바로 하나씩 올린다 (앱 밖 파일을 놓고 경로를 묻는 동안 바뀌었는지 본다. 렌더 뒤 효과로 올리면
+  // 같은 배치의 다른 갱신을 놓친다, 리뷰 재리뷰 R2)
+  const draftRev = useRef(0);
+  const setDraft = (u: React.SetStateAction<string>) => {
+    draftRev.current++;
+    setDraftState(u);
+  };
   const [sending, setSending] = useState(false);
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -286,22 +293,34 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
         value={draft}
         placeholder={t("chat.placeholder")}
         onChange={(e) => setDraft(e.target.value)}
-        // 파일 트리에서 끌어다 놓으면 트리 루트 기준 상대 경로를 커서 자리에 넣는다 (루트 밖이면 절대 경로)
+        // 파일 트리에서 끌어다 놓으면 트리 루트 기준 상대 경로를 커서 자리에 넣는다 (루트 밖이면 절대 경로).
+        // Finder 등 앱 밖에서 놓은 파일은 절대 경로 (여러 개면 공백으로)
         onDragOver={(e) => {
-          if (!isPathDrag(e.dataTransfer)) return;
+          if (!isPathDrag(e.dataTransfer) && !isFileDrag(e.dataTransfer)) return;
+          if (isFileDrag(e.dataTransfer)) noteFileDrag();
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
         }}
         onDrop={(e) => {
-          const dropped = draggedPath(e.dataTransfer);
-          if (!dropped) return;
-          e.preventDefault();
           const el = e.currentTarget;
-          const [start, end] = [el.selectionStart, el.selectionEnd];
-          const text = `${dropped.rel ?? dropped.path} `;
-          setDraft((d) => d.slice(0, start) + text + d.slice(end));
-          el.focus();
-          requestAnimationFrame(() => el.setSelectionRange(start + text.length, start + text.length));
+          const [before, start, end] = [el.value, el.selectionStart, el.selectionEnd];
+          // 앱 밖 파일은 경로를 묻는 동안 초안이 바뀌면(입력, 보내기, 다른 놓기) 넣지 않는다 (놓을 때의 자리가 틀려진다)
+          const rev = draftRev.current;
+          const insert = (paths: string[]) => {
+            if (!paths.length || rev !== draftRev.current || !el.isConnected) return;
+            const text = `${paths.join(" ")} `;
+            setDraft(insertAt(before, start, end, text));
+            el.focus();
+            requestAnimationFrame(() => el.setSelectionRange(start + text.length, start + text.length));
+          };
+          const dropped = draggedPath(e.dataTransfer);
+          if (dropped) {
+            e.preventDefault();
+            insert([dropped.rel ?? dropped.path]);
+          } else if (isFileDrag(e.dataTransfer)) {
+            e.preventDefault();
+            droppedFiles(e.dataTransfer).then(insert);
+          }
         }}
         onKeyDown={(e) => {
           // 한글 조합을 확정하는 Enter는 보내지 않는다

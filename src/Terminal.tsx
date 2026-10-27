@@ -8,7 +8,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
-import { draggedPath, isPathDrag, shellQuote } from "./dragPath";
+import { draggedPath, droppedFiles, isFileDrag, isPathDrag, noteFileDrag, shellQuote } from "./dragPath";
 import { fixImeInput, passesImeKey } from "./hangul";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, AnswerRuns, type Dialog, type ProgramStatus, type SendKey } from "./programStatus";
 import { usePrefs } from "./prefs";
@@ -219,19 +219,29 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     const userEvent = () => (userAt = performance.now());
     const userEvents = ["keydown", "keypress", "beforeinput", "input", "paste", "compositionstart", "compositionupdate", "compositionend"];
     userEvents.forEach((e) => term.textarea?.addEventListener(e, userEvent, true));
-    // 파일 트리에서 끌어다 놓으면 셸에 쓸 수 있게 감싼 절대 경로를 붙여넣는다 (iTerm·터미널 앱과 같음). 사용자 입력이다.
+    // 파일 트리나 Finder에서 끌어다 놓으면 셸에 쓸 수 있게 감싼 절대 경로를 붙여넣는다 (iTerm·터미널 앱과 같음. 여러 개면
+    // 공백으로). 사용자 입력이다.
+    const paste = (paths: string[]) => {
+      if (!paths.length) return;
+      userEvent();
+      term.paste(`${paths.map(shellQuote).join(" ")} `);
+      term.focus();
+    };
     const onDragOver = (e: DragEvent) => {
-      if (!isPathDrag(e.dataTransfer)) return;
+      if (!isPathDrag(e.dataTransfer) && !isFileDrag(e.dataTransfer)) return;
+      if (isFileDrag(e.dataTransfer)) noteFileDrag();
       e.preventDefault();
       e.dataTransfer!.dropEffect = "copy";
     };
     const onDrop = (e: DragEvent) => {
       const dropped = draggedPath(e.dataTransfer);
-      if (!dropped) return;
-      e.preventDefault();
-      userEvent();
-      term.paste(`${shellQuote(dropped.path)} `);
-      term.focus();
+      if (dropped) {
+        e.preventDefault();
+        paste([dropped.path]);
+      } else if (isFileDrag(e.dataTransfer)) {
+        e.preventDefault();
+        droppedFiles(e.dataTransfer).then(paste);
+      }
     };
     el.addEventListener("dragover", onDragOver);
     el.addEventListener("drop", onDrop);

@@ -13,6 +13,7 @@ import { projectForClick } from "./notifyClick";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, type Dialog } from "./programStatus";
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
 import { renderMarkdown } from "./docs";
+import { insertAt } from "./dragPath";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
 import { MessageView } from "./mobile/sync";
@@ -2551,21 +2552,97 @@ async function testTrashAndDrag(root: string, term: Terminal) {
   );
   await run(term, `rm -f "${root}/keep.txt" "${root}/d d's.txt"`);
 
-  // Finder에서 끌어 온 파일: 어디에 놓아도 받지 않는다 (놓을 수 없게 표시, 놓아도 기본 동작 없음. 기본 동작은 웹뷰가 그 파일로
-  // 이동해 작업 화면이 사라지는 것이었다)
-  const outside = (target: Element) => {
+  // Finder 등 앱 밖에서 끌어 온 파일: 터미널에는 감싼 절대 경로, 채팅 입력란에는 절대 경로, 그 밖의 곳은 받지 않는다
+  // (놓을 수 없게 표시, 기본 동작 없음. 기본 동작은 웹뷰가 그 파일로 이동해 작업 화면이 사라지는 것이었다).
+  // 경로는 Rust가 끌기 대지에서 읽는다: 시험에서는 이름 붙인 대지에 Finder처럼 파일 참조 주소로 싣는다 (fs.rs)
+  await run(term, `printf x > "${root}/사진 1.png" && printf y > "${root}/b.txt"`);
+  const outsidePaths = [`${root}/사진 1.png`, `${root}/b.txt`];
+  // 실제 끌기처럼 dragover와 drop 사이를 둔다 (끌기 중에 받은 대지 번호만 쓴다)
+  const outside = async (target: Element, names: string[]) => {
     const dt = new DataTransfer();
-    dt.items.add(new File(["x"], "photo.png", { type: "image/png" }));
+    for (const n of names) dt.items.add(new File(["x"], n));
     const over = new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt });
     target.dispatchEvent(over);
-    const dropEffect = dt.dropEffect;
+    await sleep(100);
     const drop = new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt });
     target.dispatchEvent(drop);
-    return over.defaultPrevented && drop.defaultPrevented && dropEffect === "none";
+    // 합성 DataTransfer는 dropEffect를 바꿔도 남지 않아 (늘 none) 기본 동작을 막았는지만 본다
+    return over.defaultPrevented && drop.defaultPrevented;
   };
-  const refused = [termEl, chatInput, document.querySelector(".sidebar .tree") ?? document.body, document.body].map(outside);
-  await sleep(200);
-  check("끌어 놓기: 앱 밖에서 끌어 온 파일은 터미널·채팅 입력란·빈 곳 어디에도 받지 않음", refused.every(Boolean) && chatInput.value === "", `${refused} ${JSON.stringify(chatInput.value)}`);
+  await invoke("selftest_drag_files", { paths: outsidePaths });
+  term.input("printf 'GOT[%s]\\n' ");
+  const onTerm = await outside(termEl, ["사진 1.png", "b.txt"]);
+  await sleep(300);
+  term.input("\r");
+  const termExpected = `GOT[${root}/사진 1.png]`;
+  const termLines = await waitFor("놓은 파일 경로", () => screen(term).some((l) => l.includes(termExpected)) && screen(term), 3000).catch(() => screen(term));
+  const termGot = termLines.includes(termExpected) && termLines.includes(`GOT[${root}/b.txt]`);
+  const onChat = await outside(chatInput, ["사진 1.png", "b.txt"]);
+  const chatGot = await waitFor("채팅에 놓은 파일 경로", () => chatInput.value !== "" && chatInput.value, 3000).catch(() => chatInput.value);
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(chatInput, "");
+  chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+  check(
+    "끌어 놓기: Finder에서 놓은 파일은 터미널에 감싼 절대 경로, 채팅 입력란에 절대 경로 (여러 개, 한글·공백 이름)",
+    onTerm && termGot && onChat && chatGot === `${outsidePaths.join(" ")} `,
+    `${onTerm} ${termGot} ${onChat} ${JSON.stringify(chatGot)} | ${termLines.filter((l) => l.includes("GOT[")).join(" / ")}`,
+  );
+  // 끌기 대지가 이 끌기의 것이 아니면 아무것도 넣지 않는다: 이름이 다름, 대지에 더 있음, 이름 수가 다름(같은 이름 둘),
+  // 이름은 같아도 끌기 중에 본 뒤 대지가 바뀜 (새 끌기)
+  const setChat = (v: string) => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(chatInput, v);
+    chatInput.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  // quick: dragover 바로 뒤에 놓는다 (대지 번호를 아직 묻는 중)
+  const chatAfter = async (names: string[], board: string[], between?: () => Promise<unknown>, quick = false) => {
+    await invoke("selftest_drag_files", { paths: board });
+    const dt = new DataTransfer();
+    for (const n of names) dt.items.add(new File(["x"], n));
+    chatInput.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt }));
+    if (!quick) await sleep(100);
+    await between?.();
+    const drop = new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt });
+    chatInput.dispatchEvent(drop);
+    await sleep(500);
+    const v = chatInput.value;
+    setChat("");
+    return drop.defaultPrevented ? v : "(not taken)";
+  };
+  const bTxt = `${root}/b.txt`;
+  const stale = [
+    await chatAfter(["다른 파일.png"], [bTxt]),
+    await chatAfter(["b.txt"], [bTxt, `${root}/사진 1.png`]),
+    await chatAfter(["b.txt", "b.txt"], [bTxt]),
+    await chatAfter(["b.txt"], [bTxt], () => invoke("selftest_drag_files", { paths: [bTxt] })),
+    // 새 끌기(대지를 다시 실음) 바로 뒤라 이 끌기 중의 번호를 아직 받지 못함: 앞 끌기 때 받은 번호와 달라 쓰지 않는다
+    await chatAfter(["b.txt"], [bTxt], undefined, true),
+  ];
+  const fresh = await chatAfter(["b.txt"], [bTxt]);
+  const refused = [await outside(document.querySelector(".sidebar .tree") ?? document.body, ["b.txt"]), await outside(document.body, ["b.txt"])];
+  check(
+    "끌어 놓기: 끌기 대지가 이 끌기의 것이 아니면(이름 다름·더 있음·수 다름·끌기 중 바뀜·끌기 중 번호를 받기 전) 넣지 않고, 터미널·채팅 입력란 밖에는 받지 않음",
+    stale.every((v) => v === "") && fresh === `${bTxt} ` && refused.every(Boolean),
+    `${JSON.stringify(stale)} ${JSON.stringify(fresh)} ${refused}`,
+  );
+  // 경로를 묻는 동안 채팅 초안을 고치면 늦게 온 경로를 넣지 않는다 (고친 글을 지우지 않는다)
+  setChat("abcd");
+  chatInput.setSelectionRange(1, 3);
+  await invoke("selftest_drag_files", { paths: [bTxt] });
+  const editDt = new DataTransfer();
+  editDt.items.add(new File(["x"], "b.txt"));
+  chatInput.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: editDt }));
+  await sleep(100);
+  chatInput.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: editDt }));
+  setChat("NEW TEXT");
+  await sleep(500);
+  const edited = chatInput.value;
+  setChat("");
+  check("끌어 놓기: 경로를 묻는 동안 채팅 초안을 고치면 경로를 넣지 않고 고친 글을 그대로 둠", edited === "NEW TEXT", JSON.stringify(edited));
+  // React가 한 배치로 적용하는 갱신 순서: 보내기의 비우기 다음 늦은 삽입이 와도 새 초안에 넣지 않는다 (ChatPanel의 갱신 그대로)
+  const sent = "abcd";
+  const queue = (fns: ((d: string) => string)[]) => fns.reduce((d, f) => f(d), sent);
+  const batched = [queue([(d) => (d === sent ? "" : d), insertAt(sent, 1, 3, "/p ")]), queue([insertAt(sent, 1, 3, "/p ")])];
+  check("끌어 놓기: 채팅 초안 비우기와 늦은 삽입이 한 번에 적용돼도 비운 초안에 넣지 않음 (그대로면 넣음)", batched[0] === "" && batched[1] === "a/p d", JSON.stringify(batched));
+  await run(term, `rm -f "${root}/사진 1.png" "${root}/b.txt"`);
 
   // 웹뷰는 앱 화면 밖으로 이동하지 않는다 (lib.rs stay_in_app). 창 전체로 시험하면 실패할 때 테스트가 멈추므로 액자(iframe)로:
   // 앱 안 빈 화면(srcdoc)은 열려 알려 오고, 바깥 주소(data:)는 열리지 않아야 한다

@@ -37,7 +37,7 @@ fn app_page(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
 
 // 웹뷰가 앱 화면을 떠나지 않게 한다. Finder에서 끌어 온 파일을 놓으면 WKWebView가 그 파일로 이동해 작업 화면이 모두
 // 사라졌다 (docs/reviews/2026-10-27-drop-navigation.md). 바깥 주소는 웹뷰가 아니라 기본 앱으로 연다 (links.rs open_link).
-// 화면 쪽도 앱 밖에서 끌어 온 파일을 받지 않는다 (src/dragPath.ts refuseOutsideDrops).
+// 화면 쪽도 터미널·채팅 입력란 밖에 놓은 앱 밖 파일은 받지 않는다 (src/dragPath.ts refuseOutsideDrops).
 fn stay_in_app<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("stay-in-app")
         .on_navigation(|webview, url| {
@@ -95,6 +95,9 @@ pub fn run() {
             fs::fs_trash,
             fs::fs_read_text,
             fs::fs_read_image,
+            fs::drag_files,
+            fs::drag_count,
+            fs::selftest_drag_files,
             groups::groups_load,
             groups::groups_dir,
             watch::fs_watch,

@@ -121,6 +121,109 @@ fn move_to_trash(path: &Path) -> Result<(), String> {
     Err(format!("{}: trash is only supported on macOS", path.display()))
 }
 
+// Finder 등 앱 밖에서 끌어 놓은 파일의 경로 (src/dragPath.ts droppedFiles). 웹뷰의 drop은 File만 주고 경로는 주지 않아
+// 끌기 대지(drag pasteboard)를 읽는다. 대지는 놓은 뒤에도 마지막 끌기의 내용을 들고 있어서, 화면이 끌기 중(dragover)에 본
+// 대지 번호(changeCount, 새 끌기마다 바뀐다)와 놓은 파일 이름이 모두 맞을 때만 쓴다. Finder는 파일 참조
+// 주소(file:///.file/id=…)를 싣기도 해서 경로 주소로 바꾼다.
+// 자체 테스트는 시스템 끌기 대지 대신 이름을 붙인 대지를 쓴다 (selftest_drag_files가 채운다).
+#[derive(serde::Serialize)]
+pub struct DragFiles {
+    count: isize,
+    paths: Vec<String>,
+}
+
+#[tauri::command]
+pub fn drag_files() -> DragFiles {
+    let board = drag_board();
+    DragFiles { count: board_count(&board), paths: read_drag_files(&board) }
+}
+
+#[tauri::command]
+pub fn drag_count() -> isize {
+    board_count(&drag_board())
+}
+
+#[tauri::command]
+pub fn selftest_drag_files(paths: Vec<String>) {
+    if std::env::var_os("DDAK_SELFTEST").is_some() {
+        write_drag_files(&drag_board(), &paths);
+    }
+}
+
+#[cfg(target_os = "macos")]
+type Board = objc2::rc::Retained<objc2_app_kit::NSPasteboard>;
+#[cfg(not(target_os = "macos"))]
+type Board = ();
+
+#[cfg(target_os = "macos")]
+fn drag_board() -> Board {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardNameDrag};
+    if std::env::var_os("DDAK_SELFTEST").is_some() {
+        return NSPasteboard::pasteboardWithName(&objc2_foundation::NSString::from_str("io.github.madsys11.ddak.selftest-drag"));
+    }
+    NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameDrag })
+}
+
+#[cfg(target_os = "macos")]
+fn board_count(board: &Board) -> isize {
+    board.changeCount()
+}
+
+#[cfg(target_os = "macos")]
+fn read_drag_files(board: &Board) -> Vec<String> {
+    use objc2_app_kit::NSPasteboardTypeFileURL;
+    use objc2_foundation::NSURL;
+    let Some(items) = board.pasteboardItems() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let s = item.stringForType(unsafe { NSPasteboardTypeFileURL })?;
+            let url = NSURL::URLWithString(&s)?;
+            // NSURL의 경로는 한글 등을 풀어 쓴 꼴(NFD)이라 터미널에서 자모가 흩어진다. 모아 쓴 꼴(NFC)로 (APFS는 둘 다 찾는다)
+            Some(url.filePathURL()?.path()?.precomposedStringWithCanonicalMapping().to_string())
+        })
+        .collect()
+}
+
+// 있는 파일은 Finder처럼 파일 참조 주소로 싣는다
+#[cfg(target_os = "macos")]
+fn write_drag_files(board: &Board, paths: &[String]) {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+    board.clearContents();
+    let items: Vec<objc2::rc::Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
+        .iter()
+        .filter_map(|p| {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(p));
+            let url = url.fileReferenceURL().unwrap_or(url);
+            let item = NSPasteboardItem::new();
+            let s = url.absoluteString()?;
+            item.setString_forType(&s, unsafe { NSPasteboardTypeFileURL });
+            Some(ProtocolObject::from_retained(item))
+        })
+        .collect();
+    board.writeObjects(&NSArray::from_retained_slice(&items));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn drag_board() -> Board {}
+
+#[cfg(not(target_os = "macos"))]
+fn board_count(_: &Board) -> isize {
+    0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_drag_files(_: &Board) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn write_drag_files(_: &Board, _: &[String]) {}
+
 #[derive(serde::Serialize)]
 pub struct Entry {
     name: String,
@@ -214,6 +317,29 @@ pub fn fs_read_image(path: String) -> Result<String, CodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 끌기 대지의 파일 참조 주소(Finder가 싣는 모양)를 경로로 읽는다. 한글·공백 이름, 없는 파일(일반 file 주소)도.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_dragged_file_paths_from_pasteboard() {
+        let dir = std::env::temp_dir().join(format!("ddak-fs-drag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("폴더 a")).unwrap();
+        std::fs::write(dir.join("사진 1.png"), "x").unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let paths: Vec<String> = ["사진 1.png", "폴더 a", "없음.txt"].iter().map(|n| dir.join(n).to_string_lossy().into_owned()).collect();
+        let board = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
+        write_drag_files(&board, &paths);
+        let first = board.pasteboardItems().unwrap().iter().next().unwrap().stringForType(unsafe { objc2_app_kit::NSPasteboardTypeFileURL }).unwrap().to_string();
+        assert!(first.starts_with("file:///.file/id="), "{first}");
+        assert_eq!(read_drag_files(&board), paths);
+        // 다시 실으면 (새 끌기) 대지 번호가 바뀐다
+        let count = board_count(&board);
+        write_drag_files(&board, &paths[..1]);
+        assert_ne!(board_count(&board), count);
+        assert_eq!(read_drag_files(&board), paths[..1]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn reads_documents_and_images_within_limits() {
