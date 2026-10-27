@@ -82,44 +82,122 @@ pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
 }
 
 // Windows: MoveFileExW는 대상이 같은 파일의 다른 이름(하드 링크)이면 "있음"으로 실패하지 않고 원래 이름을 없앤다
-// (2026-10-28 CI). 미리 확인하면 그 사이에 링크가 생길 수 있어서 (리뷰 R1), 일반 파일은 새 이름으로 하드 링크를 만들고
-// (이름이 있으면 OS가 원자적으로 거절) 원래 이름을 지운다. 그 사이에는 두 이름이 다 있을 뿐 잃는 것이 없다.
-// 원래 이름을 지울 수 있는지(다른 프로그램이 지우기를 막고 열었는지)는 링크를 만들기 전에 열어서 본다.
-// - 대소문자만 바꾸기 (대소문자를 구분하지 않는 폴더): 새 이름이 원래 항목이라 링크가 거절된다. 그 이름으로 찾은 항목의
-//   저장된 이름이 원래 이름과 같을 때만 MoveFileExW로 바꾼다. 폴더별 대소문자 구분이 켜진 폴더에서 따로 있는 항목은
-//   저장된 이름이 달라 "있음"이다 (리뷰 R2: 이름 글자를 소문자로 비교하지 않는다).
-// - 폴더·링크(심볼릭, 정션)는 하드 링크를 만들 수 없어 MoveFileExW. 하드 링크를 지원하지 않는 파일 시스템(FAT 등)도
-//   MoveFileExW (같은 파일의 다른 이름이 있을 수 없다).
+// (2026-10-28 CI). 그래서 원본을 한 번 열고 끝까지 그 핸들로만 다룬다 (경로를 다시 찾지 않는다, 리뷰 R4):
+// - 지우기 공유를 주지 않고 연다. 그동안 다른 프로그램은 이 파일의 어느 이름도 옮기거나 지우지 못한다.
+// - 폴더가 아니면 (심볼릭 링크 자체도 하드 링크를 가질 수 있다) 새 이름으로 이 핸들의 링크를 만든다. 이름이 있으면 같은
+//   파일이어도 OS가 원자적으로 거절한다. 만든 뒤 이 핸들의 이름(원래 이름)을 지운다. 지우기가 실패하면 두 이름을 다 두고
+//   실패를 알린다 (잃는 것이 없다).
+// - 링크가 "있음"으로 거절되면, 그 이름으로 찾은 항목의 저장된 이름이 원래 이름과 똑같을 때만 같은 항목(대소문자를
+//   구분하지 않는 폴더의 대소문자 바꾸기)으로 보고 이름을 바꾼다. 폴더별 대소문자 구분이 켜진 폴더에서 따로 있는 항목은
+//   저장된 이름이 달라 "있음"이다 (리뷰 R2).
+// - 링크를 더 만들 수 없으면 (링크 수 상한, 리뷰 R5) 이 파일의 이름 목록은 그동안 늘지도 줄지도 않는다. 하드 링크를
+//   지원하지 않는 파일 시스템은 다른 이름이 없다. 이때와 폴더는 위와 같이 같은 이름인지 보고 이름을 바꾼다.
+// - 이름 바꾸기는 대상이 있으면 실패하게 한다 (ReplaceIfExists 없음). 확인 뒤에 생긴 다른 파일은 여기서 막힌다.
 #[cfg(windows)]
 pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
-    use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED};
-    use windows_sys::Win32::Storage::FileSystem::CreateHardLinkW;
-    if !src.symlink_metadata()?.is_file() {
-        return move_file(src, dest);
+    use windows_sys::Wdk::Storage::FileSystem::{FileLinkInformation, FileRenameInformation};
+    use windows_sys::Win32::Foundation::{ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_TOO_MANY_LINKS};
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+    let file = open_exclusive(src)?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_OPEN.with(|h| h.borrow_mut().take()) {
+        hook();
     }
-    let old = open_for_delete(src)?;
-    if unsafe { CreateHardLinkW(wide(dest).as_ptr(), wide(src).as_ptr(), std::ptr::null()) } != 0 {
-        return mark_deleted(&old, src).inspect_err(|_| {
-            let _ = open_for_delete(dest).and_then(|new| mark_deleted(&new, dest));
-        });
+    let target = nt_path(dest)?;
+    let same_entry = || stored_name(dest).as_deref() == src.file_name();
+    if attributes(&file)? & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        match set_name(&file, FileLinkInformation, &target) {
+            Ok(()) => return mark_deleted(&file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && !same_entry() => return Err(e),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) if [ERROR_TOO_MANY_LINKS, ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION].map(|c| c as i32).contains(&e.raw_os_error().unwrap_or(0)) => {
+                if dest.symlink_metadata().is_ok() && !same_entry() {
+                    return Err(std::io::ErrorKind::AlreadyExists.into());
+                }
+            }
+            Err(e) => return Err(e),
+        }
     }
-    let e = std::io::Error::last_os_error();
-    drop(old);
-    match e.raw_os_error().map(|c| c as u32) {
-        Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED) => move_file(src, dest),
-        _ if e.kind() == std::io::ErrorKind::AlreadyExists && stored_name(dest).as_deref() == src.file_name() => move_file(src, dest),
-        _ => Err(e),
-    }
+    set_name(&file, FileRenameInformation, &target)
 }
 
-// 대상이 있으면 실패하는 MoveFileExW (MOVEFILE_REPLACE_EXISTING 없이)
+#[cfg(all(test, windows))]
+thread_local! {
+    // 시험: 원본을 연 직후에 끼어들 일 (리뷰 R4)
+    static AFTER_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+// 원본을 연다: 지우기·이름 바꾸기 권한, 지우기 공유 없음, 링크는 따라가지 않음, 폴더도
 #[cfg(windows)]
-fn move_file(src: &Path, dest: &Path) -> std::io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
-    if unsafe { MoveFileExW(wide(src).as_ptr(), wide(dest).as_ptr(), 0) } != 0 {
+fn open_exclusive(path: &Path) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, SYNCHRONIZE,
+    };
+    let access = DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+    let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+    let handle =
+        unsafe { CreateFileW(wide(path).as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, flags, std::ptr::null_mut()) };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn attributes(file: &std::os::windows::io::OwnedHandle) -> std::io::Result<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(info.dwFileAttributes)
+}
+
+// NtSetInformationFile에 넘길 NT 경로: C:\a → \??\C:\a, \\서버\공유 → \??\UNC\서버\공유 (CreateHardLinkW가 하는 변환)
+#[cfg(windows)]
+fn nt_path(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let full: Vec<u16> = std::path::absolute(path)?.as_os_str().encode_wide().collect();
+    let utf16 = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    let (head, rest) = if full.starts_with(&utf16(r"\\?\")) {
+        (r"\??\", &full[4..])
+    } else if full.starts_with(&utf16(r"\\")) {
+        (r"\??\UNC\", &full[2..])
+    } else {
+        (r"\??\", &full[..])
+    };
+    Ok([utf16(head).as_slice(), rest].concat())
+}
+
+// 핸들의 파일에 새 이름을 단다: FileLinkInformation(이름 하나 더) 또는 FileRenameInformation(이름 바꾸기). 대상이 있으면
+// 실패한다. 두 구조체는 꼴이 같다 (ReplaceIfExists/Flags, RootDirectory, FileNameLength, FileName).
+#[cfg(windows)]
+fn set_name(file: &std::os::windows::io::OwnedHandle, class: i32, name: &[u16]) -> std::io::Result<()> {
+    use std::mem::offset_of;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Wdk::Storage::FileSystem::{FILE_LINK_INFORMATION, FILE_RENAME_INFORMATION, NtSetInformationFile};
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+    const NAME: usize = offset_of!(FILE_LINK_INFORMATION, FileName);
+    const _: () = assert!(NAME == offset_of!(FILE_RENAME_INFORMATION, FileName));
+    let bytes = std::mem::size_of_val(name);
+    // 8바이트 정렬 버퍼 (구조체 앞부분은 0: 덮어쓰지 않음, RootDirectory 없음)
+    let mut buf = vec![0u64; (NAME + bytes).div_ceil(8)];
+    let info = buf.as_mut_ptr().cast::<FILE_LINK_INFORMATION>();
+    unsafe {
+        (*info).FileNameLength = bytes as u32;
+        std::ptr::copy_nonoverlapping(name.as_ptr(), info.cast::<u8>().add(NAME).cast::<u16>(), name.len());
+    }
+    let mut io: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+    let status = unsafe { NtSetInformationFile(file.as_raw_handle(), &mut io, info.cast(), (NAME + bytes) as u32, class) };
+    if status >= 0 {
         Ok(())
     } else {
-        Err(std::io::Error::last_os_error())
+        Err(std::io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32))
     }
 }
 
@@ -139,40 +217,26 @@ fn stored_name(path: &Path) -> Option<std::ffi::OsString> {
     Some(std::ffi::OsString::from_wide(&data.cFileName[..len]))
 }
 
-// 이름 하나를 지우려고 연다 (링크는 따라가지 않는다). 다른 프로그램이 지우기를 막고 열었으면 여기서 실패한다
+// 핸들로 연 이름을 지운다 (읽기 전용 파일도, 다른 이름은 그대로). Ex를 지원하지 않는 곳은 예전 방식으로
 #[cfg(windows)]
-fn open_for_delete(path: &Path) -> std::io::Result<std::os::windows::io::OwnedHandle> {
-    use std::os::windows::io::FromRawHandle;
-    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, DELETE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    };
-    let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
-    let handle = unsafe {
-        CreateFileW(wide(path).as_ptr(), DELETE, share, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, std::ptr::null_mut())
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) })
-}
-
-// 연 이름을 지운다 (읽기 전용 파일도, 다른 이름의 링크는 그대로). 그 방식을 지원하지 않는 곳은 remove_file
-#[cfg(windows)]
-fn mark_deleted(handle: &std::os::windows::io::OwnedHandle, path: &Path) -> std::io::Result<()> {
+fn mark_deleted(file: &std::os::windows::io::OwnedHandle) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-        FILE_DISPOSITION_INFO_EX, FileDispositionInfoEx, SetFileInformationByHandle,
+        FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FileDispositionInfo, FileDispositionInfoEx, SetFileInformationByHandle,
     };
-    let info = FILE_DISPOSITION_INFO_EX {
+    let handle = file.as_raw_handle();
+    let ex = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
     };
-    let size = std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32;
-    if unsafe { SetFileInformationByHandle(handle.as_raw_handle(), FileDispositionInfoEx, (&raw const info).cast(), size) } != 0 {
+    if unsafe { SetFileInformationByHandle(handle, FileDispositionInfoEx, (&raw const ex).cast(), size_of_val(&ex) as u32) } != 0 {
+        return Ok(());
+    }
+    let old = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if unsafe { SetFileInformationByHandle(handle, FileDispositionInfo, (&raw const old).cast(), size_of_val(&old) as u32) } != 0 {
         Ok(())
     } else {
-        std::fs::remove_file(path)
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -664,9 +728,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // Windows (리뷰 R1·R2): 새 이름의 링크를 만드는 한 번에 판단하므로 확인과 옮기기 사이의 틈이 없다. 경합으로 생길 수 있는
-    // 가장 나쁜 입력은 "같은 파일의 다른 이름이 이미 있음"이라 그 상태로 시험한다. 폴더별 대소문자 구분은 fsutil로 켠다
-    // (CI에서는 켜지지 않으면 실패).
+    // Windows (리뷰 R1·R2·R4·R5): 같은 파일의 다른 이름이 이미 있는 상태(경합으로 생길 수 있는 가장 나쁜 입력), 원본을 연
+    // 직후 원본을 옮기고 그 자리에 다른 파일을 두려는 끼어들기, 링크 수 상한, 심볼릭 링크와 그 하드 링크, 폴더별 대소문자
+    // 구분(fsutil로 켬). CI에서는 대소문자 구분·심볼릭 링크를 만들지 못하면 실패한다.
     #[test]
     #[cfg(windows)]
     fn windows_rename_keeps_every_name() {
@@ -680,45 +744,115 @@ mod tests {
             v
         };
         let exists = |e: std::io::Error| e.kind() == std::io::ErrorKind::AlreadyExists;
+        let ci = std::env::var_os("CI").is_some();
+        let sub = |name: &str| {
+            let d = dir.join(name);
+            std::fs::create_dir(&d).unwrap();
+            d
+        };
 
-        // 같은 파일의 다른 이름
-        std::fs::write(dir.join("a.txt"), "A").unwrap();
-        std::fs::hard_link(dir.join("a.txt"), dir.join("b.txt")).unwrap();
-        assert!(exists(rename_excl(&dir.join("a.txt"), &dir.join("b.txt")).unwrap_err()));
-        assert_eq!(names(&dir), ["a.txt", "b.txt"]);
-        // 대소문자만 (구분하지 않는 폴더)
-        rename_excl(&dir.join("a.txt"), &dir.join("A.txt")).unwrap();
-        assert_eq!(names(&dir), ["A.txt", "b.txt"]);
+        // 같은 파일의 다른 이름, 대소문자만 (구분하지 않는 폴더)
+        let d = sub("link");
+        std::fs::write(d.join("a.txt"), "A").unwrap();
+        std::fs::hard_link(d.join("a.txt"), d.join("b.txt")).unwrap();
+        assert!(exists(rename_excl(&d.join("a.txt"), &d.join("b.txt")).unwrap_err()));
+        assert_eq!(names(&d), ["a.txt", "b.txt"]);
+        rename_excl(&d.join("a.txt"), &d.join("A.txt")).unwrap();
+        assert_eq!(names(&d), ["A.txt", "b.txt"]);
+
+        // 원본을 연 직후 원본을 옮기고 그 자리에 다른 파일을 두려 해도 두 내용이 다 남는다 (리뷰 R4)
+        let d = sub("swap");
+        std::fs::write(d.join("src.txt"), "A").unwrap();
+        let tried = std::rc::Rc::new(std::cell::Cell::new(None));
+        let (t, dd) = (tried.clone(), d.clone());
+        AFTER_OPEN.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                let moved = std::fs::rename(dd.join("src.txt"), dd.join("saved.txt")).is_ok();
+                if moved {
+                    std::fs::write(dd.join("src.txt"), "B").unwrap();
+                }
+                t.set(Some(moved));
+            }))
+        });
+        let result = rename_excl(&d.join("src.txt"), &d.join("dest.txt"));
+        assert_eq!(tried.get(), Some(false), "끼어든 이름 바꾸기가 막히지 않음");
+        result.unwrap();
+        assert_eq!(names(&d), ["dest.txt"]);
+        assert_eq!(std::fs::read_to_string(d.join("dest.txt")).unwrap(), "A");
+
         // 읽기 전용 파일도 바뀌고 속성은 그대로
-        std::fs::write(dir.join("ro.txt"), "R").unwrap();
-        let mut perm = std::fs::metadata(dir.join("ro.txt")).unwrap().permissions();
+        let d = sub("ro");
+        std::fs::write(d.join("ro.txt"), "R").unwrap();
+        let mut perm = std::fs::metadata(d.join("ro.txt")).unwrap().permissions();
         perm.set_readonly(true);
-        std::fs::set_permissions(dir.join("ro.txt"), perm.clone()).unwrap();
-        rename_excl(&dir.join("ro.txt"), &dir.join("ro2.txt")).unwrap();
-        assert!(!dir.join("ro.txt").exists());
-        assert!(std::fs::metadata(dir.join("ro2.txt")).unwrap().permissions().readonly());
+        std::fs::set_permissions(d.join("ro.txt"), perm.clone()).unwrap();
+        rename_excl(&d.join("ro.txt"), &d.join("ro2.txt")).unwrap();
+        assert_eq!(names(&d), ["ro2.txt"]);
+        assert!(std::fs::metadata(d.join("ro2.txt")).unwrap().permissions().readonly());
         perm.set_readonly(false);
-        std::fs::set_permissions(dir.join("ro2.txt"), perm).unwrap();
+        std::fs::set_permissions(d.join("ro2.txt"), perm).unwrap();
+
         // 지우기를 막고 연 파일은 실패하고, 새 이름을 남기지 않는다
-        std::fs::write(dir.join("held.txt"), "H").unwrap();
-        let held = std::fs::OpenOptions::new().read(true).share_mode(1 /* FILE_SHARE_READ */).open(dir.join("held.txt")).unwrap();
-        assert!(rename_excl(&dir.join("held.txt"), &dir.join("held2.txt")).is_err());
-        assert!(!dir.join("held2.txt").exists());
+        let d = sub("held");
+        std::fs::write(d.join("held.txt"), "H").unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1 /* FILE_SHARE_READ */).open(d.join("held.txt")).unwrap();
+        assert!(rename_excl(&d.join("held.txt"), &d.join("held2.txt")).is_err());
+        assert_eq!(names(&d), ["held.txt"]);
         drop(held);
-        // 폴더별 대소문자 구분: 따로 있는 항목(같은 파일의 링크)은 "있음", 없으면 대소문자 바꾸기
-        let cs = dir.join("cs");
-        std::fs::create_dir(&cs).unwrap();
-        let on = std::process::Command::new("fsutil.exe").args(["file", "setCaseSensitiveInfo"]).arg(&cs).arg("enable").output();
-        if on.as_ref().is_ok_and(|o| o.status.success()) {
-            std::fs::write(cs.join("a.txt"), "a").unwrap();
-            std::fs::hard_link(cs.join("a.txt"), cs.join("A.txt")).unwrap();
-            assert!(exists(rename_excl(&cs.join("a.txt"), &cs.join("A.txt")).unwrap_err()));
-            assert_eq!(names(&cs), ["A.txt", "a.txt"]);
-            std::fs::remove_file(cs.join("A.txt")).unwrap();
-            rename_excl(&cs.join("a.txt"), &cs.join("A.txt")).unwrap();
-            assert_eq!(names(&cs), ["A.txt"]);
+
+        // 링크 수 상한: 빈 이름으로는 바뀌고, 같은 파일의 다른 이름으로는 "있음" (리뷰 R5)
+        let d = sub("many");
+        std::fs::write(d.join("f"), "F").unwrap();
+        let mut made = 0;
+        let full = loop {
+            match std::fs::hard_link(d.join("f"), d.join(format!("l{made}"))) {
+                Ok(()) => made += 1,
+                Err(e) => break e,
+            }
+            assert!(made < 5000, "링크 수 상한이 없음");
+        };
+        assert_eq!(full.raw_os_error(), Some(1142 /* ERROR_TOO_MANY_LINKS */), "{full}");
+        assert!(exists(rename_excl(&d.join("f"), &d.join("l0")).unwrap_err()));
+        rename_excl(&d.join("f"), &d.join("g")).unwrap();
+        assert!(!d.join("f").exists() && d.join("g").exists());
+        assert_eq!(names(&d).len(), made + 1);
+
+        // 심볼릭 링크와 그 하드 링크: 한쪽 이름으로 다른 쪽을 바꾸면 "있음", 빈 이름으로는 바뀜
+        let d = sub("symlink");
+        std::fs::write(d.join("target.txt"), "T").unwrap();
+        if std::os::windows::fs::symlink_file(d.join("target.txt"), d.join("s1")).is_ok() {
+            std::fs::hard_link(d.join("s1"), d.join("s2")).unwrap();
+            assert!(std::fs::symlink_metadata(d.join("s2")).unwrap().file_type().is_symlink());
+            assert!(exists(rename_excl(&d.join("s1"), &d.join("s2")).unwrap_err()));
+            assert_eq!(names(&d), ["s1", "s2", "target.txt"]);
+            rename_excl(&d.join("s1"), &d.join("s3")).unwrap();
+            assert_eq!(names(&d), ["s2", "s3", "target.txt"]);
+            assert!(std::fs::symlink_metadata(d.join("s3")).unwrap().file_type().is_symlink());
         } else {
-            assert!(std::env::var_os("CI").is_none(), "폴더별 대소문자 구분을 켜지 못함: {on:?}");
+            assert!(!ci, "심볼릭 링크를 만들지 못함");
+        }
+
+        // 폴더: 이름 바꾸기, 있는 이름은 "있음"
+        let d = sub("dirs");
+        std::fs::create_dir(d.join("x")).unwrap();
+        std::fs::create_dir(d.join("y")).unwrap();
+        assert!(exists(rename_excl(&d.join("x"), &d.join("y")).unwrap_err()));
+        rename_excl(&d.join("x"), &d.join("z")).unwrap();
+        assert_eq!(names(&d), ["y", "z"]);
+
+        // 폴더별 대소문자 구분: 따로 있는 항목(같은 파일의 링크)은 "있음", 없으면 대소문자 바꾸기
+        let d = sub("cs");
+        let on = std::process::Command::new("fsutil.exe").args(["file", "setCaseSensitiveInfo"]).arg(&d).arg("enable").output();
+        if on.as_ref().is_ok_and(|o| o.status.success()) {
+            std::fs::write(d.join("a.txt"), "a").unwrap();
+            std::fs::hard_link(d.join("a.txt"), d.join("A.txt")).unwrap();
+            assert!(exists(rename_excl(&d.join("a.txt"), &d.join("A.txt")).unwrap_err()));
+            assert_eq!(names(&d), ["A.txt", "a.txt"]);
+            std::fs::remove_file(d.join("A.txt")).unwrap();
+            rename_excl(&d.join("a.txt"), &d.join("A.txt")).unwrap();
+            assert_eq!(names(&d), ["A.txt"]);
+        } else {
+            assert!(!ci, "폴더별 대소문자 구분을 켜지 못함: {on:?}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
