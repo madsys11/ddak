@@ -10,7 +10,7 @@ export const devHooks: {
   // 확인 대화상자. 네이티브 대화상자는 자체 테스트가 누를 수 없어서 테스트가 바꿔 끼운다.
   confirm: (message: string, labels: { okLabel: string; cancelLabel: string }) => Promise<boolean>;
   // 폴더 선택 대화상자 없이 프로젝트를 추가한다 (개발 빌드에서 App이 채운다).
-  addProject?: (path: string) => Promise<void>;
+  addProject?: (path: string, activate?: boolean) => Promise<void>;
   // 지금 쓰고 있는 작업그룹 설정 (개발 빌드에서 App이 채운다)
   groups?: Groups | null;
   // 터미널이 PTY 생성 응답을 이만큼(ms) 늦게 받은 것처럼 한다 (자체 테스트)

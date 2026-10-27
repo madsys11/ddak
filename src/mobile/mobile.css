@@ -71,8 +71,10 @@ textarea:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 배경 없는 버튼은 글자색도 화면 글자색으로 (밝은 테마의 --button-fg는 색을 채운 버튼용 흰색이다) */
 .bar-back,
 .bar-side {
+  color: var(--fg);
   min-width: 40px;
   font-size: 22px;
   line-height: 1;
@@ -133,6 +135,7 @@ textarea:focus {
   gap: 2px;
   padding: 12px 16px;
   text-align: left;
+  color: var(--fg);
   background: transparent;
   border: none;
   border-radius: 0;
@@ -162,6 +165,10 @@ textarea:focus {
   border-radius: 4px;
   color: var(--status-awaiting-fg);
   background: var(--status-awaiting-bg);
+}
+.badge.unread {
+  color: var(--menu-hover-fg);
+  background: var(--accent);
 }
 
 /* 채팅 */

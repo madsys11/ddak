@@ -27,6 +27,8 @@ const NO_RECIPIENT = "no-recipient";
 // 읽는다 (리뷰 P2: 읽은 뒤 등록하기 전에 온 메시지를 놓쳤다). 읽기가 겹치면 마지막 요청의 결과만 쓴다.
 // watching: 사용자가 실제로 보고 있다 (패널이 열려 있고, 이 프로젝트가 보이고, 창이 앞에 있음). 그때만 읽은 것으로 친다
 // (리뷰 R2: 열어 둔 채 다른 프로젝트로 가면 숨은 패널이 메시지를 읽은 것으로 처리해 배지가 빠졌다).
+// 안 읽은 수는 Rust가 센다 (chat.rs unread, 폰에서 읽은 것도 같은 수): 보고 있으면 본 번호를 올리고 (chat_seen), 아니면 새 메시지나
+// 본 번호가 바뀔 때 ("chat-seen") 그 수를 읽는다.
 export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   project: string;
   open: boolean;
@@ -57,8 +59,8 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   const [sending, setSending] = useState(false);
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
-  // 마지막으로 본 메시지 번호 (열려 있을 때 본 것)
-  const seen = useRef(0);
+  // 마지막으로 받은 메시지 번호 (보게 되면 여기까지 본 것으로)
+  const last = useRef(0);
   const latest = useRef({ watching, onUnread });
   latest.current = { watching, onUnread };
 
@@ -74,12 +76,18 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
           if (!alive || mine !== n) return;
           setMessages(m);
           setError(null);
-          const last = m.at(-1)?.id ?? 0;
-          if (latest.current.watching) seen.current = last;
-          else latest.current.onUnread(m.filter((x) => x.id > seen.current && x.from !== USER && x.to.includes(USER)).length);
+          last.current = m.at(-1)?.id ?? 0;
+          if (latest.current.watching) invoke("chat_seen", { project, id: last.current }).catch(() => {});
+          else loadUnread();
         },
         (e) => alive && mine === n && setError(String(e)),
       );
+    };
+    // 안 읽은 수도 마지막 요청만. 보고 있는 동안은 0
+    let nu = 0;
+    const loadUnread = () => {
+      const mine = ++nu;
+      invoke<number>("chat_unread", { project }).then((u) => alive && mine === nu && !latest.current.watching && latest.current.onUnread(u), () => {});
     };
     // 참여자도 마지막 요청만 (리뷰 P2: 늦게 온 이전 응답이 나간 참여자를 되살렸다)
     let nm = 0;
@@ -125,7 +133,7 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
           if (alive) offs.push(off);
           else off();
         });
-      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", onMembers), register("chat-wake", loadWaiting), register("chat-limit", loadPaused), register("chat-prompts", loadPrompts)]);
+      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", onMembers), register("chat-wake", loadWaiting), register("chat-limit", loadPaused), register("chat-prompts", loadPrompts), register("chat-seen", loadUnread)]);
       if (!alive) return;
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) {
@@ -151,7 +159,7 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   // 보게 되면 (열기, 이 프로젝트로 돌아오기, 창이 앞으로) 다 본 것으로
   useEffect(() => {
     if (!watching) return;
-    seen.current = messages.at(-1)?.id ?? 0;
+    invoke("chat_seen", { project, id: last.current }).catch(() => {});
     onUnread(0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watching]);

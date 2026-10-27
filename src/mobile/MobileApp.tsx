@@ -3,7 +3,7 @@ import type { MessageKey } from "../i18n";
 import { API_VERSION, ApiError, api, events, loadComputers, pair, saveComputers, type Computer, type Members, type Message, type Project } from "./api";
 import { locale, t } from "./i18n";
 import { changeKey, confirmed, enablePush, keyProblem, onKeyProblem, pushState, removeComputer, syncPush } from "./push";
-import { MessageView } from "./sync";
+import { MessageView, ReadMark, readTarget } from "./sync";
 import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 
 const USER = "user";
@@ -364,7 +364,8 @@ function ProjectList({ computer, computers }: { computer: Computer; computers: C
           <button key={p.id} className="row row-main" onClick={() => go(`/c/${encodeURIComponent(computer.id)}/p/${encodeURIComponent(p.id)}`)}>
             <span className="row-title">{p.name}</span>
             <span className="row-sub">
-              {p.sessions > 0 ? t("phone.sessions", { n: p.sessions }) : t("phone.noSessions")}
+              {p.open === false ? t("phone.notOpen") : p.sessions > 0 ? t("phone.sessions", { n: p.sessions }) : t("phone.noSessions")}
+              {!!p.unread && <span className="badge unread">{t("phone.unreadBadge", { n: p.unread })}</span>}
               {!!p.awaiting && <span className="badge">{t("phone.awaitingBadge", { n: p.awaiting })}</span>}
               {p.paused.length > 0 && <span className="badge">{t("phone.pausedBadge")}</span>}
             </span>
@@ -375,7 +376,7 @@ function ProjectList({ computer, computers }: { computer: Computer; computers: C
   );
 }
 
-function Chat({ computer, project }: { computer: Computer; project: string }) {
+export function Chat({ computer, project }: { computer: Computer; project: string }) {
   const [name, setName] = useState("");
   // 보이는 메시지 (src/mobile/sync.ts). 바뀔 때마다 그리기 번호를 올린다.
   const view = useRef(new MessageView());
@@ -388,9 +389,22 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
   const [outdated, setOutdated] = useState(false);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  // "맥에서 열기"를 보냈다 (맥이 열면 참여자가 바뀌어 안내가 사라진다)
+  const [opening, setOpening] = useState(false);
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const atBottom = useRef(true);
+  // 여기까지 읽었다고 맥에 알린다 (맥의 배지와 목록의 안 읽은 수): 화면이 보이고, 맨 아래(최신)를 보고 있고, 서버와 맞춘
+  // 상태일 때만 (src/mobile/sync.ts readable, ReadMark. 3단계 리뷰 R1·R2). 실패하면 ReadMark가 다시 보낸다
+  const reads = useRef<ReadMark | null>(null);
+  useEffect(() => {
+    const r = new ReadMark((id) => api.read(computer, project, id));
+    reads.current = r;
+    return () => r.stop();
+  }, [computer, project]);
+  const markRead = useCallback(() => {
+    reads.current?.mark(readTarget(view.current, !document.hidden, atBottom.current));
+  }, []);
   // 최신 페이지로 바꾼다 (처음, 다시 이어짐, 지움, 이 채팅의 알림이 옴). 화면에 적용했으면 true
   const loadLatest = useCallback(() => {
     const load = view.current.begin();
@@ -400,6 +414,7 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
         setName(r.name);
         setError(null);
         changed();
+        markRead();
         return true;
       },
       (e) => {
@@ -408,7 +423,7 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
         return false;
       },
     );
-  }, [computer, project]);
+  }, [computer, project, markRead]);
   const nb = useRef(0);
   // 참여자를 다시 읽는다. 화면에 적용했으면 그 값
   const loadMembers = useCallback(() => {
@@ -451,6 +466,7 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
       if (kind === "message" && data.message) {
         view.current.event(data.message as Message);
         changed();
+        markRead();
       } else if (kind === "cleared") loadLatest();
       else if (kind === "members" || kind === "waiting" || kind === "status") loadMembers();
     },
@@ -491,7 +507,9 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
       changed();
       // 보내는 동안 새로 쓴 것은 남긴다
       setDraft((d) => (d === sent ? "" : d));
+      // 보내면 맨 아래로 옮겨 최신을 보게 되므로 읽음도 알린다 (스크롤로 내려온 것이 아니라 onScroll이 알리지 않는다. 3단계 재리뷰 R4)
       atBottom.current = true;
+      markRead();
       setError(null);
     } catch (e) {
       // 받는 사람이 없으면 보내지 않았다. 초안은 그대로 둔다
@@ -521,6 +539,27 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
       {outdated && <div className="banner bad">{t("phone.update", { name: computer.name })}</div>}
       {!outdated && live !== "live" && !error && <div className="banner">{t("phone.reconnecting")}</div>}
       {!outdated && error && <div className="banner bad">{error}</div>}
+      {!outdated && members.open === false && (
+        <div className="banner push-banner">
+          <span>{t("phone.closedHint")}</span>
+          <button
+            className="primary"
+            disabled={opening}
+            onClick={() => {
+              setOpening(true);
+              api.open(computer, project).then(
+                () => setTimeout(() => setOpening(false), 10_000),
+                (e) => {
+                  setOpening(false);
+                  setError(errorText(e, computer.name));
+                },
+              );
+            }}
+          >
+            {opening ? t("phone.opening") : t("phone.openOnMac")}
+          </button>
+        </div>
+      )}
       {!outdated && (
         <>
           <div
@@ -528,7 +567,10 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
             className="messages"
             onScroll={(e) => {
               const el = e.currentTarget;
+              const was = atBottom.current;
               atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+              // 아래로 내려와 최신을 보게 됨
+              if (atBottom.current && !was) markRead();
             }}
           >
             {more && (

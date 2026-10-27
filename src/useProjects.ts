@@ -51,14 +51,14 @@ export function useProjects() {
     invoke("projects_save", { store }).catch((e) => setError(String(e)));
   }, [loaded, projects, active]);
 
-  // 이미 있는 폴더면 그 프로젝트로 옮겨 가기만 한다.
+  // 이미 있는 폴더면 그 프로젝트로 옮겨 가기만 한다. activate: false면 목록에만 넣는다 (자체 테스트: 열리지 않은 프로젝트)
   const add = useCallback(
-    async (raw: string) => {
+    async (raw: string, activate = true) => {
       if (!loaded) throw new StoreBroken();
       const path = normalize(raw);
       if (!(await exists(path))) throw new Error(path);
       setProjects((list) => (list?.some((p) => p.path === path) ? list : [...(list ?? []), { path, missing: false }]));
-      setActive(path);
+      if (activate) setActive(path);
     },
     [loaded],
   );

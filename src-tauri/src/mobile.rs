@@ -98,6 +98,8 @@ pub struct Ctx {
     pub prompts: Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>,
     // 선택 창에 답한다: (프로젝트, 선택 창 id, 선택지, 기기 이름) (prompts.rs answer)
     pub answer: Box<dyn Fn(&Path, &str, usize, &str) -> Result<(), String> + Send + Sync>,
+    // 프론트에 그 프로젝트(등록된 경로)를 열게 한다 ("맥에서 열기", 활성 프로젝트는 그대로)
+    pub open: Box<dyn Fn(&Path) + Send + Sync>,
     // 앱 데이터 mobile 폴더
     pub dir: PathBuf,
 }
@@ -118,6 +120,8 @@ struct State {
     error: Option<String>,
     // 자체 테스트: 보내지 않고 모은 푸시 (기기 이름, 내용)
     pushes: Vec<(String, Value)>,
+    // 프론트가 연(Workspace가 있는) 프로젝트의 실제 경로 (set_opened)
+    opened: Vec<PathBuf>,
 }
 
 pub struct Mobile {
@@ -384,7 +388,7 @@ impl Mobile {
         }
         let r = real(project);
         let id = project_id(&r);
-        let name = self.projects().into_iter().find(|(p, _, _)| *p == id).map(|(_, n, _)| n).unwrap_or_else(|| r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        let name = self.projects().into_iter().find(|(p, ..)| *p == id).map(|(_, n, ..)| n).unwrap_or_else(|| r.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
         let payload = json!({ "title": format!("{} · {name}", config.name), "body": body, "kind": kind, "computer": config.id, "project": id });
         for (device, device_name, sub) in targets {
             if selftest() {
@@ -562,8 +566,8 @@ impl Mobile {
         Some(d.clone())
     }
 
-    // 등록된 프로젝트: (id, 이름, 실제 경로)
-    fn projects(&self) -> Vec<(String, String, PathBuf)> {
+    // 등록된 프로젝트: (id, 이름, 실제 경로, 등록된 경로)
+    fn projects(&self) -> Vec<(String, String, PathBuf, PathBuf)> {
         let mut seen = std::collections::HashSet::new();
         (self.ctx.projects)()
             .into_iter()
@@ -571,9 +575,27 @@ impl Mobile {
                 let r = real(&p);
                 let id = project_id(&r);
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
-                seen.insert(id.clone()).then_some((id, name, r))
+                seen.insert(id.clone()).then_some((id, name, r, p))
             })
             .collect()
+    }
+
+    // 프론트가 연 프로젝트 (등록된 경로). 바뀌면 폰이 목록·참여자를 다시 읽게 알린다
+    pub fn set_opened(&self, paths: &[String]) {
+        let opened: Vec<PathBuf> = paths.iter().map(|p| real(Path::new(p))).collect();
+        let changed = {
+            let mut st = self.state.lock().unwrap();
+            let changed = st.opened != opened;
+            st.opened = opened;
+            changed
+        };
+        if changed {
+            self.publish(None, "members", json!({}));
+        }
+    }
+
+    fn is_open(&self, real: &Path) -> bool {
+        self.state.lock().unwrap().opened.iter().any(|p| p == real)
     }
 
     fn route(&self, method: &tiny_http::Method, path: &str, query: &str, body: &Value, device: &Device, config: &Config) -> (u16, Value) {
@@ -603,11 +625,12 @@ impl Mobile {
             let list: Vec<Value> = self
                 .projects()
                 .into_iter()
-                .map(|(id, name, r)| {
+                .map(|(id, name, r, _)| {
                     let sessions = chats.members(&r).len().saturating_sub(1);
                     // 사용자를 기다리는 세션 수 (권한 확인 등)
                     let awaiting = (self.ctx.status)(&r).iter().filter(|(_, s)| s != "working").count();
-                    json!({ "id": id, "name": name, "sessions": sessions, "awaiting": awaiting, "paused": chats.paused(&r) })
+                    // open: 맥에서 열려 있는지 (아니면 세션이 없다. "맥에서 열기"), unread: 사용자에게 온 안 읽은 메시지 수
+                    json!({ "id": id, "name": name, "sessions": sessions, "awaiting": awaiting, "paused": chats.paused(&r), "open": self.is_open(&r), "unread": chats.unread(&r) })
                 })
                 .collect();
             return (200, json!({ "projects": list }));
@@ -615,7 +638,7 @@ impl Mobile {
         // /api/projects/<id>/<무엇>
         let Some(rest) = path.strip_prefix("/api/projects/") else { return (404, json!({ "error": "not found" })) };
         let Some((id, what)) = rest.split_once('/') else { return (404, json!({ "error": "not found" })) };
-        let Some((_, name, project)) = self.projects().into_iter().find(|(p, _, _)| p == id) else {
+        let Some((_, name, project, registered)) = self.projects().into_iter().find(|(p, ..)| p == id) else {
             return (404, json!({ "error": "project" }));
         };
         let param = |key: &str| query.split('&').filter_map(|kv| kv.split_once('=')).find(|(k, _)| *k == key).and_then(|(_, v)| v.parse::<u64>().ok());
@@ -638,8 +661,24 @@ impl Mobile {
                     }
                 }
                 let prompts = (self.ctx.prompts)(&project);
-                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "prompts": prompts }))
+                let open = self.is_open(&project);
+                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "prompts": prompts, "open": open }))
             }
+            // 맥에서 연다 (프론트가 열면 set_opened로 알려 와 목록·참여자가 바뀐다)
+            (Post, "open") => {
+                if !self.is_open(&project) {
+                    (self.ctx.open)(&registered);
+                }
+                (200, json!({}))
+            }
+            // 여기까지 읽었다 (폰의 채팅 화면이 보이고 최신을 읽었을 때)
+            (Post, "read") => match body.get("id").and_then(Value::as_u64) {
+                Some(id) => {
+                    chats.seen(&project, id);
+                    (200, json!({}))
+                }
+                None => (400, json!({ "error": "id" })),
+            },
             (Post, "messages") => match body.get("text").and_then(Value::as_str) {
                 Some(text) => match chats.post_via(&project, USER, text, Some(&device.name)) {
                     Ok(m) => (200, json!(m)),
@@ -803,7 +842,7 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             return MobileState(None);
         }
     };
-    let (a, b, c, d, e) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
+    let (a, b, c, d, e, f) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
     let members = chats.clone();
     let ctx = Ctx {
         chats: chats.clone(),
@@ -825,6 +864,10 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             d.state::<crate::prompts::Prompts>().open_in(project, |pty| ptys.exists(pty))
         }),
         answer: Box::new(move |project, prompt, option, device| crate::prompts::answer(&e, project, prompt, option, Some(device))),
+        open: Box::new(move |project| {
+            use tauri::Emitter;
+            let _ = f.emit("mobile-open", project.to_string_lossy());
+        }),
         dir,
     };
     let mobile = Mobile::new(ctx);
@@ -922,6 +965,14 @@ pub fn mobile_pair_code(state: tauri::State<'_, MobileState>) -> Result<Value, S
     Ok(json!({ "code": code, "api": api, "link": link, "expires": now_ms() + CODE_TTL.as_millis() as u64 }))
 }
 
+// 프론트가 연 프로젝트 (App.tsx, 바뀔 때마다)
+#[tauri::command]
+pub fn set_opened(state: tauri::State<'_, MobileState>, projects: Vec<String>) {
+    if let Some(m) = state.0.as_ref() {
+        m.set_opened(&projects);
+    }
+}
+
 #[tauri::command(async)]
 pub fn mobile_forget(state: tauri::State<'_, MobileState>, id: String) -> Result<Status, String> {
     let mobile = mobile_of(&state)?;
@@ -978,6 +1029,8 @@ mod tests {
 
     struct Fixture {
         mobile: Arc<Mobile>,
+        // "맥에서 열기"로 프론트에 열게 한 프로젝트 (등록된 경로)
+        opened: Arc<Mutex<Vec<PathBuf>>>,
         port: u16,
         project: PathBuf,
         dir: PathBuf,
@@ -1012,7 +1065,10 @@ mod tests {
         let project = real(&project);
         let chats = Chats::new(dir.join("chats"), Box::new(|_, _| {}), 0);
         let p = project.clone();
-        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status, prompts: Box::new(|_| vec!["p1".into()]), answer: Box::new(answer_stub), dir: dir.join("mobile") };
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let record = opened.clone();
+        let open = Box::new(move |p: &Path| record.lock().unwrap().push(p.to_path_buf()));
+        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status, prompts: Box::new(|_| vec!["p1".into()]), answer: Box::new(answer_stub), open, dir: dir.join("mobile") };
         let mobile = Mobile::new(ctx);
         {
             let mut st = mobile.state.lock().unwrap();
@@ -1022,7 +1078,7 @@ mod tests {
         }
         mobile.start().unwrap();
         let port = mobile.port().unwrap();
-        Fixture { mobile, port, project, dir }
+        Fixture { mobile, opened, port, project, dir }
     }
 
     fn http(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> (u16, String) {
@@ -1228,7 +1284,7 @@ mod tests {
         f.mobile.forget(&id_a).unwrap();
         let p = f.project.clone();
         let chats = Chats::new(f.dir.join("chats"), Box::new(|_, _| {}), 0);
-        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status: Box::new(|_| vec![]), prompts: Box::new(|_| vec![]), answer: Box::new(answer_stub), dir: f.dir.join("mobile") });
+        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status: Box::new(|_| vec![]), prompts: Box::new(|_| vec![]), answer: Box::new(answer_stub), open: Box::new(|_| {}), dir: f.dir.join("mobile") });
         assert!(again.device(&a, LOGIN).is_none());
         assert!(again.device(&b, LOGIN).is_some());
     }
@@ -1343,6 +1399,37 @@ mod tests {
         assert!(!got[0].2.is_empty(), "기기 이름");
         let (_, body) = http(f.port, "GET", "/api/projects", &h, "");
         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["projects"][0]["awaiting"], 2);
+    }
+
+    // 폰에서 프로젝트 열기와 읽음 (3단계): 목록에 열림·안 읽은 수, "맥에서 열기"는 열리지 않은 것만 프론트에 (등록된 경로),
+    // 읽으면 수가 준다
+    #[test]
+    fn open_and_read_from_phone() {
+        let f = fixture("open");
+        let token = pair(&f);
+        let auth = authed(&token);
+        let mut h = base();
+        h.push(("Authorization", &auth));
+        let id = project_id(&f.project);
+        let listed = || serde_json::from_str::<Value>(&http(f.port, "GET", "/api/projects", &h, "").1).unwrap()["projects"][0].clone();
+        let members = || serde_json::from_str::<Value>(&http(f.port, "GET", &format!("/api/projects/{id}/members"), &h, "").1).unwrap();
+        assert_eq!((listed()["open"].clone(), listed()["unread"].clone(), members()["open"].clone()), (json!(false), json!(0), json!(false)));
+        let chats = &f.mobile.ctx.chats;
+        chats.join(&f.project, "origin/dev", "k");
+        let m = chats.post(&f.project, "origin/dev", "@user done").unwrap();
+        assert_eq!(listed()["unread"], 1);
+
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/open"), &h, "{}").0, 200);
+        assert_eq!(*f.opened.lock().unwrap(), [f.project.clone()]);
+        f.mobile.set_opened(&[f.project.to_string_lossy().into_owned()]);
+        assert_eq!((listed()["open"].clone(), members()["open"].clone()), (json!(true), json!(true)));
+        // 이미 열렸으면 다시 열게 하지 않는다
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/open"), &h, "{}").0, 200);
+        assert_eq!(f.opened.lock().unwrap().len(), 1);
+
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/read"), &h, "{}").0, 400);
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/read"), &h, &format!(r#"{{"id":{}}}"#, m.id)).0, 200);
+        assert_eq!(listed()["unread"], 0);
     }
 
     #[test]

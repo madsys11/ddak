@@ -16,9 +16,11 @@ import { renderMarkdown } from "./docs";
 import { insertAt } from "./dragPath";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
-import { MessageView } from "./mobile/sync";
+import mobileCss from "./mobile/mobile.css?raw";
+import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
-import { KeyProblem } from "./mobile/MobileApp";
+import { Chat, KeyProblem } from "./mobile/MobileApp";
+import { API_VERSION as PHONE_API, api as phoneApi } from "./mobile/api";
 import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
@@ -623,6 +625,84 @@ function testMobileSyncUnit() {
     pushPlan("a", undefined),
   ].join(",");
   check("폰 알림: 구독 맞추기 (같음·없음·다름·없어짐·예전 것이 없어짐·폰에 없음·푸시를 모르는 ddak)", plans === "none,send,send,renew,send,none,none", plans);
+
+  // 3단계 리뷰 R1·R2: 읽음은 최신 조회가 성공해 서버와 맞춘 뒤, 화면이 보이고 맨 아래를 볼 때만
+  const r = new MessageView();
+  const reloading = r.begin();
+  r.event(msg(101));
+  const beforeSync = readTarget(r, true, true);
+  r.fail(reloading);
+  const afterFailed = readTarget(r, true, true);
+  r.latest(r.begin(), range(52, 101), true);
+  const synced = readTarget(r, true, true);
+  r.event(msg(102));
+  const readTargets = [beforeSync, afterFailed, synced, readTarget(r, true, true), readTarget(r, true, false), readTarget(r, false, true)].join(",");
+  check("폰 채팅: 읽음은 서버와 맞춘 뒤 화면이 보이고 맨 아래를 볼 때만 (조회 중·실패·위쪽·숨김이면 0)", readTargets === "0,0,101,102,0,0", readTargets);
+}
+
+// 폰 채팅 화면의 읽음 (src/mobile/MobileApp.tsx Chat): 실제 화면을 iframe에 그리고 맥 API만 대역으로 바꾼다. 위로 올려 읽다가
+// 보내면 맨 아래로 가서 최신을 보게 되므로 읽음을 알린다 (3단계 재리뷰 R4: 스크롤로 내려온 것이 아니라 알리지 않았다)
+async function testMobileChatUnit() {
+  const frame = document.createElement("iframe");
+  frame.style.cssText = "position:fixed;left:-10000px;top:0;width:400px;height:400px";
+  document.body.appendChild(frame);
+  const vars = Object.entries(THEMES.dark.ui).map(([k, v]) => `${k}:${v}`).join(";");
+  const loaded = new Promise((r) => (frame.onload = r));
+  frame.srcdoc = `<style>:root{${vars}}${mobileCss}</style><div id="root"></div>`;
+  await loaded;
+  const doc = frame.contentDocument!;
+  const saved = { ...phoneApi };
+  const reads: number[] = [];
+  const message = (id: number) => ({ id, time: 0, from: id % 2 ? "origin/dev" : "user", text: `m${id}`, to: ["user"] });
+  Object.assign(phoneApi, {
+    info: async () => ({ id: "c", name: "Mac", version: "", api: PHONE_API }),
+    messages: async () => ({ name: "proj", messages: Array.from({ length: 100 }, (_, i) => message(i + 1)), more: false }),
+    members: async () => ({ members: ["user", "origin/dev"], waiting: [], paused: [], open: true }),
+    read: async (_c: unknown, _p: unknown, id: number) => void reads.push(id),
+    post: async (_c: unknown, _p: unknown, text: string) => ({ id: 102, time: 0, from: "user", text, to: ["origin/dev"] }),
+  });
+  const root = createRoot(doc.getElementById("root")!);
+  try {
+    root.render(createElement(Chat, { computer: { id: "c", name: "Mac", api: "http://127.0.0.1:9", token: "t" }, project: "p" }));
+    await waitFor("처음 읽음", () => reads.length > 0, 5000).catch(() => null);
+    const first = reads.join(",");
+    // 위쪽을 본다 (스크롤 이벤트로 맨 아래가 아니게)
+    const list = await waitFor("메시지 목록", () => doc.querySelector<HTMLElement>(".messages"), 3000);
+    list.scrollTop = 0;
+    list.dispatchEvent(new Event("scroll"));
+    await sleep(100);
+    const input = doc.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    Object.getOwnPropertyDescriptor((frame.contentWindow as unknown as typeof globalThis).HTMLTextAreaElement.prototype, "value")!.set!.call(input, "@origin/dev hi");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(50);
+    doc.querySelector<HTMLElement>(".composer button.primary")!.click();
+    await waitFor("보낸 뒤 읽음", () => reads.length > 1, 3000).catch(() => null);
+    check("폰 채팅: 위쪽을 보다가 보내면 맨 아래로 가며 읽음을 알림 (처음 읽음 100, 보낸 뒤 102)", first === "100" && reads.join(",") === "100,102", `${first} / ${reads}`);
+  } finally {
+    root.unmount();
+    Object.assign(phoneApi, saved);
+    frame.remove();
+  }
+}
+
+// 폰 화면 글자색 (src/mobile/mobile.css): 배경 없는 버튼(프로젝트 이름, 막대의 ‹·+)은 모든 테마에서 화면 글자색이어야 한다.
+// 밝은 테마의 --button-fg는 색을 채운 버튼용 흰색이라 그대로 물려받으면 배경에 묻힌다 (2026-10-27 사용자 화면)
+async function testMobileThemeUnit() {
+  const frame = document.createElement("iframe");
+  frame.style.cssText = "position:fixed;left:-10000px;top:0;width:400px;height:300px";
+  document.body.appendChild(frame);
+  const wrong: string[] = [];
+  for (const [id, theme] of Object.entries(THEMES)) {
+    const vars = Object.entries(theme.ui).map(([k, v]) => `${k}:${v}`).join(";");
+    const loaded = new Promise((r) => (frame.onload = r));
+    frame.srcdoc = `<style>:root{${vars}}${mobileCss}</style><header class="bar"><button class="bar-back">‹</button><h1>Mac</h1><button class="bar-side">+</button></header><main class="list"><button class="row row-main"><span class="row-title">proj</span></button></main><span class="ref" style="color:var(--fg)">x</span>`;
+    await loaded;
+    const doc = frame.contentDocument!;
+    const color = (sel: string) => frame.contentWindow!.getComputedStyle(doc.querySelector(sel)!).color;
+    for (const sel of [".row-title", ".bar-back", ".bar-side"]) if (color(sel) !== color(".ref")) wrong.push(`${id} ${sel} ${color(sel)} (화면 글자 ${color(".ref")})`);
+  }
+  frame.remove();
+  check("폰 화면: 배경 없는 버튼(프로젝트 이름, 막대의 ‹·+)은 모든 테마에서 화면 글자색", wrong.length === 0, wrong.join(", "));
 }
 
 // 폰 알림의 실제 코드를 브라우저·네트워크 대역과 돌린다: 맥마다 구독 맞추기 (src/mobile/push.ts reconcile)와 서비스 워커
@@ -732,6 +812,29 @@ async function testMobilePushUnit() {
     confirmed("other", true, m({ dev: "permission" })),
   ].join(",");
   check("폰 알림: 보고 있는 채팅의 알림은 그 종류를 보였을 때만 닫음 (메시지·권한 확인·멈춤)", closes === "true,false,true,false,false,true,false,false", closes);
+
+  // 3단계 리뷰 R3: 읽음 보내기가 실패하면 같은 번호로 다시 보내고, 그 사이 더 뒤 번호를 보내면 그것만 남는다
+  {
+    const sent: string[] = [];
+    let failNext = 1;
+    const marks = new ReadMark(async (id) => {
+      sent.push(String(id));
+      if (failNext-- > 0) throw new Error("offline");
+    }, 20);
+    marks.mark(100);
+    await new Promise((r) => setTimeout(r, 80));
+    // 실패한 100은 저절로 다시 보냈다 (아래 mark 전에 본다)
+    const retried = sent.join(",");
+    marks.mark(100);
+    marks.mark(99);
+    failNext = 1;
+    marks.mark(101);
+    await settle();
+    marks.mark(102);
+    await new Promise((r) => setTimeout(r, 80));
+    marks.stop();
+    check("폰 채팅: 읽음 보내기가 실패하면 다시 보내고, 보낸 번호 이하는 다시 보내지 않음", retried === "100,100" && sent.join(",") === "100,100,101,102", `${retried} / ${sent}`);
+  }
 
   // 서비스 워커: 실제 sw.js를 가짜 self(창 목록, 알림, 창 열기)로 실행한다
   const source = await fetch("/src/mobile/public/sw.js").then((r) => r.text());
@@ -874,6 +977,46 @@ async function testMobile(root: string) {
   await invoke("selftest_set_focused", { focused: false });
   await invoke("selftest_notifications");
   check("모바일 알림: 맥에서 보고 있으면 폰에도 보내지 않음", quiet.length === 0, JSON.stringify(quiet));
+
+  // 모바일 3단계 (chat.rs unread): 세션이 사용자에게 보낸 메시지는 맥의 사이드바 배지와 폰 목록에 같은 수, 폰에서 읽으면 맥 배지도
+  // 지운다. 창은 뒤로 보내 둔다 (채팅을 보고 있으면 맥이 바로 읽은 것으로 친다)
+  const rowOf = (p: string) => document.querySelector<HTMLElement>(`.project-row[data-project="${CSS.escape(p)}"]`);
+  const badge = () => rowOf(root)?.querySelector<HTMLElement>(".project-unread")?.dataset.unread ?? "0";
+  type Listed = { id: string; name: string; open?: boolean; unread?: number };
+  const projectNamed = async (name: string) => (JSON.parse((await http("GET", "/api/projects", auth))[1]).projects as Listed[]).find((p) => p.name === name);
+  window.dispatchEvent(new Event("blur"));
+  const poster = await invoke<string>("selftest_chat_join", { project: root, name: "origin/phone-poster" });
+  const toUser = await invoke<{ id: number }>("selftest_chat_post", { project: root, from: "origin/phone-poster", text: "@user done" });
+  const counted = await waitFor("맥 배지", () => badge() === "1", 5000).then(() => true, () => false);
+  const phoneCount = (await projectNamed(root.split("/").pop()!))?.unread;
+  await http("POST", `/api/projects/${project?.id}/read`, auth, JSON.stringify({ id: toUser.id }));
+  const cleared = await waitFor("폰에서 읽으면 맥 배지 지움", () => badge() === "0", 5000).then(() => true, () => false);
+  const phoneAfter = (await projectNamed(root.split("/").pop()!))?.unread;
+  await invoke("selftest_chat_leave", { token: poster });
+  window.dispatchEvent(new Event("focus"));
+  check("모바일 3단계: 사용자에게 온 메시지는 맥 배지와 폰 목록에 같은 수, 폰에서 읽으면 맥 배지도 지움", counted && phoneCount === 1 && cleared && phoneAfter === 0, `${counted} ${phoneCount} ${cleared} ${phoneAfter} badge=${badge()}`);
+
+  // 폰에서 프로젝트 열기: 목록에만 있고 열리지 않은 프로젝트는 폰 목록에 열리지 않음으로, "맥에서 열기"면 맥이 그 프로젝트를 연다
+  // (보고 있는 프로젝트는 그대로)
+  const otherRoot = root.replace(/\/proj$/, "/other");
+  const confirmBefore = devHooks.confirm;
+  devHooks.confirm = async () => true;
+  const removeOther = async () => {
+    rowOf(otherRoot)?.querySelector<HTMLElement>("[data-action=remove]")?.click();
+    await waitFor("다른 프로젝트 빼기", () => !rowOf(otherRoot), 3000).catch(() => null);
+  };
+  await removeOther();
+  await devHooks.addProject!(otherRoot, false);
+  await waitFor("목록에만 넣기", () => rowOf(otherRoot), 3000).catch(() => null);
+  const closed = await waitAsync("폰 목록에 열리지 않음", async () => (await projectNamed("other"))?.open === false, 5000).then(() => true, () => false);
+  const otherId = (await projectNamed("other"))?.id;
+  const [opened] = await http("POST", `/api/projects/${otherId}/open`, auth, "{}");
+  const workspace = await waitFor("맥에서 열림", () => document.querySelector(`.project-workspace[data-project="${CSS.escape(otherRoot)}"]`), 10000).then(() => true, () => false);
+  const nowOpen = await waitAsync("폰 목록에 열림", async () => (await projectNamed("other"))?.open === true, 5000).then(() => true, () => false);
+  const stayed = rowOf(root)?.classList.contains("active") === true;
+  await removeOther();
+  devHooks.confirm = confirmBefore;
+  check("모바일 3단계: 열리지 않은 프로젝트를 폰에서 열면 맥이 연다 (보고 있는 프로젝트는 그대로)", closed && opened === 200 && workspace && nowOpen && stayed, `${closed} ${opened} ${workspace} ${nowOpen} ${stayed}`);
 
   // 기기 목록에서 연결을 끊으면 그 토큰은 거절
   await clickMenu("ddak", "Mobile Connection…");
@@ -4420,6 +4563,8 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["mobile", () => testMobile(root)],
     ["mobileSyncUnit", testMobileSyncUnit],
     ["mobilePushUnit", testMobilePushUnit],
+    ["mobileThemeUnit", testMobileThemeUnit],
+    ["mobileChatUnit", testMobileChatUnit],
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],

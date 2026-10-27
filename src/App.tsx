@@ -73,6 +73,10 @@ function App() {
   useEffect(() => {
     if (active) setOpened((o) => (o.includes(active) ? o : [...o, active]));
   }, [active]);
+  // 연 프로젝트를 Rust에 알린다: 폰 목록이 맥에서 열렸는지 보인다 (src-tauri/src/mobile.rs)
+  useEffect(() => {
+    invoke("set_opened", { projects: opened }).catch(() => {});
+  }, [opened]);
   // 알림을 누름 (src-tauri/src/notify.rs): 그 프로젝트로 간다. 터미널이 낸 알림이면 그 창은 Terminal이 보이고 (onReveal),
   // 아니면 (세션이 사용자에게 보낸 메시지 등) 채팅 패널을 연다
   const projectsRef = useRef(projects);
@@ -89,6 +93,16 @@ function App() {
       unlisten.then((f) => f());
     };
   }, [activate]);
+
+  // 폰의 "맥에서 열기" (mobile.rs): 보고 있는 프로젝트는 그대로 두고 그 프로젝트를 연다. 세션은 처음 열 때처럼 이어서 하기로 복원된다
+  useEffect(() => {
+    const unlisten = listen<string>("mobile-open", ({ payload }) => {
+      if ((projectsRef.current ?? []).some((p) => p.path === payload)) setOpened((o) => (o.includes(payload) ? o : [...o, payload]));
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   // 문서 탭 열기 (src/docs.ts requestOpenDoc): 그 프로젝트로 가서 (없으면 보고 있는 프로젝트) 그 Workspace가 연다
   const [docRequest, setDocRequest] = useState<{ project: string; path: string; anchor?: string; n: number } | null>(null);
@@ -115,9 +129,9 @@ function App() {
   }, []);
   const mobileDialog = mobileOpen && <MobileDialog onClose={() => setMobileOpen(false)} />;
 
-  async function addProject(path: string) {
+  async function addProject(path: string, activate = true) {
     try {
-      await add(path);
+      await add(path, activate);
       setError(null);
     } catch (e) {
       if (e instanceof StoreBroken) return;

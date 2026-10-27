@@ -106,6 +106,8 @@ struct Inner {
     names: HashMap<PathBuf, Names>,
     // (프로젝트, 작업그룹) → 자동 깨우기 셈 (WAKE_LIMIT). 메모리에만 둔다: 앱을 다시 켜면 처음부터 센다.
     limits: HashMap<(PathBuf, String), Limit>,
+    // 프로젝트 → 사용자가 본 마지막 번호 (안 읽은 수, unread). 메모리에만 둔다: 없으면 앱을 켜기 전 것까지 본 것으로 친다.
+    seen: HashMap<PathBuf, u64>,
 }
 
 // 자동 깨우기 제한 (docs/spec.md "작업그룹 협업 규약"). 세션끼리 끝없이 주고받지 않도록, 사용자 메시지 없이 한 작업그룹의
@@ -141,6 +143,8 @@ pub enum Change<'a> {
     Released(&'a [(String, String)]),
     // 대화를 모두 지움 (chat_clear)
     Cleared,
+    // 사용자가 본 마지막 번호가 올라감 (데스크톱 채팅 패널이나 폰에서 읽음. 안 읽은 수가 바뀐다)
+    Seen,
     // 이 작업그룹의 자동 깨우기가 막 멈춤 (사용자에게 알린다)
     Paused(&'a str),
     // 이 참여자가 사용자를 기다림 (사용자에게 알린다). kind: permission·question·auth (OSC 7501 blocked의 종류), blocked
@@ -160,6 +164,8 @@ pub struct Chats {
     port: u16,
     // 새 메시지·참여자 변화마다 (프론트에 알림, 깨우기). 잠금을 놓은 뒤에 부른다.
     on_message: OnMessage,
+    // 만든 때 (ms). 이보다 앞의 메시지는 읽은 것으로 친다 (unread)
+    started: u64,
 }
 
 // 추측할 수 없는 토큰 (macOS arc4random)
@@ -227,7 +233,7 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
 impl Chats {
     // 서버 없이 (저장·참여만. 테스트용)
     pub(crate) fn new(dir: PathBuf, on_message: OnMessage, port: u16) -> Arc<Chats> {
-        Arc::new(Chats { inner: Mutex::new(Inner::default()), dir, port, on_message })
+        Arc::new(Chats { inner: Mutex::new(Inner::default()), dir, port, on_message, started: now_ms() })
     }
 
     // 서버를 띄운다. 포트를 못 열면 오류 (채팅 없이 세션은 뜬다: {chat}이 빈 값이 된다)
@@ -363,6 +369,37 @@ impl Chats {
     pub fn messages(&self, project: &Path) -> Result<Vec<Message>, String> {
         let mut inner = self.inner.lock().unwrap();
         self.room(&mut inner, project).cloned()
+    }
+
+    // 안 읽은 수: 세션이 사용자에게 보낸 메시지 (보낸 사람이 사용자가 아니고 받는 사람에 사용자) 중 사용자가 본 마지막 번호 뒤의
+    // 것. 아직 본 적이 없으면 앱을 켠 뒤에 온 것 (docs/mobile-plan.md "3단계 세부"). 읽지 못하는 방은 0
+    pub fn unread(&self, project: &Path) -> usize {
+        let mut inner = self.inner.lock().unwrap();
+        let seen = inner.seen.get(project).copied();
+        let started = self.started;
+        let Ok(room) = self.room(&mut inner, project) else { return 0 };
+        room.iter().filter(|m| m.from != USER && m.to.iter().any(|t| t == USER) && seen.map_or(m.time >= started, |s| m.id > s)).count()
+    }
+
+    // 여기까지 봤다 (지금보다 앞 번호면 그대로). 올라가면 알린다 (Change::Seen). 처음이면 앱을 켜기 전 것보다 앞으로 가지 않는다
+    // (안 읽은 수가 늘지 않게)
+    pub fn seen(&self, project: &Path, id: u64) {
+        let changed = {
+            let mut inner = self.inner.lock().unwrap();
+            let current = match inner.seen.get(project) {
+                Some(s) => *s,
+                None => {
+                    let started = self.started;
+                    self.room(&mut inner, project).map(|r| r.iter().filter(|m| m.time < started).map(|m| m.id).max().unwrap_or(0)).unwrap_or(0)
+                }
+            };
+            let next = current.max(id);
+            inner.seen.insert(project.to_path_buf(), next);
+            next > current
+        };
+        if changed {
+            (self.on_message)(project, Change::Seen);
+        }
     }
 
     // 보낸다. 파일에 붙인 뒤에 목록에 넣고 알린다 (쓰지 못하면 오류, 목록도 그대로).
@@ -739,6 +776,10 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                 crate::mobile::publish(&emitter, Some(project), "members", json!({}));
             }
             Change::Released(released) => wake(None, released),
+            Change::Seen => {
+                let _ = emitter.emit("chat-seen", json!({ "project": project }));
+                crate::mobile::publish(&emitter, Some(project), "unread", json!({}));
+            }
             Change::Cleared => {
                 let _ = emitter.emit("chat", json!({ "project": project }));
                 crate::mobile::publish(&emitter, Some(project), "cleared", json!({}));
@@ -799,6 +840,13 @@ pub fn selftest_chat_join(state: tauri::State<'_, ChatsState>, project: String, 
     Some(chats.join(&real(&project), &name, "").0)
 }
 
+// 자체 테스트: 참여자 이름으로 보낸다 (세션이 MCP로 보낸 것처럼)
+#[tauri::command]
+pub fn selftest_chat_post(state: tauri::State<'_, ChatsState>, project: String, from: String, text: String) -> Result<Message, String> {
+    let chats = std::env::var_os("DDAK_SELFTEST").and(state.0.as_ref()).ok_or("selftest only")?;
+    chats.post(&real(&project), &from, &text)
+}
+
 #[tauri::command]
 pub fn selftest_chat_leave(state: tauri::State<'_, ChatsState>, token: String) {
     if let Some(chats) = std::env::var_os("DDAK_SELFTEST").and(state.0.as_ref()) {
@@ -810,6 +858,19 @@ pub fn selftest_chat_leave(state: tauri::State<'_, ChatsState>, token: String) {
 #[tauri::command]
 pub fn chat_clear(state: tauri::State<'_, ChatsState>, project: String) -> Result<(), String> {
     chats_of(&state)?.clear(&real(&project))
+}
+
+// 사용자에게 온 안 읽은 메시지 수 (Chats::unread. 사이드바·Dock 배지)
+#[tauri::command]
+pub fn chat_unread(state: tauri::State<'_, ChatsState>, project: String) -> Result<usize, String> {
+    Ok(chats_of(&state)?.unread(&real(&project)))
+}
+
+// 여기까지 봤다 (채팅 패널을 보고 있을 때)
+#[tauri::command]
+pub fn chat_seen(state: tauri::State<'_, ChatsState>, project: String, id: u64) -> Result<(), String> {
+    chats_of(&state)?.seen(&real(&project), id);
+    Ok(())
 }
 
 // 자동 깨우기가 멈춘 작업그룹 (채팅 패널의 알림). 바뀌면 "chat-limit" 이벤트가 온다.
@@ -886,6 +947,42 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ddak-chat-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    // 안 읽은 수 (모바일 3단계): 세션이 사용자에게 보낸 것 중 본 번호 뒤의 것. 앱을 켜기 전에 온 것은 읽은 것으로 친다.
+    // 본 번호는 앞으로만 가고, 올라갈 때만 알린다 (처음 볼 때 앱을 켜기 전 것보다 뒤로 가지 않는다)
+    #[test]
+    fn unread_after_seen_and_start() {
+        let dir = temp("unread");
+        let a = Path::new("/p/a");
+        let earlier = Chats::new(dir.clone(), Box::new(|_, _| {}), 0);
+        earlier.join(a, "origin/dev", "k1");
+        earlier.post(a, "origin/dev", "@user before start").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let notified = Arc::new(Mutex::new(0));
+        let sink = notified.clone();
+        let started = move || {
+            let sink = sink.clone();
+            Chats::new(dir.clone(), Box::new(move |_, c| if let Change::Seen = c { *sink.lock().unwrap() += 1 }), 0)
+        };
+        let chats = started();
+        chats.join(a, "origin/dev", "k1");
+        assert_eq!(chats.unread(a), 0, "앱을 켜기 전 메시지를 안 읽음으로 셈");
+        let m2 = chats.post(a, "origin/dev", "@user first").unwrap();
+        chats.post(a, USER, "@origin/dev ok").unwrap();
+        let m4 = chats.post(a, "origin/dev", "@user second").unwrap();
+        assert_eq!(chats.unread(a), 2);
+        chats.seen(a, m2.id);
+        assert_eq!((chats.unread(a), *notified.lock().unwrap()), (1, 1));
+        chats.seen(a, 1);
+        assert_eq!((chats.unread(a), *notified.lock().unwrap()), (1, 1), "앞 번호로 되돌아감");
+        chats.seen(a, m4.id);
+        assert_eq!((chats.unread(a), *notified.lock().unwrap()), (0, 2));
+        // 다시 켠 뒤 처음 본 번호가 앞이어도 (폰이 0을 보냄) 앱을 켜기 전 것을 안 읽음으로 되돌리지 않는다
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let again = started();
+        again.seen(a, 0);
+        assert_eq!((again.unread(a), *notified.lock().unwrap()), (0, 2));
     }
 
     // 이름은 키마다 정해 두고 다른 키에는 주지 않는다 (-2). 멘션된 참여자(보낸 사람 빼고, @all·멘션 없는 사용자 메시지는 모두)만 to에 들어가고
@@ -972,7 +1069,7 @@ mod tests {
         let sink = log.clone();
         let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
             let entry = match c {
-                Change::Message(_, []) | Change::Members | Change::Cleared | Change::Attention { .. } => return,
+                Change::Message(_, []) | Change::Members | Change::Cleared | Change::Seen | Change::Attention { .. } => return,
                 Change::Paused(g) => format!("paused {g}"),
                 Change::Message(m, r) => format!("message {} released {r:?}", m.from),
                 Change::Limits => "limits".to_string(),

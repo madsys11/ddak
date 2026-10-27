@@ -752,6 +752,9 @@ ddak 앱
   고르면 (다시 골라도) 그 소리로 시험 알림을 보낸다 (제목 `ddak`, 보고 있어도 보낸다). 음량은 macOS 알림 음량을 따른다.
 - 앱 안: 사이드바 프로젝트 배지와 Dock 배지 (`set_badge`) = 사용자가 보지 않는 동안 세션이 사용자에게 보낸 메시지 수.
   "보고 있음" = 그 프로젝트의 채팅 패널이 열려 있고, 그 프로젝트가 보이고, 창이 앞에 있음 (`ChatPanel` watching). 보게 되면 지운다.
+  수는 Rust가 센다 (`Chats::unread`, `chat_unread`): 프로젝트마다 사용자가 본 마지막 번호(메모리) 뒤의 것, 아직 본 적이 없으면
+  앱을 켠 뒤에 온 것 (켜기 전 기록은 읽은 것). 보고 있으면 채팅 패널이 `chat_seen`으로 본 번호를 올리고, 폰에서 읽어도
+  (`POST …/read`) 올라간다. 올라가면 `chat-seen` 이벤트로 패널이 수를 다시 읽는다 (Dock·사이드바와 폰 목록이 같은 수).
 - 자체 테스트(`DDAK_SELFTEST`)는 보내지 않고 기록한다 (`selftest_notifications`), 창 포커스는 `selftest_set_focused`로 정한다.
 
 ## 모바일 연결 (`mobile.rs`)
@@ -780,10 +783,11 @@ ddak 앱
   코드·토큰 실패가 1분에 10번이면 그 1분 동안 429.
 - API: `GET /api/info`(이름, id, 버전, API 버전 1, 이 기기의 푸시 구독 주소와 끊긴 구독 주소), `POST /api/pair`,
   `GET /api/projects`(등록된 프로젝트: id = 채팅 파일 이름과 같은 `<이름>-<경로 해시>`, 세션 수, 사용자를 기다리는 세션 수,
-  멈춘 작업그룹), `GET /api/projects/<id>/messages?before=&limit=`(최신부터 50개, `more`), `GET …/members`(참여자, 깨우기 대기,
-  참여자 상태, 멈춘 작업그룹, 열린 선택 창 `prompts`), `POST …/messages`(사용자로 보냄 + `via`: 기기 이름. 받는 사람이 없으면 400 `no-recipient`), `POST …/resume`,
-  `POST …/answer`(`{ prompt, option }`, 선택 창 답하기. 닫혔거나 보내는 중이면 409), `POST·DELETE /api/push`
-  (이 기기의 푸시 구독), `GET /api/events`(SSE: `hello`, `message`, `members`, `waiting`, `status`, `cleared`. 25초마다 주석 줄.
+  멈춘 작업그룹, 맥에서 열렸는지 `open`, 안 읽은 수 `unread`), `GET /api/projects/<id>/messages?before=&limit=`(최신부터 50개, `more`), `GET …/members`(참여자, 깨우기 대기,
+  참여자 상태, 멈춘 작업그룹, 열린 선택 창 `prompts`, `open`), `POST …/messages`(사용자로 보냄 + `via`: 기기 이름. 받는 사람이 없으면 400 `no-recipient`), `POST …/resume`,
+  `POST …/answer`(`{ prompt, option }`, 선택 창 답하기. 닫혔거나 보내는 중이면 409), `POST …/open`(맥에서 연다. 이미 열렸으면
+  그대로), `POST …/read`(`{ id }`, 여기까지 읽음), `POST·DELETE /api/push`
+  (이 기기의 푸시 구독), `GET /api/events`(SSE: `hello`, `message`, `members`, `waiting`, `status`, `unread`, `cleared`. 25초마다 주석 줄.
   연결마다 이벤트를 64개까지 쌓고 넘으면 그 연결을 끊는다. 재생은 없다: 폰이 이어질 때 다시 읽는다).
 - 참여자 상태: 채팅에 참여한 터미널이 작업 중(`pty_working`)이면 `working`, 사용자를 기다리면(`pty_awaiting`) 그 종류
   (`permission`·`question`·`auth`·`dialog`·`blocked`). 같은 이름이 여럿이면 기다리는 쪽. 바뀔 때마다 SSE `status`. 터미널은
@@ -802,7 +806,14 @@ ddak 앱
   보이면 다시 잇는다 (실패하면 1·3·10초 뒤 다시). 채팅은 처음 열 때·다시 이어질 때·지웠을 때 최신 50개로 통째로 바꾸고
   (더 읽어 둔 이전 페이지는 버린다), 그 조회를 보낸 뒤 SSE로 온 메시지는 남긴다. 겹친 조회는 마지막 것만 쓴다. 최신 조회를 기다리는 동안은
   이전 페이지를 읽지 않고, 이전 페이지 응답은 그 사이 최신 조회를 시작하거나 적용했으면 버린다 (`src/mobile/sync.ts`). 맥의 API 버전을 모르면 목록·채팅 대신 업데이트 안내.
-  참여자 칩에 상태(작업 중, 권한 확인 대기 등)를, 프로젝트 목록에 기다리는 세션 수를 보인다.
+  참여자 칩에 상태(작업 중, 권한 확인 대기 등)를, 프로젝트 목록에 안 읽은 수와 기다리는 세션 수를 보인다. 채팅 화면이 보이고
+  맨 아래(최신)를 보고 있고, 마지막 최신 조회가 성공해 맥과 맞춘 상태일 때 받은 마지막 번호를 `POST …/read`로 알린다
+  (새 메시지, 다시 이어짐, 아래로 내려옴, 보내서 맨 아래로 옮겨짐 때. 보낸 번호 이하는 다시 보내지 않고, 실패하면 5초 뒤 다시 보낸다. `sync.ts`
+  `readTarget`·`ReadMark`).
+- 폰에서 프로젝트 열기: 프론트가 연(Workspace가 있는) 프로젝트를 `set_opened`로 알린다 (바뀌면 SSE `members`). 폰 목록은 열리지
+  않은 프로젝트를 "맥에서 열리지 않음"으로 보이고, 그 채팅에 "맥에서 열기"를 둔다. 누르면 Rust가 `mobile-open`(등록된 경로)으로
+  프론트에 알리고, 프론트는 보고 있는 프로젝트를 바꾸지 않고 그 프로젝트를 연다 (세션은 처음 열 때처럼 이어서 하기로 복원).
+- 폰 화면의 배경 없는 버튼(프로젝트 줄, 막대의 ‹·+)은 글자색을 `--fg`로 둔다 (밝은 테마의 `--button-fg`는 흰색).
 - 폰 알림 (`src/mobile/push.ts`, 서비스 워커 `src/mobile/public/sw.js`): VAPID 키 쌍은 폰이 만들어 폰 저장소에 둔다. 알림 권한이
   있으면 컴퓨터·프로젝트 목록을 열 때(화면이 다시 보일 때도) 저절로 구독하고, 맥마다 `/api/info`의 구독과 비교해 다르면 보낸다.
   맥이 끊김으로 알린 구독이면 키를 바꿔 새로 구독해 모든 맥에 보낸다. 권한이 없으면 "켜기"(누르면 권한 요청), 막혀 있으면 브라우저
@@ -816,7 +827,8 @@ ddak 앱
 - 배포: main에 들어간 `src/mobile` 등이 바뀌면 GitHub Actions(`.github/workflows/mobile-pages.yml`)가 Pages에 올린다.
 - 자체 테스트는 Tailscale 없이 정한 이름·로그인(`DDAK_MOBILE_IDENTITY`), OS가 고른 포트(`DDAK_MOBILE_PORT=0`), 시험 화면 주소
   (`DDAK_MOBILE_SCREEN`)로 띄우고, 폰 대신 `selftest_mobile_http`로 요청한다.
-- 아직 없는 것 (계획서 3단계): 안 읽은 수, 폰에서 프로젝트 열기, 잠자기 막기, 폰 알림 켜기·끄기 설정, 컴퓨터 이름 바꾸기.
+- 하지 않는 것 (3단계에서 정함): 모바일 연결 중 잠자기 막기 (작업 중 `caffeinate`로 충분했다). 폰 알림 켜기·끄기 설정과
+  컴퓨터 이름 바꾸기는 필요해지면 한다.
   폰에서 권한 확인에 답하기는 위 "선택 창 답하기"로 한다 (D3을 2026-10-27 사용자 결정으로 바꿈).
 
 ## 미결정 사항

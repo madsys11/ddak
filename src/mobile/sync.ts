@@ -15,9 +15,12 @@ export class MessageView {
   // 목록의 세대: 최신 조회를 시작하거나 적용할 때마다 오른다 (이전 페이지 응답이 그 사이 바뀐 목록에 붙지 않게)
   private gen = 0;
   private pending: Message[] | null = null;
+  // 마지막 최신 조회가 성공해 서버와 맞춘 상태 (그 뒤 SSE로 온 것도 빠짐없이 받았다). 조회를 시작하면 풀린다
+  private synced = false;
 
   // 최신 페이지를 읽기 시작한다. 돌려준 번호를 latest에 넘긴다.
   begin() {
+    this.synced = false;
     this.pending = [];
     this.gen++;
     return ++this.load;
@@ -36,7 +39,14 @@ export class MessageView {
     this.more = more;
     this.pending = null;
     this.gen++;
+    this.synced = true;
     return true;
+  }
+
+  // 읽음으로 알려도 되는 마지막 번호: 서버와 맞춘 상태일 때만 (3단계 리뷰 R1: 최신 조회가 성공하기 전 SSE 한 건으로 그 앞의
+  // 받지 못한 메시지까지 읽음이 됐다). 아니면 0
+  readable() {
+    return this.synced ? (this.messages.at(-1)?.id ?? 0) : 0;
   }
 
   // 최신 페이지 조회 실패. 마지막 조회일 때만 기다림을 푼다 (재리뷰 R6: 풀지 않으면 다음 조회가 성공할 때까지 이전 메시지를
@@ -55,6 +65,49 @@ export class MessageView {
     this.messages = merge(page, this.messages);
     this.more = more;
     return true;
+  }
+}
+
+// 읽음으로 알릴 번호: 화면이 보이고 맨 아래(최신)를 보고 있을 때만 (3단계 리뷰 R2: 위쪽을 읽는 동안 아래에 온 새 메시지까지
+// 읽음이 됐다). 0이면 알리지 않는다
+export function readTarget(view: MessageView, visible: boolean, atBottom: boolean) {
+  return visible && atBottom ? view.readable() : 0;
+}
+
+// 여기까지 읽었다고 맥에 알린다 (POST …/read). 보낸 것보다 뒤 번호만 보내고, 실패하면 retryMs 뒤 같은 번호로 다시 보낸다
+// (3단계 리뷰 R3: 실패를 숨기고 다시 보내지 않아 읽은 메시지의 배지가 남았다). 그 사이 더 뒤 번호를 보내면 그것만 남는다.
+export class ReadMark {
+  // 맥이 받은 번호, 보내는 중인 번호
+  private done = 0;
+  private sending = 0;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(
+    private send: (id: number) => Promise<unknown>,
+    private retryMs = 5000,
+  ) {}
+
+  mark(id: number) {
+    if (id <= Math.max(this.done, this.sending)) return;
+    clearTimeout(this.timer);
+    this.sending = id;
+    this.send(id).then(
+      () => {
+        this.done = Math.max(this.done, id);
+        if (this.sending === id) this.sending = 0;
+      },
+      () => {
+        if (this.sending !== id) return;
+        this.sending = 0;
+        this.timer = setTimeout(() => this.mark(id), this.retryMs);
+      },
+    );
+  }
+
+  // 화면을 떠남: 다시 보내기를 그만둔다
+  stop() {
+    clearTimeout(this.timer);
+    this.sending = Number.MAX_SAFE_INTEGER;
   }
 }
 
