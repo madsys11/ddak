@@ -262,8 +262,8 @@ mod tests {
         assert_eq!(inherit(&file, &origin, &dest), Outcome::Missing);
         std::fs::write(&file, r#"{"projects":[]}"#).unwrap();
         assert!(matches!(inherit(&file, &origin, &dest), Outcome::Failed(_)));
-        let o = origin.to_string_lossy();
-        let body = format!(r#"{{"projects":{{"{o}":{{"hasTrustDialogAccepted":true}}}}}}"#);
+        // Windows 경로의 `\`도 JSON에 맞게 (serde_json으로 적는다)
+        let body = serde_json::json!({ "projects": { origin.to_string_lossy(): { "hasTrustDialogAccepted": true } } }).to_string();
         std::fs::write(&file, &body).unwrap();
         std::fs::create_dir(dir.join("claude.json.lock")).unwrap();
         assert_eq!(inherit(&file, &origin, &dest), Outcome::Locked);
@@ -280,7 +280,8 @@ mod tests {
         std::fs::remove_dir(dir.join("real.json.lock")).unwrap();
         assert_eq!(inherit(&file, &origin, &dest), Outcome::Granted);
         assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink());
-        assert!(std::fs::read_to_string(&real).unwrap().contains(dest.to_string_lossy().as_ref()));
+        let written: Value = serde_json::from_str(&std::fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(written["projects"][dest.to_string_lossy().as_ref()]["hasTrustDialogAccepted"], Value::Bool(true));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

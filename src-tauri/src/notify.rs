@@ -480,7 +480,8 @@ mod tests {
         assert!(prepare_sound(&system, &dir, "Funk").is_err());
         assert!(prepare_sound(&system, &dir, "../Hero").is_err());
         std::fs::remove_dir_all(&base).unwrap();
-        // 실제 시스템 소리 폴더에 메뉴의 14개가 있다 (src/prefs.tsx NOTIFY_SOUNDS)
+        // 실제 시스템 소리 폴더에 메뉴의 14개가 있다 (src/prefs.tsx NOTIFY_SOUNDS). 소리 고르기는 맥에만 있다
+        #[cfg(target_os = "macos")]
         for name in ["Basso", "Blow", "Bottle", "Frog", "Funk", "Glass", "Hero", "Morse", "Ping", "Pop", "Purr", "Sosumi", "Submarine", "Tink"] {
             assert!(Path::new(SYSTEM_SOUNDS).join(format!("{name}.aiff")).exists(), "{name}");
         }

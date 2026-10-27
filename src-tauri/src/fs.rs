@@ -83,9 +83,15 @@ pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
 
 // Windows: MoveFileExW에 MOVEFILE_REPLACE_EXISTING을 주지 않으면 대상이 있을 때 실패한다 (std::fs::rename은 덮어쓴다).
 // 대소문자만 바꾸기는 같은 항목이라 된다.
+// 다만 대상이 같은 파일의 다른 이름(하드 링크)이면 MoveFileExW가 성공하고 원래 이름이 사라진다 (2026-10-28 CI).
+// 그래서 대소문자만 다른 이름이 아니면 대상이 있는지 먼저 본다. 확인 뒤에 생긴 대상은 MoveFileExW가 막는다.
 #[cfg(windows)]
 pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let lower = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    if lower(src) != lower(dest) && dest.symlink_metadata().is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
     let (from, to) = (wide(src), wide(dest));
     if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
         Ok(())

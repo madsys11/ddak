@@ -72,7 +72,7 @@ mod tests {
         assert_eq!(code(repo_link(p.clone(), s("repo"), "inner".into())), "exists");
 
         let made = repo_link(p.clone(), s("repo"), " linked ".into()).unwrap();
-        assert_eq!(std::fs::read_link(&made).unwrap(), std::fs::canonicalize(base.join("repo")).unwrap());
+        assert_eq!(std::fs::read_link(&made).unwrap(), crate::platform::canonical(base.join("repo")).unwrap());
         assert_eq!(code(repo_link(p, s("repo"), "linked".into())), "exists");
         std::fs::remove_dir_all(&base).unwrap();
     }

@@ -350,7 +350,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ddak-setup-word-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for name in ["my env", "env$(touch injected)", "it's", "a;touch injected", "`touch injected`"] {
-            let out = std::process::Command::new("/bin/sh")
+            let out = std::process::Command::new(crate::platform::sh().unwrap())
                 .arg("-c")
                 .arg(format!("printf '%s' {}", shell_word(name)))
                 .current_dir(&dir)
@@ -420,15 +420,17 @@ mod tests {
             ("web/packages/a/node_modules", "node"),
             ("web/target", "cargo"),
         ];
-        assert_eq!(got, want.map(|(path, kind)| Candidate { path: path.into(), kind }));
+        // node_modules·target 복제는 맥에서만 (CAN_CLONE)
+        let want: Vec<Candidate> = want.into_iter().filter(|(_, kind)| CAN_CLONE || !["node", "cargo"].contains(kind)).map(|(path, kind)| Candidate { path: path.into(), kind }).collect();
+        assert_eq!(got, want);
         let venvs: Vec<&str> = got.iter().filter(|c| c.kind == "venv").map(|c| c.path.as_str()).collect();
         let key = |s: &Suggestion| (s.dir.clone(), s.command.clone());
         let mut got = suggestions(&repos, &venvs);
         got.sort_by_key(key);
         let mut want: Vec<Suggestion> = [
             ("web", "npm ci"),
-            ("web", ".venv/bin/pip install -r requirements.txt"),
-            ("web/api", "env/bin/pip install -r requirements.txt"),
+            ("web", if cfg!(windows) { ".venv/Scripts/pip install -r requirements.txt" } else { ".venv/bin/pip install -r requirements.txt" }),
+            ("web/api", if cfg!(windows) { "env/Scripts/pip install -r requirements.txt" } else { "env/bin/pip install -r requirements.txt" }),
             ("web/tool", "uv sync --frozen"),
         ]
         .into_iter()

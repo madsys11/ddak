@@ -385,6 +385,11 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert_eq!(job.active(), Some(0));
+        // Job의 수가 먼저 줄고 프로세스 핸들은 그 뒤에 신호를 받는다 (pty.rs terminate는 그래서 wait로 기다린다)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         assert!(child.try_wait().unwrap().is_some());
     }
 

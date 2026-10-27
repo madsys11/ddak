@@ -459,8 +459,13 @@ mod tests {
         let evil = "x\u{1e}--output=README.md\u{1f}\u{1f}a\u{1f}0\u{1f}y\u{1e}";
         std::fs::write(tmp.join("msg"), evil).unwrap();
         std::fs::write(tmp.join("한글 파일.txt"), "a").unwrap();
-        std::fs::write(tmp.join("tab\tname.txt"), "b").unwrap();
-        sh(&tmp, &format!("git add '한글 파일.txt' 'tab\tname.txt' && git {ident} commit -q -F msg && rm msg"));
+        // Windows는 파일 이름에 탭을 못 쓴다
+        let tab = cfg!(unix).then_some("tab\tname.txt");
+        if let Some(name) = tab {
+            std::fs::write(tmp.join(name), "b").unwrap();
+        }
+        let tab_arg = tab.map(|name| format!(" '{name}'")).unwrap_or_default();
+        sh(&tmp, &format!("git add '한글 파일.txt'{tab_arg} && git {ident} commit -q -F msg && rm msg"));
         sh(&tmp, &format!("git {ident} tag -a inner -m inner HEAD~1 && git {ident} -c advice.nestedTag=false tag -a outer -m outer inner && git tag treetag 'HEAD^{{tree}}'"));
 
         let g = graph(&tmp, 100, &[]).unwrap();
@@ -475,7 +480,7 @@ mod tests {
         let d = detail(&tmp, &g.commits[0].sha).unwrap();
         let mut files: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).collect();
         files.sort();
-        assert_eq!(files, ["tab\tname.txt", "한글 파일.txt"]);
+        assert_eq!(files, tab.into_iter().chain(["한글 파일.txt"]).collect::<Vec<_>>());
         assert_eq!(d.message, evil.trim_end());
         let _ = std::fs::remove_dir_all(&tmp);
     }

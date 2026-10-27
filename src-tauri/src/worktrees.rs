@@ -581,7 +581,7 @@ mod tests {
     use super::*;
 
     fn sh(dir: &Path, cmd: &str) {
-        let ok = Command::new("/bin/sh").arg("-c").arg(cmd).current_dir(dir).status().unwrap().success();
+        let ok = Command::new(crate::platform::sh().unwrap()).arg("-c").arg(cmd).current_dir(dir).status().unwrap().success();
         assert!(ok, "{cmd}");
     }
     const INIT: &str = "git init -q && git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init";
