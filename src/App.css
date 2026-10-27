@@ -1329,3 +1329,96 @@ body.resizing {
 .mobile-device-name {
   font-weight: 600;
 }
+
+/* 문서 탭 (DocView.tsx): 마크다운을 읽기 전용으로 */
+.doc-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--terminal-bg);
+}
+.doc-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+.doc-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc-open {
+  font: inherit;
+  font-size: 12px;
+}
+.doc-error {
+  padding: 8px 16px;
+  color: var(--error);
+}
+.doc-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 24px 32px;
+  color: var(--fg);
+  line-height: 1.6;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.doc-body > :first-child {
+  margin-top: 0;
+}
+.doc-body h1,
+.doc-body h2 {
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+.doc-body a {
+  color: var(--accent);
+  cursor: pointer;
+}
+.doc-body code {
+  font-family: Menlo, monospace;
+  font-size: 0.9em;
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--widget-bg);
+}
+.doc-body pre {
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--widget-bg);
+}
+.doc-body pre code {
+  padding: 0;
+  background: none;
+}
+.doc-body table {
+  border-collapse: collapse;
+}
+.doc-body th,
+.doc-body td {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+}
+.doc-body blockquote {
+  margin-left: 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border);
+  color: var(--fg-dim);
+}
+.doc-body img {
+  max-width: 100%;
+}
+.doc-body .doc-task-item {
+  list-style: none;
+}
+.doc-body .doc-task {
+  margin: 0 0.4em 0 -1.3em;
+}

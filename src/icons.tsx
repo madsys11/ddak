@@ -66,6 +66,14 @@ export const GitIcon = () => (
   </Svg>
 );
 
+// 문서 탭 (마크다운, src/DocView.tsx): 접힌 귀퉁이가 있는 종이
+export const DocIcon = () => (
+  <Svg className="icon-tool">
+    <path d="M4 2.75h5l3 3v7.5H4z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    <path d="M9 2.75v3h3M5.75 8.5h4.5M5.75 10.75h4.5" fill="none" stroke="currentColor" strokeWidth="1.3" />
+  </Svg>
+);
+
 // 탭 바 버튼: 채팅방 (말풍선)
 export const ChatIcon = () => (
   <Svg className="icon-tool">

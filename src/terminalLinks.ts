@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { IBufferRange, ILink, ILinkHandler, ILinkProvider, Terminal as XTerm } from "@xterm/xterm";
+import { isDocPath, requestOpenDoc } from "./docs";
 
-// 터미널 링크: 화면 글자의 URL과 파일 경로를 ⌘+클릭하면 기본 앱으로 연다 (src-tauri/src/links.rs open_link).
+// 터미널 링크: 화면 글자의 URL과 파일 경로를 ⌘+클릭하면 기본 앱으로 연다 (src-tauri/src/links.rs open_link). 마크다운은 문서 탭.
 // claude는 ddak 안에서 경로·URL을 OSC 8 없이 평문으로 그린다 (claude 2.1.310로 실험, 2026-10-26). 그래서 글자에서 찾는다.
 // 파일 경로는 실제로 있는 것만 링크로 보인다 (link_targets: 상대 경로는 앞에서 도는 프로그램의 현재 폴더, 없으면 창을 띄운 폴더).
 // 그냥 클릭은 창 고르기·선택에 쓰고, 여는 것은 ⌘+클릭 (macOS 터미널들과 같음). 올리면 안내가 뜬다.
@@ -117,6 +118,29 @@ const range = (cells: Cell[], start: number, end: number): IBufferRange => {
 
 export const openLink = (target: string) => invoke("open_link", { target }).catch(() => {});
 
+// ⌘+클릭: 마크다운 파일은 앱 안 문서 탭으로 (보고 있는 프로젝트, src/docs.ts), 나머지는 기본 앱으로.
+// OSC 8의 file:// 주소도 경로로 본다. 호스트가 있으면 (localhost 말고) 다른 컴퓨터의 파일이라 문서 탭으로 열지 않는다
+// (리뷰 R3. open_link의 Url::to_file_path도 거절한다)
+export function docPathOf(target: string): string | null {
+  let path = target;
+  if (/^file:\/\//i.test(target)) {
+    try {
+      const url = new URL(target);
+      if (url.hostname && url.hostname !== "localhost") return null;
+      path = decodeURIComponent(url.pathname);
+    } catch {
+      return null;
+    }
+  }
+  return isDocPath(path) ? path : null;
+}
+
+function activate(target: string) {
+  const path = docPathOf(target);
+  if (path) requestOpenDoc({ path });
+  else openLink(target);
+}
+
 type Context = { id: () => number | undefined; cwd: () => string; hint: () => string };
 
 // 링크 위에 올리면 터미널 요소의 title로 안내 (⌘+클릭으로 열기)
@@ -157,7 +181,7 @@ export function linkProvider(term: XTerm, ctx: Context): ILinkProvider {
             range: r,
             text: f.text.slice(f.start, f.end),
             decorations: { underline: true, pointerCursor: true },
-            activate: (e) => e.metaKey && openLink(target),
+            activate: (e) => e.metaKey && activate(target),
             ...hover(term, ctx),
           });
         }
@@ -177,5 +201,5 @@ export function linkProvider(term: XTerm, ctx: Context): ILinkProvider {
 // OSC 8 링크 처리 (Terminal 옵션 linkHandler)
 export function oscLinkHandler(term: XTerm, ctx: Context): ILinkHandler {
   const h = hover(term, ctx);
-  return { allowNonHttpProtocols: true, activate: (e, uri) => e.metaKey && openLink(uri), hover: h.hover, leave: h.leave };
+  return { allowNonHttpProtocols: true, activate: (e, uri) => e.metaKey && activate(uri), hover: h.hover, leave: h.leave };
 }

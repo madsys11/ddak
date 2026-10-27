@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AddRepoDialog } from "./AddRepoDialog";
 import { SetupDialog } from "./SetupDialog";
 import { ContextMenu, type MenuItem, type MenuState } from "./ContextMenu";
-import { Children, TreeContext, Twisty, indent, useFolderMenu, useOpenWhenCreating, useTree } from "./FileTree";
+import { Children, ProjectContext, TreeContext, Twisty, indent, useFolderMenu, useOpenWhenCreating, useTree } from "./FileTree";
 import { ProjectIcon } from "./icons";
 import { PANEL_SIZES, usePrefs, useT } from "./prefs";
 import { Resizer } from "./Resizer";
@@ -188,7 +188,11 @@ function ProjectNode({ project, active, treeRoot, unread, onActivate, onRemove, 
       </div>
       {/* key: 루트가 바뀌면 새로 그린다. 같은 컴포넌트를 쓰면 새 목록이 올 때까지 이전 폴더의 항목이 남아서,
           작업그룹으로 바꾼 뒤에도 그 항목으로 원본 파일을 바꿀 수 있었다 (리뷰 지적 2). */}
-      {open && !missing && <Children key={shown} path={shown} depth={1} />}
+      {open && !missing && (
+        <ProjectContext.Provider value={path}>
+          <Children key={shown} path={shown} depth={1} />
+        </ProjectContext.Provider>
+      )}
     </>
   );
 }

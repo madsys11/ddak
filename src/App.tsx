@@ -10,6 +10,7 @@ import { StoreBroken, baseName, useProjects } from "./useProjects";
 import { useGroups } from "./useGroups";
 import type { MessageKey } from "./i18n";
 import { devHooks } from "./devHooks";
+import { onOpenDoc } from "./docs";
 import { projectForClick } from "./notifyClick";
 import { useT } from "./prefs";
 import "./App.css";
@@ -88,6 +89,21 @@ function App() {
       unlisten.then((f) => f());
     };
   }, [activate]);
+
+  // 문서 탭 열기 (src/docs.ts requestOpenDoc): 그 프로젝트로 가서 (없으면 보고 있는 프로젝트) 그 Workspace가 연다
+  const [docRequest, setDocRequest] = useState<{ project: string; path: string; anchor?: string; n: number } | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(
+    () =>
+      onOpenDoc(({ path, project, anchor }) => {
+        const target = project || activeRef.current;
+        if (!target) return;
+        activate(target);
+        setDocRequest((r) => ({ project: target, path, anchor, n: (r?.n ?? 0) + 1 }));
+      }),
+    [activate],
+  );
 
   // 앱 메뉴 "모바일 연결…" (src-tauri/src/menu.rs)
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -170,6 +186,7 @@ function App() {
                 chatOpen={!!chatOpen[path]}
                 chatUnread={!!chatUnread[path]}
                 onToggleChat={() => setChatOpen((o) => ({ ...o, [path]: !o[path] }))}
+                docRequest={docRequest?.project === path ? docRequest : null}
               />
               <ChatPanel
                 project={path}

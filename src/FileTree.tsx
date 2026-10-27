@@ -2,10 +2,12 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { MenuItem } from "./ContextMenu";
 import { devHooks } from "./devHooks";
+import { isDocPath, requestOpenDoc } from "./docs";
 import { setDraggedPath } from "./dragPath";
 import { codeError } from "./errors";
 import { ChevronIcon, RepoIcon, WorktreeIcon } from "./icons";
 import { useT } from "./prefs";
+import { openLink } from "./terminalLinks";
 import { watchDir } from "./watchDir";
 
 type Entry = { name: string; path: string; is_dir: boolean; git: "repo" | "worktree" | null; link: string | null };
@@ -23,6 +25,8 @@ type Tree = {
 };
 export const TreeContext = createContext<Tree | null>(null);
 export const useTree = () => useContext(TreeContext)!;
+// 이 트리가 든 프로젝트 (문서 탭을 그 프로젝트에서 연다, Sidebar가 프로젝트마다 둔다)
+export const ProjectContext = createContext("");
 
 // 폴더에 대한 메뉴 항목. 파일을 오른쪽 클릭하면 그 파일이 든 폴더에 만든다 (VS Code와 같음).
 export function useFolderMenu() {
@@ -166,8 +170,13 @@ function Node({ entry, dir, depth, root }: { entry: Entry; dir: string; depth: n
   const t = useT();
   const tree = useTree();
   const folderMenu = useFolderMenu();
+  const project = useContext(ProjectContext);
   const [open, setOpen] = useState(false);
   const [trashError, setTrashError] = useState<string | null>(null);
+  // 마크다운 파일은 앱 안 문서 탭으로 (더블클릭·메뉴), 파일은 기본 앱으로도 열 수 있다
+  const doc = !entry.is_dir && isDocPath(entry.path);
+  const openDoc = () => requestOpenDoc({ path: entry.path, project });
+  const fileItems: MenuItem[] = entry.is_dir ? [] : [...(doc ? [{ label: t("doc.open"), action: openDoc }] : []), { label: t("doc.openDefault"), action: () => openLink(entry.path) }, "separator"];
   useOpenWhenCreating(entry.path, setOpen);
   // 휴지통으로 (확인을 받고. 되살릴 수 있다). 목록은 폴더 감시로 바뀐다.
   async function trash() {
@@ -184,11 +193,13 @@ function Node({ entry, dir, depth, root }: { entry: Entry; dir: string; depth: n
         className="tree-row"
         style={{ paddingLeft: indent(depth) }}
         onClick={() => entry.is_dir && setOpen(!open)}
+        onDoubleClick={() => doc && openDoc()}
         // 터미널이나 채팅 입력란에 끌어다 놓으면 경로가 들어간다 (Terminal.tsx, ChatPanel.tsx)
         draggable={tree.renaming !== entry.path}
         onDragStart={(e) => setDraggedPath(e.dataTransfer, entry.path, root)}
         onContextMenu={(e) =>
           tree.openMenu(e, [
+            ...fileItems,
             ...folderMenu(entry.is_dir ? entry.path : dir),
             "separator",
             { label: t("tree.rename"), action: () => tree.startRename(entry.path) },

@@ -171,9 +171,68 @@ pub fn list_dir(path: String) -> Result<Vec<Entry>, String> {
     Ok(entries)
 }
 
+// 문서 탭이 읽는 글 파일의 크기 한도 (마크다운 보기, src/DocView.tsx). 넘으면 tooLarge
+const TEXT_LIMIT: u64 = 5 << 20;
+// 문서 안 그림의 크기 한도
+const IMAGE_LIMIT: u64 = 20 << 20;
+
+// 한도 안이면 파일 내용. 없으면 missing, 크면 tooLarge, 나머지는 io
+fn read_limited(path: &str, limit: u64) -> Result<Vec<u8>, CodeError> {
+    let meta = std::fs::metadata(path).map_err(|e| code_err(if e.kind() == std::io::ErrorKind::NotFound { "missing" } else { "io" }, e))?;
+    if !meta.is_file() {
+        return Err(code_err("io", format!("not a file: {path}")));
+    }
+    if meta.len() > limit {
+        return Err(code_err("tooLarge", meta.len()));
+    }
+    std::fs::read(path).map_err(|e| code_err("io", e))
+}
+
+// 문서 탭: 글 파일 내용 (UTF-8이 아닌 바이트는 바꿔 넣는다)
+#[tauri::command]
+pub fn fs_read_text(path: String) -> Result<String, CodeError> {
+    Ok(String::from_utf8_lossy(&read_limited(&path, TEXT_LIMIT)?).into_owned())
+}
+
+// 문서 안 그림: data: 주소 (웹뷰가 로컬 파일을 직접 읽지 않게. 확장자로 정한 그림 형식만)
+#[tauri::command]
+pub fn fs_read_image(path: String) -> Result<String, CodeError> {
+    use base64::Engine;
+    let ext = Path::new(&path).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => return Err(code_err("notImage", path)),
+    };
+    let data = read_limited(&path, IMAGE_LIMIT)?;
+    Ok(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(data)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_documents_and_images_within_limits() {
+        let dir = std::env::temp_dir().join(format!("ddak-fs-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = |n: &str| dir.join(n).to_string_lossy().into_owned();
+        std::fs::write(dir.join("a.md"), b"# hi \xff").unwrap();
+        assert_eq!(fs_read_text(p("a.md")).unwrap(), "# hi \u{FFFD}");
+        assert_eq!(fs_read_text(p("none.md")).unwrap_err().code, "missing");
+        assert_eq!(fs_read_text(dir.to_string_lossy().into_owned()).unwrap_err().code, "io");
+        std::fs::File::create(dir.join("big.md")).unwrap().set_len(TEXT_LIMIT + 1).unwrap();
+        assert_eq!(fs_read_text(p("big.md")).unwrap_err().code, "tooLarge");
+        std::fs::write(dir.join("i.PNG"), [1u8, 2, 3]).unwrap();
+        assert_eq!(fs_read_image(p("i.PNG")).unwrap(), "data:image/png;base64,AQID");
+        std::fs::write(dir.join("i.txt"), "x").unwrap();
+        assert_eq!(fs_read_image(p("i.txt")).unwrap_err().code, "notImage");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn dirs_first_case_insensitive_and_hidden_skipped() {

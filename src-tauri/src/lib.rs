@@ -74,6 +74,8 @@ pub fn run() {
             fs::fs_create,
             fs::fs_rename,
             fs::fs_trash,
+            fs::fs_read_text,
+            fs::fs_read_image,
             groups::groups_load,
             groups::groups_dir,
             watch::fs_watch,

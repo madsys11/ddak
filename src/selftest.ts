@@ -11,7 +11,8 @@ import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, type Dialog } from "./programStatus";
-import { findLinks, linkProvider } from "./terminalLinks";
+import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
+import { renderMarkdown } from "./docs";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
 import { MessageView } from "./mobile/sync";
@@ -1774,6 +1775,9 @@ function testWorkspaceStateUnit() {
   const gitTab = (git: unknown) => JSON.stringify({ version: 1, active: 1, tabs: [{ id: 1, layout: { pane: 2 }, focus: 2, cwd: "/x", git }], sessions: {} });
   check("복원 상태: Git Graph 탭과 고른 저장소를 읽음", fromSaved(gitTab({ repo: "server" }), "/x")?.tabs[0].git?.repo === "server");
   check("복원 상태: Git Graph 탭 모양이 틀리면 거부", fromSaved(gitTab({ repo: 3 }), "/x") === null);
+  const docTab = (doc: unknown) => JSON.stringify({ version: 1, active: 1, tabs: [{ id: 1, layout: { pane: 2 }, focus: 2, cwd: "/x", doc }], sessions: {} });
+  check("복원 상태: 문서 탭과 그 파일을 읽음", fromSaved(docTab({ path: "/x/README.md" }), "/x")?.tabs[0].doc?.path === "/x/README.md");
+  check("복원 상태: 문서 탭 모양이 틀리면 거부", fromSaved(docTab({}), "/x") === null && fromSaved(docTab("/x/a.md"), "/x") === null);
 }
 
 // 터미널 자동 응답 판별 (깨우기의 사용자 입력에서 뺀다, src/Terminal.tsx isTerminalReply)
@@ -2139,9 +2143,9 @@ async function testTerminalLinkWrap(root: string, shell: Terminal) {
 // 상대 경로는 셸이 cd 한 폴더 기준 (창을 띄운 폴더에는 없는 파일), 없는 파일은 링크가 아님, 실행될 수 있는 것은 Finder에서 보이기만
 async function testTerminalLinks(root: string, term: Terminal) {
   const dir = `${root}/lk`;
-  await run(term, `mkdir -p "${dir}/sub" "${dir}/repo/.git" "${dir}/repo/docs" && printf x > "${dir}/report.html" && printf x > "${dir}/sub/notes.md" && printf x > "${dir}/run.sh" && printf x > "${dir}/repo/docs/guide.md" && cd "${dir}"`);
+  await run(term, `mkdir -p "${dir}/sub" "${dir}/repo/.git" "${dir}/repo/docs" && printf x > "${dir}/report.html" && printf x > "${dir}/sub/notes.txt" && printf x > "${dir}/run.sh" && printf x > "${dir}/repo/docs/guide.txt" && cd "${dir}"`);
   await invoke("selftest_opened_links");
-  await run(term, String.raw`printf '%s %s %s %s %s %s\n' 'LK report.html에' sub/notes.md:12 https://example.com/a. missing.md run.sh docs/guide.md`);
+  await run(term, String.raw`printf '%s %s %s %s %s %s\n' 'LK report.html에' sub/notes.txt:12 https://example.com/a. missing.md run.sh docs/guide.txt`);
   const buf = term.buffer.active;
   let row = -1;
   for (let y = buf.length - 1; y >= 0 && row < 0; y--) if (buf.getLine(y)?.translateToString(true).startsWith("LK report")) row = y;
@@ -2179,7 +2183,7 @@ async function testTerminalLinks(root: string, term: Terminal) {
     return invoke<[string, string][]>("selftest_opened_links");
   };
   const results: Record<string, unknown> = {};
-  for (const text of ["report.html", "sub/notes.md", "https://example.com", "run.sh", "docs/guide.md"]) {
+  for (const text of ["report.html", "sub/notes.txt", "https://example.com", "run.sh", "docs/guide.txt"]) {
     const shown = await hovered(text);
     const plain = await click(text, false);
     const opened = await click(text, true);
@@ -2193,12 +2197,151 @@ async function testTerminalLinks(root: string, term: Terminal) {
   };
   check(
     "터미널 링크: 올리면 안내, ⌘+클릭으로 연다 (그냥 클릭은 아님). 상대 경로는 셸의 현재 폴더 기준, 조사·줄 번호·마침표는 뺌",
-    one("report.html", "open", "/lk/report.html") && one("sub/notes.md", "open", "/lk/sub/notes.md") && opened("https://example.com")[0]?.[1] === "https://example.com/a" && one("https://example.com", "url", "/a"),
+    one("report.html", "open", "/lk/report.html") && one("sub/notes.txt", "open", "/lk/sub/notes.txt") && opened("https://example.com")[0]?.[1] === "https://example.com/a" && one("https://example.com", "url", "/a"),
     JSON.stringify(results),
   );
   check("터미널 링크: 실행될 수 있는 파일은 열지 않고 Finder에서 보이기, 없는 파일은 링크 아님", one("run.sh", "reveal", "/lk/run.sh") && !missingShown, JSON.stringify({ run: results["run.sh"], missingShown }));
-  check("터미널 링크: 그 폴더에 없는 상대 경로는 바로 아래 git 저장소에서 찾음", one("docs/guide.md", "open", "/lk/repo/docs/guide.md"), JSON.stringify(results["docs/guide.md"]));
+  check("터미널 링크: 그 폴더에 없는 상대 경로는 바로 아래 git 저장소에서 찾음", one("docs/guide.txt", "open", "/lk/repo/docs/guide.txt"), JSON.stringify(results["docs/guide.txt"]));
   mouse("mousemove", term.cols - 1);
+  await run(term, `cd "${root}" && rm -rf "${dir}"`);
+}
+
+// 문서 탭 (src/DocView.tsx, src/docs.ts): 터미널의 .md를 ⌘+클릭하거나 파일 트리에서 더블클릭하면 앱 안 탭으로 읽기 전용으로 본다.
+// 문서의 HTML은 글자로, 체크박스·표·제목 앵커, 로컬 그림은 data: 주소로, 웹 그림은 링크로. 링크는 웹은 브라우저, 다른 문서는
+// 문서 탭. 같은 파일은 한 탭. 파일이 바뀌면 다시 그린다
+async function testDocView(root: string, term: Terminal) {
+  const dir = `${root}/dv`;
+  const lines = [
+    "# Doc Title",
+    "- [ ] todo",
+    "- [x] done",
+    "",
+    "| a | b |",
+    "|---|---|",
+    "| 1 | 2 |",
+    "",
+    "<script>window.__docScript = 1</script>",
+    "",
+    "[next](docs-b.md) [web](https://example.com/doc) [jump](#second-part) [detail](docs-b.md#detail-part)",
+    "",
+    "![pic](pic.png) ![remote](https://example.com/x.png)",
+    "",
+    "## Second Part",
+  ];
+  // 1×1 PNG
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  await run(term, `mkdir -p "${dir}" && cd "${dir}" && printf '%s\\n' ${lines.map((l) => `'${l}'`).join(" ")} > docs-a.md && { printf '# B\\n'; seq 1 200 | sed 's/^/filler /;s/$/\\n/'; printf '## Detail Part\\n'; seq 1 200 | sed 's/^/after /;s/$/\\n/'; } > docs-b.md && printf '%s' '${png}' | base64 -D > pic.png`);
+  const ws = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const startTab = activeTabEl()!.dataset.tab;
+  const tabs = () => tabCount();
+  const before = tabs();
+  const view = (name: string) => [...ws().querySelectorAll<HTMLElement>(".doc-view")].find((v) => v.dataset.doc?.endsWith(`/${name}`) && v.offsetParent !== null);
+  const activeTitle = () => activeTabEl()?.querySelector(".tab-title")?.textContent;
+
+  // 터미널에서 ⌘+클릭: 기본 앱이 아니라 문서 탭
+  await invoke("selftest_opened_links");
+  await run(term, `printf 'DOCLK %s\\n' docs-a.md`);
+  const buf = term.buffer.active;
+  let row = -1;
+  for (let y = buf.length - 1; y >= 0 && row < 0; y--) if (buf.getLine(y)?.translateToString(true).startsWith("DOCLK docs-a.md")) row = y;
+  const screenEl = term.element!.querySelector<HTMLElement>(".xterm-screen")!;
+  const mouse = (type: string, x: number, meta = false) => {
+    const r = screenEl.getBoundingClientRect();
+    const [w, h] = [r.width / term.cols, r.height / term.rows];
+    screenEl.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, metaKey: meta, clientX: r.left + (x + 0.5) * w, clientY: r.top + (row - buf.viewportY + 0.5) * h }));
+  };
+  mouse("mousemove", term.cols - 1);
+  await sleep(100);
+  mouse("mousemove", 8);
+  await waitFor("링크 안내", () => term.element!.getAttribute("title") === "⌘-click to open", 2000).catch(() => null);
+  for (const type of ["mousedown", "mouseup", "click"]) mouse(type, 8, true);
+  const a = await waitFor("문서 탭", () => view("docs-a.md")?.querySelector("h1"), 5000).catch(() => null);
+  const external = await invoke<[string, string][]>("selftest_opened_links");
+  check("문서 탭: 터미널의 .md를 ⌘+클릭하면 기본 앱이 아니라 앱 안 문서 탭", !!a && tabs() === before + 1 && activeTitle() === "docs-a.md" && external.length === 0, `${a?.textContent} ${tabs()}/${before} ${activeTitle()} ${JSON.stringify(external)}`);
+
+  // 만든 HTML에 그림의 바깥·로컬 주소가 없다 (화면에 넣는 순간 요청이 나가므로, 리뷰 R1). 다른 컴퓨터의 file:// 은 문서 탭 아님 (R3)
+  const made = renderMarkdown("![r](https://example.com/b.png?x) ![l](pic.png) ![d](data:image/png;base64,AA==)", (n) => `[${n}]`);
+  check(
+    "문서 탭: 그림은 만든 HTML에 바깥·로컬 주소 없이 (웹은 링크 글자, 로컬은 data-src, data:만 src), 다른 컴퓨터의 file:// 은 문서 탭 아님",
+    !/[^-]src="(?!data:)/.test(made) && made.includes('<a href="https://example.com/b.png?x">[r]</a>') && made.includes('data-src="pic.png"') && made.includes('src="data:image/png;base64,AA=="') &&
+      docPathOf("file:///p/a.md") === "/p/a.md" && docPathOf("file://localhost/p/a%20b.md") === "/p/a b.md" && docPathOf("file://other/p/a.md") === null && docPathOf("/p/a.txt") === null && docPathOf("/p/A.MD") === "/p/A.MD",
+    `${made} | ${JSON.stringify(["file:///p/a.md", "file://localhost/p/a%20b.md", "file://other/p/a.md", "/p/a.txt", "/p/A.MD"].map(docPathOf))}`,
+  );
+  const v = view("docs-a.md")!;
+  const body = v.querySelector<HTMLElement>(".doc-body")!;
+  const boxes = [...body.querySelectorAll<HTMLInputElement>("input.doc-task")];
+  check(
+    "문서 탭: 제목 앵커·체크박스(읽기 전용)·표를 그리고, 문서의 HTML은 실행하지 않고 글자로",
+    body.querySelector("h1")?.id === "doc-title" && body.querySelector("h2")?.id === "second-part" && boxes.length === 2 && boxes.every((b) => b.disabled) && !boxes[0].checked && boxes[1].checked &&
+      body.querySelectorAll("td").length === 2 && !body.querySelector("script") && body.textContent!.includes("<script>window.__docScript = 1</script>") && !(window as unknown as { __docScript?: number }).__docScript,
+    body.innerHTML.slice(0, 400),
+  );
+  const pic = await waitFor("로컬 그림", () => body.querySelector<HTMLImageElement>("img[alt=pic]")?.naturalWidth === 1 && body.querySelector<HTMLImageElement>("img[alt=pic]"), 3000).catch(() => null);
+  const webImage = [...body.querySelectorAll("a")].find((el) => el.textContent === "[Image: remote]");
+  check(
+    "문서 탭: 로컬 그림은 data: 주소로 보이고, 웹 그림은 불러오지 않고 링크로",
+    !!pic?.src.startsWith("data:image/png;base64,") && !!webImage && webImage.getAttribute("href") === "https://example.com/x.png" && !body.querySelector("img[src^='http']"),
+    `${pic?.src.slice(0, 30)} ${webImage?.outerHTML} ${body.querySelectorAll("img").length}`,
+  );
+
+  // 링크: 웹은 브라우저 (앱 화면은 그대로), #은 이 문서 안, 다른 문서는 문서 탭
+  const link = (text: string) => [...body.querySelectorAll<HTMLElement>("a")].find((el) => el.textContent === text)!;
+  const href = location.href;
+  link("web").click();
+  link("jump").click();
+  await sleep(200);
+  const web = await invoke<[string, string][]>("selftest_opened_links");
+  link("next").click();
+  const b = await waitFor("다른 문서 탭", () => view("docs-b.md")?.querySelector("h1"), 5000).catch(() => null);
+  check(
+    "문서 탭: 웹 링크는 브라우저로, #제목은 문서 안에서, 다른 .md는 문서 탭으로 (앱 화면은 떠나지 않음)",
+    JSON.stringify(web) === JSON.stringify([["url", "https://example.com/doc"]]) && location.href === href && b?.textContent === "B" && activeTitle() === "docs-b.md" && tabs() === before + 2,
+    `${JSON.stringify(web)} ${location.href === href} ${b?.textContent} ${activeTitle()} ${tabs()}`,
+  );
+
+  // 다른 문서의 #제목 링크: 그 문서 탭을 열고 그 제목으로 (리뷰 R2)
+  const backToA = [...ws().querySelectorAll<HTMLElement>(".tab")].find((el) => el.querySelector(".tab-title")?.textContent === "docs-a.md");
+  backToA?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  await waitFor("a 탭", () => activeTitle() === "docs-a.md", 2000).catch(() => null);
+  link("detail").click();
+  const bBody = () => view("docs-b.md")?.querySelector<HTMLElement>(".doc-body");
+  const scrolled = await waitFor("제목으로", () => activeTitle() === "docs-b.md" && (bBody()?.scrollTop ?? 0) > 0, 3000).then(() => true, () => false);
+  const heading = bBody()?.querySelector("#detail-part")?.getBoundingClientRect().top ?? -1;
+  const top = bBody()?.getBoundingClientRect().top ?? 0;
+  check("문서 탭: 다른 문서의 #제목 링크는 그 문서를 열고 그 제목으로", scrolled && Math.abs(heading - top) < 40, `${scrolled} ${activeTitle()} ${bBody()?.scrollTop} ${heading - top}`);
+  backToA?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  await waitFor("a 탭", () => activeTitle() === "docs-a.md", 2000).catch(() => null);
+
+  // 파일 트리에서 더블클릭: 이미 열린 파일은 그 탭으로 (새 탭 없음)
+  const dvRow = await waitFor("트리의 폴더", () => fileRow("dv"), 5000).catch(() => null);
+  dvRow?.click();
+  const treeRow = await waitFor("트리의 문서", () => fileRow("docs-a.md"), 5000).catch(() => null);
+  treeRow?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  await waitFor("그 탭으로", () => activeTitle() === "docs-a.md", 3000).catch(() => null);
+  check("문서 탭: 파일 트리에서 더블클릭하면 열고, 이미 열린 파일은 그 탭으로", !!treeRow && activeTitle() === "docs-a.md" && tabs() === before + 2, `${!!treeRow} ${activeTitle()} ${tabs()}`);
+
+  // 파일이 바뀌면 다시 그린다
+  await run(term, `printf 'UPDATED_LINE\\n' >> "${dir}/docs-a.md"`);
+  const updated = await waitFor("다시 그림", () => view("docs-a.md")?.querySelector(".doc-body")?.textContent?.includes("UPDATED_LINE"), 5000).then(() => true, () => false);
+  check("문서 탭: 파일이 바뀌면 다시 그림", updated);
+
+  // 오른쪽 클릭 메뉴의 미리 보기 (다른 탭에 있다가 고르면 그 탭으로)
+  ws().querySelector<HTMLElement>(`.tab[data-tab="${startTab}"]`)?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  rightClick(fileRow("docs-b.md")!);
+  await waitFor("메뉴", contextMenu);
+  const docMenu = menuLabels().join(",");
+  await pickMenu("Open Preview");
+  await waitFor("메뉴로 연 탭", () => activeTitle() === "docs-b.md", 3000).catch(() => null);
+  check("문서 탭: 트리 메뉴에 미리 보기·기본 앱으로 열기, 미리 보기는 문서 탭으로", docMenu.startsWith("Open Preview,Open in Default App,-,") && activeTitle() === "docs-b.md" && tabs() === before + 2, `${docMenu} ${activeTitle()} ${tabs()}`);
+
+  // 정리: 문서 탭을 닫고 처음 탭으로
+  for (const name of ["docs-a.md", "docs-b.md"]) {
+    const tab = [...ws().querySelectorAll<HTMLElement>(".tab")].find((el) => el.querySelector(".tab-title")?.textContent === name);
+    tab?.querySelector<HTMLElement>(".tab-close")?.click();
+  }
+  await waitFor("문서 탭 닫힘", () => tabs() === before, 3000).catch(() => null);
+  ws().querySelector<HTMLElement>(`.tab[data-tab="${startTab}"]`)?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  fileRow("dv")?.click();
   await run(term, `cd "${root}" && rm -rf "${dir}"`);
 }
 
@@ -2422,7 +2565,8 @@ async function testRename(root: string, term: Terminal) {
 
   rightClick(fileRow("a.txt")!);
   await waitFor("메뉴", contextMenu);
-  check("이름 바꾸기: 파일 메뉴에 항목", menuLabels().join(",") === "New File…,New Folder…,-,Rename…,Move to Trash", menuLabels().join(","));
+  // 파일은 기본 앱으로 열기가 맨 위 (마크다운이면 그 위에 미리 보기, docView)
+  check("이름 바꾸기: 파일 메뉴에 항목", menuLabels().join(",") === "Open in Default App,-,New File…,New Folder…,-,Rename…,Move to Trash", menuLabels().join(","));
   await pickMenu("Rename…");
   const a = await waitFor("이름 입력란", input);
   check("이름 바꾸기: 그 자리에 입력란, 포커스, 확장자 앞까지 선택", document.activeElement === a && a.value === "a.txt" && a.selectionStart === 0 && a.selectionEnd === 1, `${a.value} ${a.selectionStart}-${a.selectionEnd}`);
@@ -4172,6 +4316,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["statusContrastUnit", testStatusContrastUnit],
     ["terminalLinkWrap", () => testTerminalLinkWrap(root, t())],
     ["terminalLinks", () => testTerminalLinks(root, t())],
+    ["docView", () => testDocView(root, t())],
     ["programStatusUnit", testProgramStatusUnit],
     ["promptAnswerUnit", () => testPromptAnswerUnit()],
     ["notifyClickUnit", testNotifyClickUnit],

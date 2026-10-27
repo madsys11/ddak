@@ -6,8 +6,12 @@ import type { Session } from "./useGroups";
 // 둘 다 없으면 터미널 제목을 쓴다. name: 사용자가 바꾼 탭 이름 (탭 제목만 바뀌고 worktree·브랜치 이름은 그대로).
 // setup: 작업그룹 준비 스크립트가 있는 탭이면 그 상태.
 // git: Git Graph 탭 (프로젝트마다 하나, src/GitGraph.tsx). repo: 고른 저장소 이름. 터미널이 없고 layout은 자리용 창 하나.
-export type Tab = { id: number; layout: Layout; focus: number; cwd: string; group?: string; worktree?: string; name?: string; setup?: Setup; git?: GitTab };
+// doc: 문서 탭 (마크다운 파일 하나, src/DocView.tsx). path: 파일의 절대 경로. git 탭처럼 터미널이 없다.
+export type Tab = { id: number; layout: Layout; focus: number; cwd: string; group?: string; worktree?: string; name?: string; setup?: Setup; git?: GitTab; doc?: DocTab };
 export type GitTab = { repo?: string };
+export type DocTab = { path: string };
+// 터미널 대신 보기 화면을 둔 탭 (분할·세션 추가가 없다)
+export const isViewer = (t: Tab) => !!(t.git || t.doc);
 // 창에서 돌리는 세션. setup: 작업그룹 준비를 돌리는 창 (이름표는 번역 문구). sid: 창마다 정한 세션 ID (인자의 {session}).
 // prompt: 세션을 만들 때 정한 프롬프트 (인자의 {prompt}, useGroups.ts promptOf). resumed: 복원한 세션이라 이어서 하기(resume)
 // 인자로 띄운다.
@@ -102,7 +106,8 @@ function isTab(v: unknown): v is Tab {
     isOptString(v.worktree) &&
     isOptString(v.name) &&
     (v.setup === undefined || isSetup(v.setup)) &&
-    (v.git === undefined || (isObject(v.git) && isOptString(v.git.repo)))
+    (v.git === undefined || (isObject(v.git) && isOptString(v.git.repo))) &&
+    (v.doc === undefined || (isObject(v.doc) && isString(v.doc.path)))
   );
 }
 
