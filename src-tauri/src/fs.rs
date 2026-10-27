@@ -127,16 +127,17 @@ thread_local! {
     static AFTER_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
 
-// 원본을 연다: 지우기·이름 바꾸기 권한, 지우기 공유 없음, 링크는 따라가지 않음, 폴더도
+// 원본을 연다: 지우기·이름 바꾸기에 필요한 DELETE와 종류를 볼 속성 읽기만 (리뷰 R6: 쓰지 않는 권한을 요구하면 ACL이 그것만
+// 막은 파일을 못 바꾼다. 링크 만들기는 따로 권한이 필요 없다), 지우기 공유 없음, 링크는 따라가지 않음, 폴더도
 #[cfg(windows)]
 fn open_exclusive(path: &Path) -> std::io::Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, OPEN_EXISTING, SYNCHRONIZE,
+        FILE_SHARE_WRITE, OPEN_EXISTING, SYNCHRONIZE,
     };
-    let access = DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+    let access = DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
     let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
     let handle =
         unsafe { CreateFileW(wide(path).as_ptr(), access, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), OPEN_EXISTING, flags, std::ptr::null_mut()) };
@@ -728,7 +729,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // Windows (리뷰 R1·R2·R4·R5): 같은 파일의 다른 이름이 이미 있는 상태(경합으로 생길 수 있는 가장 나쁜 입력), 원본을 연
+    // Windows (리뷰 R1·R2·R4·R5·R6): 같은 파일의 다른 이름이 이미 있는 상태(경합으로 생길 수 있는 가장 나쁜 입력), 원본을 연
     // 직후 원본을 옮기고 그 자리에 다른 파일을 두려는 끼어들기, 링크 수 상한, 심볼릭 링크와 그 하드 링크, 폴더별 대소문자
     // 구분(fsutil로 켬). CI에서는 대소문자 구분·심볼릭 링크를 만들지 못하면 실패한다.
     #[test]
@@ -791,6 +792,22 @@ mod tests {
         assert!(std::fs::metadata(d.join("ro2.txt")).unwrap().permissions().readonly());
         perm.set_readonly(false);
         std::fs::set_permissions(d.join("ro2.txt"), perm).unwrap();
+
+        // 속성 쓰기만 ACL로 막은 파일·폴더도 바뀐다 (리뷰 R6)
+        let d = sub("acl");
+        std::fs::write(d.join("wa.txt"), "W").unwrap();
+        std::fs::create_dir(d.join("wadir")).unwrap();
+        let user = std::env::var("USERNAME").unwrap();
+        for name in ["wa.txt", "wadir"] {
+            let deny = std::process::Command::new("icacls.exe").arg(d.join(name)).args(["/deny", &format!("{user}:(WA)")]).output().unwrap();
+            assert!(deny.status.success(), "{deny:?}");
+        }
+        rename_excl(&d.join("wa.txt"), &d.join("wa2.txt")).unwrap();
+        rename_excl(&d.join("wadir"), &d.join("wadir2")).unwrap();
+        assert_eq!(names(&d), ["wa2.txt", "wadir2"]);
+        for name in ["wa2.txt", "wadir2"] {
+            let _ = std::process::Command::new("icacls.exe").arg(d.join(name)).args(["/remove:d", &user]).output();
+        }
 
         // 지우기를 막고 연 파일은 실패하고, 새 이름을 남기지 않는다
         let d = sub("held");
