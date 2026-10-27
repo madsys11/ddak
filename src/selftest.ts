@@ -12,7 +12,9 @@ import { fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, type Dialog } from "./programStatus";
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
-import { renderMarkdown } from "./docs";
+import { renderMarkdown, resolveHref } from "./docs";
+import { baseName as platformBaseName, dirName as platformDirName, fileUrlPath, keyLabels, normalizePath, relativeTo, trimTrailingSep } from "./platform";
+import { clipboardKey } from "./Terminal";
 import { insertAt } from "./dragPath";
 import selftestPlan from "../scripts/selftest-plan.json";
 import { THEMES } from "./themes";
@@ -2248,6 +2250,60 @@ function testTerminalLinksUnit() {
   ];
   const bad = cases.filter(([text, want]) => JSON.stringify(got(text)) !== JSON.stringify(want)).map(([text]) => `${text} → ${JSON.stringify(got(text))}`);
   check("터미널 링크: 글자에서 URL·경로 후보 찾기 (줄 번호·문장 부호·조사, 버전·시각은 아님)", bad.length === 0, bad.join(" | "));
+}
+
+// Windows에서 다른 화면 쪽 규칙 (src/platform.ts, docs/windows-plan.md): 키 표시, 경로(\ 구분자·드라이브·UNC), 문서 안 링크,
+// 터미널 링크 후보, 터미널 복사·붙여넣기. 맥에서도 Windows 쪽 값을 넣어 시험한다
+function testPlatformUnit() {
+  const bad: string[] = [];
+  const eq = (what: string, got: unknown, want: unknown) => {
+    if (JSON.stringify(got) !== JSON.stringify(want)) bad.push(`${what}: ${JSON.stringify(got)} ≠ ${JSON.stringify(want)}`);
+  };
+  eq("키 Windows", keyLabels("New Work Group (⇧⌘T) · ⌘-click to open · (⌘D)", true), "New Work Group (Ctrl+Shift+T) · Ctrl+click to open · (Ctrl+D)");
+  eq("키 맥", keyLabels("(⇧⌘T)", false), "(⇧⌘T)");
+  eq("이름", [platformBaseName("C:\\a\\b.md", true), platformBaseName("/a/b/", true), platformBaseName("C:\\", true)], ["b.md", "b", "C:"]);
+  eq("폴더", [platformDirName("C:\\a\\b.md", true), platformDirName("C:\\b.md", true), platformDirName("/a/b.md", true), platformDirName("/b.md", true)], [
+    "C:\\a", "C:\\", "/a", "/",
+  ]);
+  eq("정리", [normalizePath("C:\\a\\..\\..\\b/./c.md"), normalizePath("\\\\srv\\share\\x\\..\\y"), normalizePath("/a/../b")], ["C:\\b\\c.md", "\\\\srv\\share\\y", "/b"]);
+  eq("상대", [relativeTo("C:\\p\\src\\a.ts", "C:\\p", true), relativeTo("C:\\pp\\a", "C:\\p", true), relativeTo("/p/a", "/p", true), relativeTo("/p", "/p", true)], [
+    "src\\a.ts", undefined, "a", undefined,
+  ]);
+  eq("끝 구분자", [trimTrailingSep("C:\\p\\", true), trimTrailingSep("C:\\", true), trimTrailingSep("/p/", true)], ["C:\\p", "C:\\", "/p"]);
+  // 맥에서 \ 는 이름의 일부다 (리뷰 R2: Finder의 "a\b.png", "project\" 폴더)
+  eq("맥 \\ 이름", [
+    platformBaseName("/p/a\\b.png", false),
+    platformDirName("/x/a\\b", false),
+    trimTrailingSep("/tmp/project\\", false),
+    trimTrailingSep("/tmp/project/", false),
+    normalizePath("/a/b\\c/../d\\e"),
+    relativeTo("/p/a\\b", "/p", false),
+  ], ["a\\b.png", "/x", "/tmp/project\\", "/tmp/project", "/a/d\\e", "a\\b"]);
+  // file 주소 (리뷰 R3: Windows의 file:///C:/… 는 /C:/… 가 아니다)
+  eq("file 주소", [
+    fileUrlPath("file:///C:/Users/me/doc.md", true),
+    fileUrlPath("file://localhost/C:/Users/%ED%95%9C/a%20b.md", true),
+    fileUrlPath("file://srv/share/x.md", true),
+    fileUrlPath("file:///Users/me/doc.md", false),
+    fileUrlPath("file://localhost/Users/me/a%20b.md", false),
+    fileUrlPath("file://srv/x.md", false),
+  ], ["C:\\Users\\me\\doc.md", "C:\\Users\\한\\a b.md", "\\\\srv\\share\\x.md", "/Users/me/doc.md", "/Users/me/a b.md", null]);
+  eq("문서 링크", [resolveHref("C:\\d\\docs\\spec.md", "../README.md#x"), resolveHref("C:\\d\\a.md", "C:\\e\\b.md")], [
+    { kind: "file", path: "C:\\d\\README.md", anchor: "x" },
+    { kind: "file", path: "C:\\e\\b.md", anchor: "" },
+  ]);
+  const links = (text: string, windows: boolean) => findLinks(text, windows).map((f) => `${f.kind}:${f.target}`);
+  eq("링크 Windows", links("see C:\\Users\\me\\spec.md:12 and src\\x.ts", true), ["path:C:\\Users\\me\\spec.md", "path:src\\x.ts"]);
+  eq("링크 맥", links("see C:\\Users\\me and src\\x", false), []);
+  const key = (code: string, mods: KeyboardEventInit = {}) => new KeyboardEvent("keydown", { code, ctrlKey: true, ...mods });
+  eq("복사·붙여넣기", [
+    clipboardKey(key("KeyC"), true, true),
+    clipboardKey(key("KeyC"), false, true),
+    clipboardKey(key("KeyV"), false, true),
+    clipboardKey(key("KeyC", { shiftKey: true }), true, true),
+    clipboardKey(key("KeyC"), true, false),
+  ], ["copy", undefined, "paste", undefined, undefined]);
+  check("Windows 규칙: 키 표시·경로·문서 링크·터미널 링크·복사 붙여넣기", bad.length === 0, bad.join(" | "));
 }
 
 // 넘친 줄의 링크: 넓은 글자가 줄 끝 한 칸에 못 들어가 다음 줄로 넘어가도 링크가 끊기지 않는다 (리뷰 R1).
@@ -4612,6 +4668,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
     ["terminalSearch", () => testTerminalSearch(t())],
     ["terminalLinksUnit", testTerminalLinksUnit],
+    ["platformUnit", testPlatformUnit],
     ["statusContrastUnit", testStatusContrastUnit],
     ["terminalLinkWrap", () => testTerminalLinkWrap(root, t())],
     ["terminalLinks", () => testTerminalLinks(root, t())],

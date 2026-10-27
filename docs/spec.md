@@ -532,8 +532,16 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 ## 배포 계획
 
 - 공개 GitHub 저장소(madsys11/ddak). 사용자가 먼저 쓰고 이후 팀원(모두 macOS)에게 배포한다.
-- Windows(x64)도 지원한다 (계획과 단계: `docs/windows-plan.md`). 세션·준비 스크립트는 Git Bash에서 돌고, 단축키는 ⌘를
+- Windows(x64)도 지원한다 (계획·진행·남은 것: `docs/windows-plan.md`). 세션·준비 스크립트는 Git Bash에서 돌고, 단축키는 ⌘를
   Ctrl로 그대로 바꾼다 (메뉴·프론트가 받는 Ctrl 키는 터미널 프로그램에 가지 않는다).
+  - 플랫폼마다 다른 작은 것은 `platform.rs`·`src/platform.ts`, 터미널은 `conpty.rs` (ConPTY를 터미널마다의 Job 안에서 띄움.
+    닫기는 Job을 끝내고 남은 프로세스 수가 0일 때 끝난 것으로 본다).
+  - Windows 메뉴에는 편집 메뉴와 맥 전용 항목(서비스·가리기·전체 화면·알림 소리)이 없다. 터미널은 Ctrl+C를 선택이 있을 때만
+    복사로, Ctrl+V를 붙여넣기로 쓴다.
+  - Windows CI: `.github/workflows/windows.yml` (main·수동, cargo test와 NSIS 설치 파일).
+  - 알림은 토스트 (누르면 그 프로젝트로, 소리는 Windows 기본), 배지는 작업 표시줄 단추의 빨간 점이다. 탐색기에서 끌어 놓은
+    파일의 경로는 WebView2가 준다 (`windrop.rs`). 뒤에서 돌리는 git·tailscale은 콘솔 창 없이 띄운다.
+  - 실제 경로는 `platform::canonical`로 구한다 (Windows는 `\\?\` 없는 일반 형식, 260자 넘는 경로는 지원하지 않음).
 - 저장소에 개인정보를 넣지 않는다. 커밋 작성자는 GitHub noreply 주소 (이 저장소의 로컬 git 설정).
 - 앱 식별자: `io.github.madsys11.ddak` (GitHub 계정 도메인을 거꾸로 쓴 것). 앱 데이터는
   `~/Library/Application Support/<식별자>`에 있어서 식별자를 바꾸면 이어 쓰지 못한다.

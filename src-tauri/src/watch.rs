@@ -69,7 +69,7 @@ fn create(app: AppHandle, dirs: Dirs) -> notify::Result<RecommendedWatcher> {
 // 동기 명령으로 둔다. 메인 스레드에서 차례대로 돌아서 watch/unwatch 순서가 뒤바뀌지 않는다.
 #[tauri::command]
 pub fn fs_watch(app: AppHandle, state: State<Watches>, path: String) -> Result<(), String> {
-    let real = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let real = crate::platform::canonical(&path).map_err(|e| e.to_string())?;
     let mut watcher = state.watcher.lock().unwrap();
     if watcher.is_none() {
         *watcher = Some(create(app, state.dirs.clone()).map_err(|e| e.to_string())?);

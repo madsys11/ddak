@@ -29,6 +29,7 @@ const ZOOM_ITEMS: &[(&str, &str)] = &[
     ("zoom_reset", "CmdOrCtrl+0"),
 ];
 
+const MAC: bool = cfg!(target_os = "macos");
 const CLOSE_WINDOW: &str = "close_window";
 // 보기 메뉴: 프로젝트의 Git Graph 탭을 연다 (src/GitGraph.tsx). 단축키는 없다.
 const GIT_GRAPH: &str = "git_graph";
@@ -81,22 +82,26 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         }
         sub.build()
     };
-    let app_menu = SubmenuBuilder::new(app, "ddak")
+    let mut app_menu = SubmenuBuilder::new(app, "ddak")
         .about_with_text(l("about"), None)
         .separator()
         .item(&MenuItemBuilder::with_id(EDIT_GROUPS, l(EDIT_GROUPS)).build(app)?)
-        .item(&MenuItemBuilder::with_id(MOBILE, l(MOBILE)).build(app)?)
-        .item(&choices(l("notify_sound"), SOUND_PREFIX, &spec.sounds)?)
-        .separator()
-        .services_with_text(l("services"))
-        .separator()
-        .hide_with_text(l("hide"))
-        .hide_others_with_text(l("hideOthers"))
-        .show_all_with_text(l("showAll"))
-        .separator()
-        .quit_with_text(l("quit"))
-        .build()?;
-    // 편집 메뉴가 있어야 웹뷰에서 ⌘C/⌘V가 동작한다.
+        .item(&MenuItemBuilder::with_id(MOBILE, l(MOBILE)).build(app)?);
+    // 알림 소리는 맥 알림 센터의 시스템 소리라 맥에만 (notify.rs)
+    if MAC {
+        app_menu = app_menu
+            .item(&choices(l("notify_sound"), SOUND_PREFIX, &spec.sounds)?)
+            .separator()
+            .services_with_text(l("services"))
+            .separator()
+            .hide_with_text(l("hide"))
+            .hide_others_with_text(l("hideOthers"))
+            .show_all_with_text(l("showAll"));
+    }
+    let app_menu = app_menu.separator().quit_with_text(l("quit")).build()?;
+    // 편집 메뉴가 있어야 맥 웹뷰에서 ⌘C/⌘V가 동작한다. Windows는 두지 않는다: 메뉴 단축키는 웹뷰보다 먼저 잡혀서
+    // (Tauri의 TranslateAcceleratorW 훅) 편집 메뉴의 Ctrl+C가 터미널의 인터럽트를 가로챈다. 입력란은 웹뷰가 스스로
+    // 복사·붙여넣기하고, 터미널은 Terminal.tsx가 한다 (docs/windows-plan.md W3).
     let edit = SubmenuBuilder::new(app, l("edit"))
         .undo_with_text(l("undo"))
         .redo_with_text(l("redo"))
@@ -128,18 +133,19 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         .item(&choices(l("theme"), THEME_PREFIX, &spec.themes)?)
         .item(&choices(l("language"), LOCALE_PREFIX, &spec.locales)?)
         .build()?;
-    let window = SubmenuBuilder::new(app, l("window"))
-        .minimize_with_text(l("minimize"))
-        .maximize_with_text(l("maximize"))
-        .separator()
-        .fullscreen_with_text(l("fullscreen"))
-        .separator()
+    let mut window = SubmenuBuilder::new(app, l("window")).minimize_with_text(l("minimize")).maximize_with_text(l("maximize")).separator();
+    // 전체 화면은 Windows 메뉴 항목이 없다 (muda: 지원하지 않으면 꺼진 채로 보인다)
+    if MAC {
+        window = window.fullscreen_with_text(l("fullscreen")).separator();
+    }
+    let window = window
         // 기본 close_window는 ⌘W라서 "터미널 닫기"와 겹친다 (muda predefined.rs). ⇧⌘W로 따로 둔다.
         .item(&MenuItemBuilder::with_id(CLOSE_WINDOW, l(CLOSE_WINDOW)).accelerator("CmdOrCtrl+Shift+W").build(app)?)
         .build()?;
-    MenuBuilder::new(app)
-        .items(&[&app_menu, &edit, &terminal.build()?, &view, &window])
-        .build()
+    let terminal = terminal.build()?;
+    let menus: Vec<&dyn tauri::menu::IsMenuItem<R>> =
+        if MAC { vec![&app_menu, &edit, &terminal, &view, &window] } else { vec![&app_menu, &terminal, &view, &window] };
+    MenuBuilder::new(app).items(&menus).build()
 }
 
 #[tauri::command]
@@ -153,10 +159,10 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) {
     app.on_menu_event(|app, event| {
         let id = event.id().0.as_str();
         if id == EDIT_GROUPS {
-            // 편집 화면이 생기기 전까지는 기본 텍스트 편집기로 연다 (open -t).
+            // 편집 화면이 생기기 전까지는 기본 텍스트 편집기로 연다 (platform::edit_text).
             match crate::groups::ensure_file(app) {
                 Ok(path) => {
-                    let _ = std::process::Command::new("open").arg("-t").arg(path).spawn();
+                    let _ = crate::platform::edit_text(&path);
                 }
                 Err(e) => eprintln!("작업그룹 설정 파일 실패: {e:?}"),
             }

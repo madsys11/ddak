@@ -38,7 +38,7 @@ pub fn config_file() -> Option<PathBuf> {
     if std::env::var_os("DDAK_SELFTEST").is_some() {
         return std::env::var_os("DDAK_HOME").map(|h| PathBuf::from(h).join("claude.json"));
     }
-    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let home = crate::platform::home()?;
     let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()).map(PathBuf::from);
     let legacy = dir.clone().unwrap_or_else(|| home.join(".claude")).join(".config.json");
     if legacy.exists() {
@@ -48,12 +48,21 @@ pub fn config_file() -> Option<PathBuf> {
 }
 
 // 폴더의 설정 키 후보: 받은 경로와 실제 경로 (claude는 띄운 폴더의 경로를 키로 쓴다)
+// Windows는 확장 길이 형식(`\\?\`)을 일반 형식으로 바꾸고, 구분자가 `/`인 꼴도 넣는다 (claude가 어느 꼴로 적는지 실기기에서 확인할 것)
 fn keys(path: &Path) -> Vec<String> {
     let mut keys = vec![path.to_string_lossy().into_owned()];
-    if let Ok(real) = std::fs::canonicalize(path) {
+    if let Ok(real) = crate::platform::canonical(path) {
         let real = real.to_string_lossy().into_owned();
         if !keys.contains(&real) {
             keys.push(real);
+        }
+    }
+    if cfg!(windows) {
+        for k in keys.clone() {
+            let slashed = k.replace('\\', "/");
+            if !keys.contains(&slashed) {
+                keys.push(slashed);
+            }
         }
     }
     keys
@@ -129,22 +138,30 @@ fn locked<T>(files: &[&Path], f: impl FnOnce() -> T) -> Option<T> {
     out
 }
 
+// 임시 파일을 원래 파일과 같은 권한으로 만든다
+#[cfg(unix)]
+fn keep_mode<'a>(options: &'a mut std::fs::OpenOptions, permissions: &std::fs::Permissions) -> &'a mut std::fs::OpenOptions {
+    use std::os::unix::fs::PermissionsExt;
+    crate::platform::with_mode(options, permissions.mode() & 0o777)
+}
+
+#[cfg(windows)]
+fn keep_mode<'a>(options: &'a mut std::fs::OpenOptions, _: &std::fs::Permissions) -> &'a mut std::fs::OpenOptions {
+    options
+}
+
 // 실제 파일(target, 링크가 아님)을 같은 권한의 임시 파일에 써서 바꿔치운다
 fn replace(target: &Path, config: &Value) -> Result<(), String> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mode = std::fs::metadata(target).map_err(|e| e.to_string())?.permissions().mode() & 0o777;
+    let permissions = std::fs::metadata(target).map_err(|e| e.to_string())?.permissions();
     let mut tmp = target.as_os_str().to_owned();
     tmp.push(format!(".ddak-trust-{}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let text = serde_json::to_string_pretty(config).map_err(|e| e.to_string())? + "\n";
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
+    let written = keep_mode(std::fs::OpenOptions::new().write(true).create_new(true), &permissions)
         .open(&tmp)
         .and_then(|mut f| {
-            // umask로 줄어든 권한을 되돌린다
-            f.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            // umask로 줄어든 권한을 되돌린다 (Windows는 읽기 전용 표시만)
+            f.set_permissions(permissions)?;
             f.write_all(text.as_bytes())?;
             f.sync_all()
         })
@@ -169,7 +186,7 @@ pub fn inherit(file: &Path, origin: &Path, dest: &Path) -> Outcome {
         Ok(Ok(())) => {}
     }
     // 링크면 가리키는 파일. 잠금 전에 정하고, 잠금 안에서 그 파일을 읽고 바꾼다
-    let target = match std::fs::canonicalize(file) {
+    let target = match crate::platform::canonical(file) {
         Ok(t) => t,
         Err(e) => return Outcome::Failed(e.to_string()),
     };
@@ -206,6 +223,7 @@ mod tests {
     }
 
     // 원본을 신뢰했으면 새 폴더를 적고, 다른 항목·키 순서는 그대로 둔다. 원본을 신뢰하지 않았거나 이미 적혀 있으면 그대로.
+    #[cfg(unix)]
     #[test]
     fn inherits_trust_from_origin() {
         use std::os::unix::fs::PermissionsExt;
@@ -253,7 +271,7 @@ mod tests {
         std::fs::remove_dir(dir.join("claude.json.lock")).unwrap();
         let real = dir.join("real.json");
         std::fs::rename(&file, &real).unwrap();
-        std::os::unix::fs::symlink(&real, &file).unwrap();
+        crate::platform::symlink(&real, &file).unwrap();
         // 링크면 실제 파일의 잠금도 본다 (리뷰 R1). 잡은 잠금은 푼다
         std::fs::create_dir(dir.join("real.json.lock")).unwrap();
         assert_eq!(inherit(&file, &origin, &dest), Outcome::Locked);

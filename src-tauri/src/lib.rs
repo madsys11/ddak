@@ -3,6 +3,8 @@ use tauri::Manager;
 mod chat;
 mod claude_trust;
 mod clone;
+#[cfg(windows)]
+mod conpty;
 mod fs;
 mod git;
 mod groups;
@@ -10,6 +12,7 @@ mod links;
 mod menu;
 mod mobile;
 mod notify;
+mod platform;
 mod prepare;
 mod projects;
 mod prompts;
@@ -19,6 +22,8 @@ mod repos;
 mod selftest;
 mod setup;
 mod watch;
+#[cfg(windows)]
+mod windrop;
 mod workspace;
 mod worktrees;
 
@@ -30,9 +35,19 @@ pub fn setup_helper() -> Option<i32> {
 }
 
 // 웹뷰가 앱 화면에 머무는 주소인지. 그 밖의 주소로는 이동하지 않는다 (stay_in_app).
-// 앱 화면: 설치한 앱은 tauri://, 개발·자체 테스트는 개발 서버(dev_url)와 같은 출처. about:blank 같은 빈 화면은 둔다.
+// 앱 화면: 설치한 앱은 맥 tauri://, Windows http(s)://tauri.localhost (Tauri가 WebView2에 쓰는 앱 주소), 개발·자체 테스트는
+// 개발 서버(dev_url)와 같은 출처. about:blank 같은 빈 화면은 둔다.
 fn app_page(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
-    url.scheme() == "tauri" || url.scheme() == "about" || dev_url.is_some_and(|d| url.origin() == d.origin())
+    app_page_on(url, dev_url, cfg!(windows))
+}
+
+fn app_page_on(url: &tauri::Url, dev_url: Option<&tauri::Url>, windows: bool) -> bool {
+    let installed = if windows {
+        matches!(url.scheme(), "http" | "https") && url.host_str() == Some("tauri.localhost") && url.port().is_none()
+    } else {
+        url.scheme() == "tauri"
+    };
+    installed || url.scheme() == "about" || dev_url.is_some_and(|d| url.origin() == d.origin())
 }
 
 // 웹뷰가 앱 화면을 떠나지 않게 한다. Finder에서 끌어 온 파일을 놓으면 WKWebView가 그 파일로 이동해 작업 화면이 모두
@@ -63,6 +78,10 @@ pub fn run() {
             app.manage(chats);
             app.manage(mobile);
             pty::start_waker(app.handle().clone());
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                windrop::install(&window);
+            }
             Ok(())
         })
         // 알림을 보낼지 정할 때 창이 앞에 있는지 본다 (src-tauri/src/notify.rs)
@@ -96,6 +115,7 @@ pub fn run() {
             fs::fs_read_text,
             fs::fs_read_image,
             fs::drag_files,
+            fs::drop_paths,
             fs::drag_count,
             fs::selftest_drag_files,
             groups::groups_load,
@@ -181,15 +201,32 @@ mod tests {
     fn webview_stays_on_app_pages() {
         let url = |s: &str| tauri::Url::parse(s).unwrap();
         let dev = url("http://localhost:1430");
-        for ok in ["tauri://localhost/", "tauri://localhost/index.html#x", "about:blank", "http://localhost:1430/src/App.tsx"] {
-            assert!(super::app_page(&url(ok), Some(&dev)), "{ok}");
+        // 개발 서버와 빈 화면은 두 플랫폼 모두 (리뷰 R1: 플랫폼 값을 따르는 app_page로 맥 주소를 보면 Windows CI에서 실패한다)
+        for windows in [false, true] {
+            for ok in ["about:blank", "http://localhost:1430/src/App.tsx"] {
+                assert!(super::app_page_on(&url(ok), Some(&dev), windows), "{ok} {windows}");
+            }
+            for no in ["file:///Users/x/a.png", "https://example.com/", "http://localhost:3000/", "https://localhost:1430/", "data:text/html,x"] {
+                assert!(!super::app_page_on(&url(no), Some(&dev), windows), "{no} {windows}");
+            }
         }
-        for no in ["file:///Users/x/a.png", "https://example.com/", "http://localhost:3000/", "https://localhost:1430/", "data:text/html,x"] {
-            assert!(!super::app_page(&url(no), Some(&dev)), "{no}");
+        for ok in ["tauri://localhost/", "tauri://localhost/index.html#x"] {
+            assert!(super::app_page_on(&url(ok), Some(&dev), false), "{ok}");
         }
+        // 지금 플랫폼의 설치판 주소
+        let installed = if cfg!(windows) { "http://tauri.localhost/" } else { "tauri://localhost/" };
+        assert!(super::app_page(&url(installed), None));
         // 설치한 앱(개발 서버 없음)
-        assert!(super::app_page(&url("tauri://localhost/"), None));
-        assert!(!super::app_page(&url("http://localhost:1430/"), None));
+        assert!(super::app_page_on(&url("tauri://localhost/"), None, false));
+        assert!(!super::app_page_on(&url("http://localhost:1430/"), None, false));
+        assert!(!super::app_page_on(&url("http://tauri.localhost/"), None, false));
+        // Windows 설치판 (docs/windows-plan.md 0단계): 앱 주소와 새로 고침은 되고, 파일·바깥·다른 포트는 안 된다
+        for ok in ["http://tauri.localhost/", "http://tauri.localhost/index.html#x", "https://tauri.localhost/", "about:blank"] {
+            assert!(super::app_page_on(&url(ok), None, true), "{ok}");
+        }
+        for no in ["file:///C:/Users/x/a.png", "https://example.com/", "http://localhost/", "http://tauri.localhost:8080/", "http://tauri.localhost.evil.com/", "tauri://localhost/"] {
+            assert!(!super::app_page_on(&url(no), None, true), "{no}");
+        }
     }
 
     #[test]

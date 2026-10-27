@@ -168,10 +168,10 @@ pub struct Chats {
     started: u64,
 }
 
-// 추측할 수 없는 토큰 (macOS arc4random)
+// 추측할 수 없는 토큰
 fn token() -> String {
     let mut bytes = [0u8; 16];
-    unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
+    crate::platform::fill_random(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -819,7 +819,7 @@ fn chats_of(state: &tauri::State<'_, ChatsState>) -> Result<Arc<Chats>, String> 
 }
 
 fn real(project: &str) -> PathBuf {
-    std::fs::canonicalize(project).unwrap_or_else(|_| PathBuf::from(project))
+    crate::platform::canonical(project).unwrap_or_else(|_| PathBuf::from(project))
 }
 
 #[tauri::command]
@@ -1218,6 +1218,7 @@ mod tests {
 
     // 리뷰 P2: 파일을 읽지 못하면 (없음이 아니면) 빈 방으로 보지 않는다. 읽기·쓰기 모두 오류이고 파일은 그대로다.
     // 고치면 다시 읽는다.
+    #[cfg(unix)]
     #[test]
     fn unreadable_room_refuses_reads_and_writes() {
         use std::os::unix::fs::PermissionsExt;

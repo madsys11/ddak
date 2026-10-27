@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Runtime};
 
 fn state_path<R: Runtime>(app: &AppHandle<R>, project: &str) -> Result<PathBuf, CodeError> {
-    let root = std::fs::canonicalize(project).map_err(|e| code_err("io", e))?;
+    let root = crate::platform::canonical(project).map_err(|e| code_err("io", e))?;
     let dir = data_dir(app).map_err(|e| code_err("io", e))?;
     Ok(dir.join("workspaces").join(format!("{}.json", project_slug(&root))))
 }
@@ -59,7 +59,8 @@ pub fn workspace_save(app: AppHandle, project: String, state: String) -> Result<
     save(&state_path(&app, &project)?, &state)
 }
 
-#[cfg(test)]
+// 읽기 권한을 빼는 시험이 유닉스 권한을 쓴다
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { IBufferRange, ILink, ILinkHandler, ILinkProvider, Terminal as XTerm } from "@xterm/xterm";
 import { isDocPath, requestOpenDoc } from "./docs";
+import { IS_WINDOWS, cmdKey, fileUrlPath } from "./platform";
 
 // 터미널 링크: 화면 글자의 URL과 파일 경로를 ⌘+클릭하면 기본 앱으로 연다 (src-tauri/src/links.rs open_link). 마크다운은 문서 탭.
 // claude는 ddak 안에서 경로·URL을 OSC 8 없이 평문으로 그린다 (claude 2.1.310로 실험, 2026-10-26). 그래서 글자에서 찾는다.
@@ -22,8 +23,11 @@ const HANGUL_TAIL_RE = /[ㄱ-ㆎ가-힣]+$/;
 const EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,9}$/; // 확장자는 글자로 시작 (v1.0은 아님)
 const MAX_LINKS = 40;
 
+// Windows 경로: 드라이브(C:\, C:/)로 시작하거나 \ 구분자가 든 것
+const DRIVE_RE = /^[A-Za-z]:[\\/]/;
+
 // 한 줄에서 링크 후보 (경로는 있는지 아직 모른다). 같은 자리에서 조사를 뺀 것과 안 뺀 것을 모두 낸다 (있는 쪽을 쓴다)
-export function findLinks(text: string): FoundLink[] {
+export function findLinks(text: string, windows = IS_WINDOWS): FoundLink[] {
   const out: FoundLink[] = [];
   const urls: [number, number][] = [];
   for (const m of text.matchAll(URL_RE)) {
@@ -38,8 +42,9 @@ export function findLinks(text: string): FoundLink[] {
     const plain = word.replace(HANGUL_TAIL_RE, "").replace(TRAIL_RE, "");
     for (const shown of new Set([word, plain])) {
       const target = shown.replace(LINE_RE, "");
-      if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target) || /^[\d.]+$/.test(target)) continue;
-      if (!target.includes("/") && !EXT_RE.test(target)) continue;
+      const drive = windows && DRIVE_RE.test(target);
+      if (!target || (!drive && /^[a-z][a-z0-9+.-]*:/i.test(target)) || /^[\d.]+$/.test(target)) continue;
+      if (!target.includes("/") && !(windows && target.includes("\\")) && !EXT_RE.test(target)) continue;
       out.push({ start, end: start + shown.length, kind: "path", target });
     }
     if (out.length >= MAX_LINKS) break;
@@ -122,17 +127,8 @@ export const openLink = (target: string) => invoke("open_link", { target }).catc
 // OSC 8의 file:// 주소도 경로로 본다. 호스트가 있으면 (localhost 말고) 다른 컴퓨터의 파일이라 문서 탭으로 열지 않는다
 // (리뷰 R3. open_link의 Url::to_file_path도 거절한다)
 export function docPathOf(target: string): string | null {
-  let path = target;
-  if (/^file:\/\//i.test(target)) {
-    try {
-      const url = new URL(target);
-      if (url.hostname && url.hostname !== "localhost") return null;
-      path = decodeURIComponent(url.pathname);
-    } catch {
-      return null;
-    }
-  }
-  return isDocPath(path) ? path : null;
+  const path = /^file:\/\//i.test(target) ? fileUrlPath(target) : target;
+  return path !== null && isDocPath(path) ? path : null;
 }
 
 function activate(target: string) {
@@ -181,7 +177,7 @@ export function linkProvider(term: XTerm, ctx: Context): ILinkProvider {
             range: r,
             text: f.text.slice(f.start, f.end),
             decorations: { underline: true, pointerCursor: true },
-            activate: (e) => e.metaKey && activate(target),
+            activate: (e) => cmdKey(e) && activate(target),
             ...hover(term, ctx),
           });
         }
@@ -201,5 +197,5 @@ export function linkProvider(term: XTerm, ctx: Context): ILinkProvider {
 // OSC 8 링크 처리 (Terminal 옵션 linkHandler)
 export function oscLinkHandler(term: XTerm, ctx: Context): ILinkHandler {
   const h = hover(term, ctx);
-  return { allowNonHttpProtocols: true, activate: (e, uri) => e.metaKey && activate(uri), hover: h.hover, leave: h.leave };
+  return { allowNonHttpProtocols: true, activate: (e, uri) => cmdKey(e) && activate(uri), hover: h.hover, leave: h.leave };
 }

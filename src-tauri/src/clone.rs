@@ -18,12 +18,21 @@
 //   다시 하면 "있음"으로 넘어갔다). 절대 경로 링크, 밖을 가리키는 링크, 가리키는 것이 없는 링크는 빼고 알린다.
 // - 다른 볼륨이라 clonefile이 안 되면 실제 복사로 대신하지 않고 실패한다 (몇 GB를 조용히 복사하지 않게).
 
+// Windows(NTFS)에는 clonefile이 없어 폴더 복제는 하지 않는다 (docs/windows-plan.md: 설치 명령만). 비밀 파일 복사와
+// 임시 폴더 정리는 같이 쓴다.
+
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
 // sys/clonefile.h: 원본이 링크면 따라가지 않는다
+#[cfg(target_os = "macos")]
 const CLONE_NOFOLLOW: u32 = 0x0001;
 // 임시 폴더 이름: .ddak-clone-<도우미 PID>-<번호>
 const TEMP_PREFIX: &str = ".ddak-clone-";
@@ -35,7 +44,9 @@ pub struct Report {
     pub skipped: Vec<(PathBuf, &'static str)>,
 }
 
+// 폴더 복제가 없는 Windows에서는 만들지 않는다 (clone_tree가 늘 오류)
 #[derive(Debug, PartialEq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum Outcome {
     Cloned(Report),
     // 이미 있어서 그대로 둠 (다시 준비 등)
@@ -44,6 +55,7 @@ pub enum Outcome {
 
 // 복제 하나. src를 dst로. 링크는 src_bound(원본 저장소) 안이고, 새 작업그룹에서는 dst_bound(그 worktree) 안이어야 한다.
 // temp_root: 임시 폴더를 만들 ddak 폴더 (dst와 같은 볼륨, ddak만 쓰는 곳).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct Job<'a> {
     pub src: &'a Path,
     pub dst: &'a Path,
@@ -52,6 +64,7 @@ pub struct Job<'a> {
     pub temp_root: &'a Path,
 }
 
+#[cfg(target_os = "macos")]
 fn cstr(p: &Path) -> std::io::Result<CString> {
     Ok(CString::new(p.as_os_str().as_bytes())?)
 }
@@ -63,7 +76,7 @@ pub fn remove_tree(dir: &Path) {
         return;
     }
     fn unlock(dir: &Path) {
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        crate::platform::make_writable(dir);
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 if e.file_type().is_ok_and(|t| t.is_dir()) {
@@ -85,14 +98,14 @@ pub fn clean_stale(temp_root: &Path) {
         let Some(pid) = name.strip_prefix(TEMP_PREFIX).and_then(|r| r.split('-').next()).and_then(|p| p.parse::<i32>().ok()) else {
             continue;
         };
-        let alive = unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        if !alive {
+        if !crate::platform::process_alive(pid) {
             remove_tree(&e.path());
         }
     }
 }
 
 // 이 실행만의 임시 폴더 (이미 있으면 다음 번호)
+#[cfg(target_os = "macos")]
 fn make_temp(temp_root: &Path) -> Result<PathBuf, String> {
     make_temp_with(temp_root, |p| std::fs::create_dir(p))
 }
@@ -129,7 +142,6 @@ fn copy_fails_at(_: usize) -> bool {
 // "있음"으로 넘어갔다). 이미 있으면 덮어쓰지 않고 false. 링크는 가리키는 곳을 알 수 없어 복사하지 않는다.
 pub fn copy_file_into(src: &Path, dst: &Path, temp_root: &Path) -> Result<bool, String> {
     use std::io::{Read, Write};
-    use std::os::unix::fs::OpenOptionsExt;
     let meta = src.symlink_metadata().map_err(|e| e.to_string())?;
     if meta.file_type().is_symlink() {
         return Err("is a link (copy it in the setup script instead)".into());
@@ -138,7 +150,7 @@ pub fn copy_file_into(src: &Path, dst: &Path, temp_root: &Path) -> Result<bool, 
         return Ok(false);
     }
     let mut input = std::fs::File::open(src).map_err(|e| e.to_string())?;
-    let tmp = make_temp_with(temp_root, |p| std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(p).map(|_| ()))?;
+    let tmp = make_temp_with(temp_root, |p| crate::platform::with_mode(std::fs::OpenOptions::new().write(true).create_new(true), 0o600).open(p).map(|_| ()))?;
     let result = (|| {
         let mut out = std::fs::OpenOptions::new().write(true).open(&tmp).map_err(|e| e.to_string())?;
         let mut buf = [0u8; 64 * 1024];
@@ -156,13 +168,13 @@ pub fn copy_file_into(src: &Path, dst: &Path, temp_root: &Path) -> Result<bool, 
         }
         out.sync_all().map_err(|e| e.to_string())?;
         out.set_times(std::fs::FileTimes::new().set_modified(meta.modified().map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
-        out.set_permissions(std::fs::Permissions::from_mode(meta.permissions().mode())).map_err(|e| e.to_string())?;
-        let (from, to) = (cstr(&tmp).map_err(|e| e.to_string())?, cstr(dst).map_err(|e| e.to_string())?);
-        if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } != 0 {
-            let e = std::io::Error::last_os_error();
-            return if e.kind() == std::io::ErrorKind::AlreadyExists { Ok(false) } else { Err(format!("{}: {e}", dst.display())) };
+        out.set_permissions(meta.permissions()).map_err(|e| e.to_string())?;
+        drop(out); // Windows는 열린 파일을 옮기지 못한다
+        match crate::fs::rename_excl(&tmp, dst) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(format!("{}: {e}", dst.display())),
         }
-        Ok(true)
     })();
     if result != Ok(true) {
         let _ = std::fs::remove_file(&tmp);
@@ -171,11 +183,17 @@ pub fn copy_file_into(src: &Path, dst: &Path, temp_root: &Path) -> Result<bool, 
 }
 
 // 테스트에서만: 제자리로 옮긴 직후 끊긴 것처럼 거기서 돌아온다 (그때 남는 상태를 보기 위해)
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 thread_local! {
     static STOP_AFTER_PUBLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn clone_tree(_job: &Job) -> Result<Outcome, String> {
+    Err("cloning folders is not supported on this system (use an install command instead)".into())
+}
+
+#[cfg(target_os = "macos")]
 pub fn clone_tree(job: &Job) -> Result<Outcome, String> {
     if job.dst.symlink_metadata().is_ok() {
         return Ok(Outcome::Exists);
@@ -227,6 +245,7 @@ pub fn clone_tree(job: &Job) -> Result<Outcome, String> {
     Ok(Outcome::Cloned(made.report))
 }
 
+#[cfg(target_os = "macos")]
 // 실제 경로들: 원본 저장소, 새 worktree, 복제가 놓일 자리
 struct Bounds {
     src: PathBuf,
@@ -234,6 +253,7 @@ struct Bounds {
     place: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 // 만든 것 (복제할 폴더 기준 경로). dirs는 안쪽부터 (맨 위 ""가 마지막).
 #[derive(Default)]
 struct Made {
@@ -242,6 +262,7 @@ struct Made {
     dirs: Vec<PathBuf>,
 }
 
+#[cfg(target_os = "macos")]
 // 옮기기 전 마무리 (임시 폴더에서): 새 worktree에서 밖을 가리킬 링크를 지우고, 폴더의 수정 시각과 권한을 원본대로
 // 되돌린다. 링크를 지우면 폴더의 수정 시각이 바뀌고 0555 폴더에서는 지울 수 없어서 순서가 이렇다.
 // 맨 위 폴더는 시각만 (옮겨도 그대로다), 권한은 옮긴 뒤에.
@@ -263,6 +284,7 @@ fn prepare(job: &Job, bounds: &Bounds, tmp: &Path, real_tmp: &Path, made: &mut M
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 // path를 운영체제처럼 한 단계씩 따라간 실제 경로 (중간 링크를 따라간 뒤 ..를 처리한다). place 안은 아직 없으니
 // real_tmp의 같은 자리에서 읽는다. 없는 것을 가리키거나 링크가 너무 많이 이어지면 (ELOOP와 같은 40) None.
 fn resolve_at(path: &Path, place: &Path, real_tmp: &Path) -> Option<PathBuf> {
@@ -304,17 +326,20 @@ fn resolve_at(path: &Path, place: &Path, real_tmp: &Path) -> Option<PathBuf> {
     Some(cur)
 }
 
+#[cfg(target_os = "macos")]
 fn set_times(src: &Path, dir: &Path) -> Result<(), String> {
     let meta = src.symlink_metadata().map_err(|e| format!("{}: {e}", src.display()))?;
     let times = std::fs::FileTimes::new().set_modified(meta.modified().map_err(|e| e.to_string())?).set_accessed(meta.accessed().map_err(|e| e.to_string())?);
     std::fs::File::open(dir).and_then(|f| f.set_times(times)).map_err(|e| format!("{}: {e}", dir.display()))
 }
 
+#[cfg(target_os = "macos")]
 fn set_mode(src: &Path, dir: &Path) -> Result<(), String> {
     let mode = src.symlink_metadata().map_err(|e| format!("{}: {e}", src.display()))?.permissions().mode();
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).map_err(|e| format!("{}: {e}", dir.display()))
 }
 
+#[cfg(target_os = "macos")]
 // from(원본)의 안쪽을 to(임시 폴더)에 만든다. 폴더의 수정 시각·권한은 prepare가 되돌린다.
 fn walk(job: &Job, bounds: &Bounds, from: &Path, to: &Path, made: &mut Made) -> Result<(), String> {
     let entries = std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?;
@@ -354,7 +379,7 @@ fn walk(job: &Job, bounds: &Bounds, from: &Path, to: &Path, made: &mut Made) -> 
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;

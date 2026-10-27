@@ -54,4 +54,18 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationResponse", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger"] }
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSFileManager", "NSURL", "NSError", "NSArray"] }
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# 토큰·키 난수 (platform.rs. 맥은 arc4random)
+[target.'cfg(windows)'.dependencies]
+getrandom = "0.3"
+# 이름 바꾸기·휴지통·Job Object·잠자기 막기 등 (docs/windows-plan.md)
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Power", "Win32_System_IO", "Win32_Security", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Console", "Win32_System_Pipes"] }
+# conpty.rs가 portable-pty의 MasterPty를 구현한다 (그 오류 형식)
+anyhow = "1"
+# 토스트 알림 (notify.rs). tauri가 이미 쓰는 판
+windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation"] }
+# 탐색기에서 끌어 놓은 파일의 경로 (windrop.rs). tauri가 이미 쓰는 판
+webview2-com = "0.39"

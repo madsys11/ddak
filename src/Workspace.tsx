@@ -17,6 +17,7 @@ import type { ProgramStatus } from "./programStatus";
 import { useT } from "./prefs";
 import { type Group, promptOf } from "./useGroups";
 import { openLink } from "./terminalLinks";
+import { cmdKey, otherKey, relativeTo } from "./platform";
 import { type PaneSession, type Setup, type State, type Tab, commandOf, fromSaved, isViewer, toSaved } from "./workspaceState";
 
 // 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 준비 창에서 돌릴 명령 (복제 + 준비 스크립트)
@@ -343,7 +344,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   // 작업그룹을 끝내느라 세션을 끝내는(끝낸) 터미널 ("탭:횟수"). 그 터미널은 끝나도 창을 닫지 않는다.
   const stopping = useRef(new Set<string>());
   // 그 폴더(작업그룹 폴더)에서 띄운 탭. group_end가 그 폴더의 터미널을 모두 끝낸다.
-  const tabsIn = (dir: string) => s.tabs.filter((t) => t.cwd === dir || t.cwd.startsWith(`${dir}/`)).map((t) => t.id);
+  const tabsIn = (dir: string) => s.tabs.filter((t) => t.cwd === dir || relativeTo(t.cwd, dir) !== undefined).map((t) => t.id);
   const runKey = (tab: number) => `${tab}:${runs[tab] ?? 0}`;
   const tabsRef = useRef<HTMLDivElement>(null);
   const visibleRef = useRef(visible);
@@ -504,7 +505,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   // 메뉴에 넣기 애매한 탭 이동 단축키. 터미널보다 먼저 받도록 capture 단계에서 처리한다.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!visibleRef.current || !e.metaKey || e.altKey || e.ctrlKey) return;
+      if (!visibleRef.current || !cmdKey(e) || e.altKey || otherKey(e)) return;
       let action: Action | undefined;
       if (!e.shiftKey && e.key >= "1" && e.key <= "9") {
         action = e.key === "9" ? { type: "selectTabAt", index: s.tabs.length - 1 } : { type: "selectTabAt", index: Number(e.key) - 1 };

@@ -6,7 +6,9 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+#[cfg(unix)]
+use portable_pty::native_pty_system;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use tauri::State;
 use tauri::ipc::{Channel, InvokeResponseBody};
 
@@ -28,7 +30,7 @@ fn enable_utf8_erase(master: &dyn MasterPty) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn enable_utf8_erase(_master: &dyn MasterPty) -> Result<(), String> {
     Ok(())
 }
@@ -37,9 +39,12 @@ fn enable_utf8_erase(_master: &dyn MasterPty) -> Result<(), String> {
 // 좀비로 PID를 쥐고 있어서, 그 번호는 다른 프로세스에도 새 그룹·세션에도 쓰이지 않는다. 그래서 자식(세션 리더)이
 // 먼저 끝나도 그 세션에 남은 프로세스를 안전하게 찾고 보낼 수 있다 (리뷰 P1: portable-pty의 clone_killer는
 // 확인 없이 저장한 PID에 보낸다. 후속 P2: 부모가 먼저 끝나면 SIGHUP을 무시하는 자식이 남았다).
+// Windows는 자식이 끝나면 PID가 바로 다시 쓰일 수 있어서 PID 대신 터미널마다의 Job으로 찾는다 (conpty.rs).
 struct Proc {
     child: Box<dyn Child + Send + Sync>,
     reaped: bool,
+    #[cfg(windows)]
+    job: crate::conpty::Job,
 }
 
 struct Session {
@@ -144,7 +149,7 @@ pub struct Ptys {
     // 깨우기를 기다리는 터미널 (wake, wake_tick)
     wakes: Mutex<HashMap<u32, Pending>>,
     // 작업 중인 터미널이 있는 동안 띄워 두는 caffeinate (keep_awake)
-    awake: Mutex<Option<std::process::Child>>,
+    awake: Mutex<Option<crate::platform::KeepAwake>>,
     // 깨우기 상태 변경 번호. wakes를 잡은 채 매긴다. 이벤트는 잠금 밖에서 보내 순서가 바뀔 수 있어서, 프론트가 터미널마다
     // 더 오래된 번호를 버린다 (리뷰 P2: 앞 깨우기의 해제가 새 대기를 지웠다).
     wake_seq: AtomicU64,
@@ -189,8 +194,9 @@ fn strip_claude_session_vars(cmd: &mut CommandBuilder, keys: impl Iterator<Item 
 // fallback: command가 실패하면 새로 시작할지 물어보고 y면 돌릴 명령 (복원한 세션: 이어서 하기가 안 되면 처음처럼).
 // 묻는 이유: 시작하자마자 실패한 것(이어 갈 대화 없음)과 이어 받아 쓰다가 0이 아닌 코드로 끝난 것(Ctrl-C 130 등)을
 // 구분할 수 없어서, 자동으로 새로 시작하면 쓰던 세션을 끝낸 뒤 새 세션이 뜬다 (리뷰 P2).
-fn shell_command(cwd: &str, command: Option<&[String]>, fallback: Option<&[String]>, shell_after: bool) -> CommandBuilder {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+// Windows는 Git Bash (docs/windows-plan.md W2). 셸 경로가 C:\…여도 sh_quote로 감싸면 bash가 그대로 받는다.
+fn shell_command(cwd: &str, command: Option<&[String]>, fallback: Option<&[String]>, shell_after: bool) -> Result<CommandBuilder, String> {
+    let shell = crate::platform::user_shell()?.to_string_lossy().into_owned();
     let mut cmd = CommandBuilder::new(&shell);
     // 로그인 셸로 띄워야 GUI 앱에서도 사용자의 PATH(.zprofile 등)가 잡힌다.
     cmd.arg("-l");
@@ -212,11 +218,12 @@ fn shell_command(cwd: &str, command: Option<&[String]>, fallback: Option<&[Strin
     if std::env::var("LANG").is_err() {
         cmd.env("LANG", "en_US.UTF-8");
     }
-    cmd
+    Ok(cmd)
 }
 
 // 자식이 끝날 때까지 거두지 않고 기다린다 (waitid WNOWAIT). 끝난 자식은 거둘 때까지 좀비로 남아 PID가 그대로다.
 // 종료 코드는 거두지 않고 siginfo에서 읽는다. 시그널로 끝났거나 모르면 (ECHILD: 끝내기가 이미 거둠) None.
+#[cfg(unix)]
 fn wait_exit(pid: u32) -> Option<u32> {
     loop {
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -228,6 +235,36 @@ fn wait_exit(pid: u32) -> Option<u32> {
             return None;
         }
     }
+}
+
+// Windows: 끝날 때까지 자식 핸들을 본다 (거두기·좀비가 없어 잠금을 오래 쥐지 않게 짧게 나눠 본다)
+#[cfg(windows)]
+fn wait_exit_windows(proc: &Mutex<Proc>) -> Option<u32> {
+    loop {
+        match proc.lock().unwrap().child.try_wait() {
+            Ok(Some(status)) => return Some(status.exit_code()),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+// 플랫폼마다 PTY를 열고 띄운다: 맥은 portable-pty, Windows는 Job 안에서 띄우는 ConPTY (conpty.rs)
+#[cfg(unix)]
+fn open_and_spawn(cmd: CommandBuilder, size: PtySize) -> Result<(Box<dyn MasterPty + Send>, Proc), String> {
+    let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
+    enable_utf8_erase(&*pair.master)?;
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    drop(pair.slave);
+    Ok((pair.master, Proc { child, reaped: false }))
+}
+
+#[cfg(windows)]
+fn open_and_spawn(cmd: CommandBuilder, size: PtySize) -> Result<(Box<dyn MasterPty + Send>, Proc), String> {
+    let job = crate::conpty::Job::new()?;
+    let (master, child) = crate::conpty::spawn(&cmd, size, &job)?;
+    Ok((Box::new(master), Proc { child: Box::new(child), reaped: false, job }))
 }
 
 // PTY를 열고 명령을 띄운다. 출력은 output으로 보내고, 출력이 끝나면 (또는 자식이 끝난 뒤 잠시 기다려도 출력이
@@ -246,15 +283,13 @@ fn spawn(
     if !Path::new(cwd).is_dir() {
         return Err(format!("{cwd}: no such folder"));
     }
-    let real = std::fs::canonicalize(cwd).map_err(|e| e.to_string())?;
-    let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
-    enable_utf8_erase(&*pair.master)?;
-    let child = pair.slave.spawn_command(shell_command(cwd, command, fallback, shell_after)).map_err(|e| e.to_string())?;
-    drop(pair.slave);
-    let pid = child.process_id();
-    let proc = Arc::new(Mutex::new(Proc { child, reaped: false }));
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let real = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
+    let (master, proc) = open_and_spawn(shell_command(cwd, command, fallback, shell_after)?, size)?;
+    #[cfg(unix)]
+    let pid = proc.child.process_id();
+    let proc = Arc::new(Mutex::new(proc));
+    let mut reader = master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = master.take_writer().map_err(|e| e.to_string())?;
 
     let (read_done, output_ended) = channel::<()>();
     std::thread::spawn(move || {
@@ -272,13 +307,18 @@ fn spawn(
         }
         let _ = read_done.send(());
     });
+    #[cfg(windows)]
+    let waited = proc.clone();
     std::thread::spawn(move || {
+        #[cfg(unix)]
         let code = pid.and_then(wait_exit);
+        #[cfg(windows)]
+        let code = wait_exit_windows(&waited);
         // 남은 출력을 먼저 보내도록 출력이 끝나기를 잠시 기다린다
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master: pair.master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_kind: String::new(), awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None, working: false })
+    Ok(Session { master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_kind: String::new(), awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None, working: false })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -305,6 +345,7 @@ fn session_members(sid: i32) -> Vec<i32> {
 // 때까지(최대 3초) 기다린 뒤 자식을 거둔다. 그래서 nohup으로 띄운 작업도 터미널을 닫으면 끝난다.
 // 세션을 떠난 프로세스(스스로 setsid한 데몬 등)는 찾지 못한다. 다 끝나지 않았으면 거두지 않고 false
 // (자식이 좀비로 세션 ID를 쥐고 있어 다시 불러도 안전하다).
+#[cfg(unix)]
 fn terminate(proc: &Mutex<Proc>) -> bool {
     let mut p = proc.lock().unwrap();
     let Some(sid) = p.child.process_id().map(|id| id as i32).filter(|_| !p.reaped) else {
@@ -335,6 +376,29 @@ fn terminate(proc: &Mutex<Proc>) -> bool {
     let _ = p.child.wait();
     p.reaped = true;
     true
+}
+
+// Windows: 터미널의 Job 전체를 끝내고, Job에 남은 프로세스가 0이 될 때까지 다시 본다 (docs/windows-plan.md "세션 끝내기").
+// 처음부터 Job 안에서 띄워서(conpty.rs) 새로 들어올 수 있는 것은 Job 안 프로세스의 자식뿐이다. 다시 볼 때 남아 있으면
+// (끝내는 사이 생긴 자식) 다시 끝낸다. 3초 안에 0이 안 되거나 수를 읽지 못하면 false (닫는 중으로 남아 다시 부른다).
+#[cfg(windows)]
+fn terminate(proc: &Mutex<Proc>) -> bool {
+    let mut p = proc.lock().unwrap();
+    if p.reaped {
+        return true;
+    }
+    for _ in 0..60 {
+        match p.job.active() {
+            Some(0) => {
+                let _ = p.child.wait();
+                p.reaped = true;
+                return true;
+            }
+            _ => p.job.terminate(),
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 // 터미널을 닫는다: 목록에서 닫는 중으로 옮기고 (빠지는 틈이 없게 두 목록을 함께 잡는다) 따로 끝낸다. 다 끝나면
@@ -388,7 +452,7 @@ pub fn stop_under(ptys: &Ptys, dir: &Path) -> bool {
 }
 
 // dir 안에서 띄운 터미널이 남아 있는지 (닫는 중 포함)
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn running_under(ptys: &Ptys, dir: &Path) -> bool {
     let sessions = ptys.sessions.lock().unwrap();
     let closing = ptys.closing.lock().unwrap();
@@ -433,7 +497,7 @@ fn open(
         None => (None, None),
     };
     let ending = ptys.ending.read().unwrap();
-    let refuse = std::fs::canonicalize(cwd).is_ok_and(|real| ending.iter().any(|d| real.starts_with(d)));
+    let refuse = crate::platform::canonical(cwd).is_ok_and(|real| ending.iter().any(|d| real.starts_with(d)));
     let spawned = if refuse { Err(format!("{cwd}: this work group is ending")) } else { spawn(cwd, command, fallback, shell_after, size, output, exited) };
     let mut session = match spawned {
         Ok(session) => session,
@@ -526,7 +590,7 @@ fn join_chat(
     vars: HashMap<String, String>,
 ) -> (Option<Vec<String>>, Option<Vec<String>>, Option<Joined>) {
     let joined = chat.zip(chats).map(|(c, chats)| {
-        let project = std::fs::canonicalize(&c.project).unwrap_or_else(|_| PathBuf::from(&c.project));
+        let project = crate::platform::canonical(&c.project).unwrap_or_else(|_| PathBuf::from(&c.project));
         let (token, url, _) = chats.join(&project, &c.name, &c.key);
         let t = token.clone();
         (url, Joined { leave: Box::new(move || chats.leave(&t)), token })
@@ -608,7 +672,7 @@ fn foreground(ptys: &Ptys, id: u32) -> Vec<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn process_name(pid: libc::pid_t) -> Option<String> {
+fn process_name(pid: i32) -> Option<String> {
     let mut buf = [0u8; 256];
     let n = unsafe { libc::proc_name(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
     (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
@@ -617,7 +681,7 @@ fn process_name(pid: libc::pid_t) -> Option<String> {
 // argv[0]의 마지막 부분. 로그인 셸의 "-zsh"는 "zsh"로.
 // KERN_PROCARGS2: argc(int), 실행 파일 경로, NUL 채움, argv[0], ... 순이다.
 #[cfg(target_os = "macos")]
-fn invoked_name(pid: libc::pid_t) -> Option<String> {
+fn invoked_name(pid: i32) -> Option<String> {
     let mut max: libc::c_int = 0;
     let mut size = std::mem::size_of::<libc::c_int>();
     let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
@@ -642,12 +706,12 @@ fn invoked_name(pid: libc::pid_t) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn process_name(_pid: libc::pid_t) -> Option<String> {
+fn process_name(_pid: i32) -> Option<String> {
     None
 }
 
 #[cfg(not(target_os = "macos"))]
-fn invoked_name(_pid: libc::pid_t) -> Option<String> {
+fn invoked_name(_pid: i32) -> Option<String> {
     None
 }
 
@@ -664,7 +728,7 @@ pub(crate) fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Resul
 
 // 이 토큰들로 참여한 터미널이 from의 메시지를 받았다: 깨우기를 기다린다. (기다리게 된 터미널, 변경 번호)
 // 테스트용 줄임. 앱은 wake_all로 한꺼번에 예약한다.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn wake(ptys: &Ptys, tokens: &[String], from: &str) -> Vec<(u32, u64)> {
     wake_all(ptys, &tokens.iter().map(|t| (t.clone(), from.to_string())).collect::<Vec<_>>())
 }
@@ -837,25 +901,31 @@ impl Ptys {
         let any = self.sessions.lock().unwrap().values().any(|s| s.working);
         let mut awake = self.awake.lock().unwrap();
         // 누가 끝냈으면 다시 띄운다
-        if awake.as_mut().is_some_and(|c| !matches!(c.try_wait(), Ok(None))) {
+        if awake.as_mut().is_some_and(|a| !a.alive()) {
             *awake = None;
         }
         if any && awake.is_none() {
-            match std::process::Command::new("/usr/bin/caffeinate").args(["-i", "-w", &std::process::id().to_string()]).spawn() {
-                Ok(child) => *awake = Some(child),
-                Err(e) => eprintln!("caffeinate 실패: {e}"),
+            match crate::platform::KeepAwake::start() {
+                Ok(a) => *awake = Some(a),
+                Err(e) => eprintln!("잠자기 막기 실패: {e}"),
             }
         } else if !any {
-            if let Some(mut child) = awake.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+            if let Some(a) = awake.take() {
+                a.stop();
             }
         }
     }
 
     // 터미널 앞에서 도는 프로그램(포그라운드 프로세스 그룹의 대표)의 pid (터미널 링크의 상대 경로 기준, links.rs)
-    pub fn foreground_pid(&self, id: u32) -> Option<libc::pid_t> {
+    // Windows의 ConPTY에는 포그라운드 프로세스 그룹이 없다 (링크는 띄운 폴더 기준, ⇧↩은 세션 구성의 것만. docs/windows-plan.md)
+    #[cfg(unix)]
+    pub fn foreground_pid(&self, id: u32) -> Option<i32> {
         self.sessions.lock().unwrap().get(&id).and_then(|s| s.master.process_group_leader())
+    }
+
+    #[cfg(windows)]
+    pub fn foreground_pid(&self, _id: u32) -> Option<i32> {
+        None
     }
 
     // 이 터미널의 채팅 토큰 (채팅방 참여자가 아니면 없음)
@@ -940,7 +1010,8 @@ pub fn pty_kill(ptys: State<'_, Ptys>, id: u32) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+// 유닉스 권한·링크·sh를 쓰는 시험 (Windows 시험은 platform.rs·conpty.rs·fs.rs)
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

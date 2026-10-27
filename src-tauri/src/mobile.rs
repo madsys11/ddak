@@ -142,7 +142,7 @@ fn now_ms() -> u64 {
 
 fn random_hex(n: usize) -> String {
     let mut bytes = vec![0u8; n];
-    unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
+    crate::platform::fill_random(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -163,7 +163,7 @@ fn push_state(d: &Device) -> &'static str {
 
 // 6자리 숫자 코드 (폰에서 치기 쉽게. 5분 1회용 + 실패 제한)
 fn new_code() -> String {
-    format!("{:06}", unsafe { libc::arc4random_uniform(1_000_000) })
+    format!("{:06}", crate::platform::random_below(1_000_000))
 }
 
 // 화면 주소의 출처 (scheme://host[:port])
@@ -179,7 +179,7 @@ fn project_id(real: &Path) -> String {
 }
 
 fn real(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    crate::platform::canonical(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
@@ -194,24 +194,29 @@ fn read_json<T: serde::de::DeserializeOwned + Default>(path: &Path) -> T {
 
 // 임시 파일에 쓴 뒤 바꿔치기한다. 토큰 해시가 있으므로 나만 읽게 (0600).
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp).map_err(|e| e.to_string())?;
+    let mut f = crate::platform::with_mode(std::fs::OpenOptions::new().write(true).create(true).truncate(true), 0o600).open(&tmp).map_err(|e| e.to_string())?;
     f.write_all(&json).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 // 이 맥 이름 (폰에 보일 기본 이름)
+#[cfg(target_os = "macos")]
 fn host_name() -> String {
     let out = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "Mac".into(),
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_name() -> String {
+    std::env::var("COMPUTERNAME").ok().filter(|n| !n.is_empty()).unwrap_or_else(|| "PC".into())
 }
 
 type Reply = tiny_http::Response<std::io::Cursor<Vec<u8>>>;
@@ -748,13 +753,18 @@ impl Mobile {
 
 // --- Tailscale ---
 
+// Windows는 설치 폴더(Program Files)의 tailscale.exe
 fn tailscale_cli() -> Option<PathBuf> {
+    if cfg!(windows) {
+        let installed = ["ProgramFiles", "ProgramW6432"].iter().filter_map(|v| std::env::var_os(v)).map(|d| PathBuf::from(d).join("Tailscale").join("tailscale.exe"));
+        return installed.into_iter().find(|p| p.is_file());
+    }
     TAILSCALE_CLI.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
 fn tailscale_json(args: &[&str]) -> Result<Value, String> {
     let cli = tailscale_cli().ok_or("tailscale not installed")?;
-    let out = std::process::Command::new(cli).args(args).output().map_err(|e| e.to_string())?;
+    let out = crate::platform::background(cli).args(args).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -945,7 +955,7 @@ pub fn mobile_serve(state: tauri::State<'_, MobileState>) -> Result<Status, Stri
     let mobile = mobile_of(&state)?;
     let port = mobile.port().unwrap_or(mobile.config().port);
     let cli = tailscale_cli().ok_or("tailscale not installed")?;
-    let out = std::process::Command::new(cli).args(["serve", "--bg", &port.to_string()]).output().map_err(|e| e.to_string())?;
+    let out = crate::platform::background(cli).args(["serve", "--bg", &port.to_string()]).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }

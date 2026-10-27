@@ -21,8 +21,8 @@ fn ddak_home() -> Result<PathBuf, CodeError> {
     if std::env::var_os("DDAK_SELFTEST").is_some() {
         return Err(code_err("io", "자체 테스트에는 DDAK_HOME이 필요하다"));
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| code_err("io", "HOME 없음"))?;
-    Ok(PathBuf::from(home).join(".ddak"))
+    let home = crate::platform::home().ok_or_else(|| code_err("io", "HOME 없음"))?;
+    Ok(home.join(".ddak"))
 }
 
 // 이름이 같은 프로젝트가 둘 있어도 섞이지 않게 경로 해시를 붙인다 (FNV-1a, 실행마다 같은 값).
@@ -58,7 +58,7 @@ fn git_command() -> Command {
     if let Some(program) = TEST_GIT.with(|g| g.borrow().clone()) {
         return Command::new(program);
     }
-    Command::new("git")
+    crate::platform::background("git")
 }
 
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
@@ -171,7 +171,7 @@ fn plan(repos: &[Repo], commons: &[String], dest: &Path, name: &str) -> Vec<Step
 
 // home: ~/.ddak (테스트는 임시 폴더)
 fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError> {
-    let root = std::fs::canonicalize(project).map_err(|e| code_err("io", e))?;
+    let root = crate::platform::canonical(project).map_err(|e| code_err("io", e))?;
     let base = home.join("worktrees").join(project_slug(&root));
 
     let (repos, others) = project_repos(&root)?;
@@ -217,7 +217,7 @@ fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError
         }
     }
     for other in &others {
-        if let Err(e) = std::os::unix::fs::symlink(root.join(other), dest.join(other)) {
+        if let Err(e) = crate::platform::symlink(&root.join(other), &dest.join(other)) {
             undo.run();
             return Err(code_err("io", format!("{other}: {e}")));
         }
@@ -321,12 +321,12 @@ impl GroupStatus {
 
 // 작업그룹 폴더가 이 프로젝트의 ddak 폴더 바로 아래 것인지 확인하고 (ddak 폴더, 이름, 원본 폴더)
 fn locate(home: &Path, project: &str, group: &str) -> Result<(PathBuf, String, PathBuf), CodeError> {
-    let root = std::fs::canonicalize(project).map_err(|e| code_err("io", e))?;
+    let root = crate::platform::canonical(project).map_err(|e| code_err("io", e))?;
     let base = home.join("worktrees").join(project_slug(&root));
     let group = Path::new(group);
     let name = group.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let real_base = std::fs::canonicalize(&base).map_err(|e| code_err("io", e))?;
-    let real_parent = group.parent().and_then(|p| std::fs::canonicalize(p).ok());
+    let real_base = crate::platform::canonical(&base).map_err(|e| code_err("io", e))?;
+    let real_parent = group.parent().and_then(|p| crate::platform::canonical(p).ok());
     if name.is_empty() || name.starts_with('.') || real_parent.as_deref() != Some(real_base.as_path()) {
         return Err(code_err("io", format!("{}: not a work group of this project", group.display())));
     }
@@ -481,7 +481,7 @@ fn end(home: &Path, project: &str, group: &str, ptys: &Ptys) -> Result<Ended, En
     }
     let (base, name, _) = locate(home, project, group)?;
     let dest = base.join(&name);
-    let real = std::fs::canonicalize(&dest).unwrap_or(dest);
+    let real = crate::platform::canonical(&dest).unwrap_or(dest);
     let _ending = crate::pty::hold(ptys, &real);
     let stopped = |e: CodeError| EndError { code: e.code, detail: e.detail, stopped: true };
     if !crate::pty::stop_under(ptys, &real) {

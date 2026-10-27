@@ -152,8 +152,13 @@ fn post(title: &str, body: &str, target: Option<Target>) {
     let sound = SOUND_FILE.lock().unwrap().clone();
     #[cfg(target_os = "macos")]
     mac::deliver(&id, &title, body, sound.as_deref());
-    #[cfg(not(target_os = "macos"))]
-    let _ = sound;
+    #[cfg(windows)]
+    {
+        let _ = sound;
+        if let Err(e) = win::deliver(&id, &title, body) {
+            eprintln!("알림 실패: {e}");
+        }
+    }
 }
 
 const SYSTEM_SOUNDS: &str = "/System/Library/Sounds";
@@ -188,7 +193,12 @@ pub fn first_line(text: &str) -> String {
     if line.chars().count() > 120 { format!("{}…", line.chars().take(120).collect::<String>()) } else { line.to_string() }
 }
 
+// 맥: .app 번들 안에서 돌 때. Windows: 설치한 앱(릴리스 빌드). 토스트는 시작 메뉴 바로 가기의 앱 ID(AUMID)로 보이는데
+// 개발 실행에는 그것이 없다
 fn bundled() -> bool {
+    if cfg!(windows) {
+        return !cfg!(debug_assertions);
+    }
     std::env::current_exe().is_ok_and(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
 }
 
@@ -201,6 +211,38 @@ pub fn init(app: &tauri::AppHandle) {
             mac::present_in_front();
             mac::authorize();
         }
+    }
+}
+
+// Windows 토스트 (WinRT ToastNotificationManager). 앱 ID는 앱 식별자 (설치 프로그램이 시작 메뉴 바로 가기에 적는 값과 같아야
+// 보인다. 실기기에서 확인할 것: docs/windows-plan.md). 누르면 Activated가 (앱이 떠 있는 동안) clicked를 부른다. 소리는 Windows 기본.
+#[cfg(windows)]
+mod win {
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+    use windows::core::HSTRING;
+
+    fn escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+    }
+
+    pub fn deliver(id: &str, title: &str, body: &str) -> windows::core::Result<()> {
+        let app_id = super::APP.get().map(|a| a.config().identifier.clone()).unwrap_or_default();
+        let xml = XmlDocument::new()?;
+        xml.LoadXml(&HSTRING::from(format!(
+            r#"<toast launch="{}"><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual></toast>"#,
+            escape(id),
+            escape(title),
+            escape(body)
+        )))?;
+        let toast = ToastNotification::CreateToastNotification(&xml)?;
+        let id = id.to_string();
+        toast.Activated(&TypedEventHandler::new(move |_, _| {
+            super::clicked(&id);
+            Ok(())
+        }))?;
+        ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))?.Show(&toast)
     }
 }
 
@@ -277,7 +319,7 @@ mod mac {
 // 보고 있는 프로젝트와 그 채팅 패널이 열렸는지 (프론트 App.tsx가 바뀔 때마다 보낸다)
 #[tauri::command]
 pub fn set_view(active: Option<String>, chat_open: bool) {
-    let active = active.map(|p| std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p)));
+    let active = active.map(|p| crate::platform::canonical(&p).unwrap_or_else(|_| PathBuf::from(p)));
     with_view(|v| {
         v.active = active;
         v.chat_open = chat_open;
@@ -288,7 +330,8 @@ pub fn set_view(active: Option<String>, chat_open: bool) {
 #[tauri::command]
 pub fn set_notify_sound(sound: String, preview: Option<String>) {
     // 자체 테스트·개발 실행은 알림을 보내지 않으니 홈에 파일을 만들지 않는다
-    let file = if sound == "default" || selftest() || !bundled() {
+    // 소리 고르기는 맥 알림 센터의 것이다 (Windows는 토스트 기본 소리, 메뉴에도 없다)
+    let file = if sound == "default" || selftest() || !bundled() || !cfg!(target_os = "macos") {
         None
     } else {
         let dir = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Sounds"));
@@ -325,8 +368,31 @@ pub fn set_badge(app: tauri::AppHandle, count: u32) {
         let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
         NSApplication::sharedApplication(mtm).dockTile().setBadgeLabel(label.as_deref());
     });
-    #[cfg(not(target_os = "macos"))]
+    // Windows: 작업 표시줄 단추에 빨간 점 (수는 그리지 않는다. 0이면 지움)
+    #[cfg(windows)]
+    {
+        use tauri::Manager;
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_overlay_icon((count > 0).then(|| tauri::image::Image::new_owned(badge_dot(16), 16, 16)));
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = (app, count);
+}
+
+// 지름 size의 빨간 원 (RGBA, 가장자리는 반투명으로)
+#[cfg_attr(not(windows), allow(dead_code))]
+fn badge_dot(size: u32) -> Vec<u8> {
+    let r = size as f32 / 2.0;
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let d = ((x as f32 + 0.5 - r).powi(2) + (y as f32 + 0.5 - r).powi(2)).sqrt();
+            let alpha = ((r - d + 0.5).clamp(0.0, 1.0) * 255.0) as u8;
+            rgba.extend_from_slice(&[0xe5, 0x3e, 0x3e, alpha]);
+        }
+    }
+    rgba
 }
 
 // 자체 테스트: 보낸 알림 (가져가면 비운다)과 마지막 배지 수, 알림 소리. 창 포커스를 정한다 (테스트 창은 포커스가 없을 수 있다)
@@ -338,7 +404,7 @@ pub fn selftest_notifications() -> (Vec<(String, String)>, u32, Option<String>) 
 // 실제 경로 (링크를 따라감. 없는 경로면 그대로). 알림의 프로젝트(실제 경로)를 등록한 프로젝트와 맞춘다 (src/notifyClick.ts)
 #[tauri::command]
 pub fn real_path(path: String) -> String {
-    std::fs::canonicalize(&path).map_or(path, |p| p.to_string_lossy().into_owned())
+    crate::platform::canonical(&path).map_or(path, |p| p.to_string_lossy().into_owned())
 }
 
 // 자체 테스트: 본문이 prefix로 시작하는 마지막 알림을 누른 것처럼 한다 (있었으면 true)
@@ -358,7 +424,7 @@ pub fn selftest_click_notification(prefix: String) -> bool {
 #[tauri::command]
 pub fn selftest_notify(project: String, kind: String, body: String) {
     if selftest() {
-        let real = std::fs::canonicalize(&project).unwrap_or_else(|_| PathBuf::from(project));
+        let real = crate::platform::canonical(&project).unwrap_or_else(|_| PathBuf::from(project));
         let kind = match kind.as_str() {
             "attention" => Kind::Attention,
             "paused" => Kind::Paused,

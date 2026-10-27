@@ -17,10 +17,22 @@ pub fn code_err(code: &'static str, detail: impl ToString) -> CodeError {
 // 폴더 바로 아래 항목 이름. 경로가 섞이면 다른 곳에 만들 수 있으니 막는다.
 fn check_name(name: &str) -> Result<&str, CodeError> {
     let name = name.trim();
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || (cfg!(windows) && !windows_name_ok(name)) {
         return Err(code_err("badName", name));
     }
     Ok(name)
+}
+
+// Windows에서 폴더 바로 아래 한 항목의 이름이 될 수 있는지 (docs/windows-plan.md "파일 이름"). `\`·`:`(드라이브 접두사,
+// 대체 데이터 스트림)가 들면 Path::join이 폴더 밖이나 다른 드라이브가 되고, 끝의 점·공백과 장치 이름은 OS가 다른 것으로 바꾼다.
+fn windows_name_ok(name: &str) -> bool {
+    !(name.chars().any(|c| c < ' ' || "<>:\"/\\|?*".contains(c)) || name.ends_with(['.', ' ']) || crate::platform::is_device_name(name))
+}
+
+// 만든 경로가 정확히 그 폴더 바로 아래인지 (이름 검사를 지나도 한 번 더)
+fn directly_under(dir: &Path, path: &Path) -> bool {
+    let normal = matches!(path.components().next_back(), Some(std::path::Component::Normal(_)));
+    normal && path.parent() == Some(dir) && path.components().count() == dir.components().count() + 1
 }
 
 // 폴더 바로 아래 새 항목의 경로. 이미 있으면 실패.
@@ -28,6 +40,9 @@ fn check_name(name: &str) -> Result<&str, CodeError> {
 pub fn child_path(dir: &str, name: &str) -> Result<PathBuf, CodeError> {
     let name = check_name(name)?;
     let path = Path::new(dir).join(name);
+    if !directly_under(Path::new(dir), &path) {
+        return Err(code_err("badName", name));
+    }
     // 깨진 링크도 "있음"으로 본다.
     if path.symlink_metadata().is_ok() {
         return Err(code_err("exists", name));
@@ -53,7 +68,8 @@ pub fn fs_create(dir: String, name: String, kind: String) -> Result<String, Code
 }
 
 // 대상이 있으면 실패하는 rename. 확인과 옮기기 사이에 대상이 생겨도 덮어쓰지 않는다 (macOS renamex_np RENAME_EXCL).
-fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
+#[cfg(unix)]
+pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let from = CString::new(src.as_os_str().as_bytes())?;
@@ -63,6 +79,26 @@ fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+// Windows: MoveFileExW에 MOVEFILE_REPLACE_EXISTING을 주지 않으면 대상이 있을 때 실패한다 (std::fs::rename은 덮어쓴다).
+// 대소문자만 바꾸기는 같은 항목이라 된다.
+#[cfg(windows)]
+pub(crate) fn rename_excl(src: &Path, dest: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    let (from, to) = (wide(src), wide(dest));
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+// Windows API에 넘길 NUL로 끝나는 UTF-16 경로
+#[cfg(windows)]
+pub fn wide(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
 }
 
 // 이름 바꾸기 (파일 트리). 같은 폴더 안에서 이름만 바꾼다. 이미 있는 이름이면 덮어쓰지 않고 실패한다.
@@ -80,6 +116,9 @@ pub fn fs_rename(path: String, name: String) -> Result<String, CodeError> {
         return Ok(path); // 그대로
     }
     let dest = dir.join(new);
+    if !directly_under(dir, &dest) {
+        return Err(code_err("badName", new));
+    }
     rename_excl(src, &dest).map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => code_err("exists", new),
         _ => code_err("io", e),
@@ -116,9 +155,28 @@ fn move_to_trash(path: &Path) -> Result<(), String> {
     NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None).map_err(|e| e.localizedDescription().to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+// Windows 휴지통 (셸 파일 작업, FOF_ALLOWUNDO). 휴지통이 없는 곳(네트워크 드라이브 등)이면 아주 지울지 셸이 묻는다
+// (FOF_WANTNUKEWARNING: 묻지 않고 지우지 않게).
+#[cfg(windows)]
 fn move_to_trash(path: &Path) -> Result<(), String> {
-    Err(format!("{}: trash is only supported on macOS", path.display()))
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW,
+    };
+    // 이름 목록은 NUL 두 개로 끝난다
+    let mut from = wide(path);
+    from.push(0);
+    let mut op: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+    op.wFunc = FO_DELETE;
+    op.pFrom = from.as_ptr();
+    op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING) as u16;
+    let r = unsafe { SHFileOperationW(&mut op) };
+    if r != 0 {
+        return Err(format!("{}: trash failed ({r:#x})", path.display()));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err(format!("{}: trash cancelled", path.display()));
+    }
+    Ok(())
 }
 
 // Finder 등 앱 밖에서 끌어 놓은 파일의 경로 (src/dragPath.ts droppedFiles). 웹뷰의 drop은 File만 주고 경로는 주지 않아
@@ -136,6 +194,18 @@ pub struct DragFiles {
 pub fn drag_files() -> DragFiles {
     let board = drag_board();
     DragFiles { count: board_count(&board), paths: read_drag_files(&board) }
+}
+
+// Windows: 화면이 토큰과 함께 보낸 파일들의 경로 (windrop.rs). 아직 오지 않았으면 None, 맥은 늘 None (끌기 대지를 쓴다)
+#[tauri::command]
+pub fn drop_paths(token: String) -> Option<Vec<String>> {
+    #[cfg(windows)]
+    return crate::windrop::take(&token);
+    #[cfg(not(windows))]
+    {
+        let _ = token;
+        None
+    }
 }
 
 #[tauri::command]
@@ -317,6 +387,22 @@ pub fn fs_read_image(path: String) -> Result<String, CodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Windows에서 폴더 밖이나 다른 것이 될 이름은 거절한다 (규칙은 맥에서도 시험한다)
+    #[test]
+    fn windows_names() {
+        for bad in ["..\\out", "C:\\out", "C:out", "\\out", "a:stream", "a<b", "a|b", "a?", "a*", "a\"b", "tab\there", "end.", "end ", "CON", "con.txt",
+            "Nul", "COM1", "lpt9.log", "COM¹", "CONIN$"]
+        {
+            assert!(!windows_name_ok(bad), "{bad}");
+        }
+        for good in ["a.txt", ".env", "한글 이름.md", "COM", "COM10", "console.log", "LPT0", "a..b"] {
+            assert!(windows_name_ok(good), "{good}");
+        }
+        assert!(directly_under(Path::new("/p/d"), &Path::new("/p/d").join("x")));
+        assert!(!directly_under(Path::new("/p/d"), &Path::new("/p/d").join("/abs")));
+        assert!(!directly_under(Path::new("/p/d"), &Path::new("/p/d").join("..")));
+    }
 
     // 끌기 대지의 파일 참조 주소(Finder가 싣는 모양)를 경로로 읽는다. 한글·공백 이름, 없는 파일(일반 file 주소)도.
     #[cfg(target_os = "macos")]

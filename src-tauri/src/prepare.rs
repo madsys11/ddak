@@ -38,7 +38,8 @@ fn recreate_venv(src: &Path, dst: &Path) -> Result<(), String> {
         cfg.lines().find_map(|l| l.split_once('=').filter(|(k, _)| k.trim() == key).map(|(_, v)| v.trim().to_string()))
     };
     let home = value("home").ok_or("pyvenv.cfg has no home")?;
-    let python = ["python3", "python"].iter().map(|p| Path::new(&home).join(p)).find(|p| p.is_file()).ok_or(format!("no python in {home}"))?;
+    let names: &[&str] = if cfg!(windows) { &["python.exe", "python3.exe"] } else { &["python3", "python"] };
+    let python = names.iter().map(|p| Path::new(&home).join(p)).find(|p| p.is_file()).ok_or(format!("no python in {home}"))?;
     let mut cmd = Command::new(&python);
     cmd.args(["-m", "venv"]);
     if value("include-system-site-packages").as_deref() == Some("true") {
@@ -65,10 +66,10 @@ struct State {
 
 // 폴더 식별자: 같은 볼륨의 같은 inode이고 만든 시각까지 같아야 같은 폴더다 (링크는 따라가지 않는다)
 fn folder_id(path: &Path) -> Option<[u64; 4]> {
-    use std::os::unix::fs::MetadataExt;
     let meta = path.symlink_metadata().ok().filter(|m| m.is_dir())?;
     let born = meta.created().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some([meta.dev(), meta.ino(), born.as_secs(), born.subsec_nanos() as u64])
+    let (dev, ino) = crate::platform::file_id(path)?;
+    Some([dev, ino, born.as_secs(), born.subsec_nanos() as u64])
 }
 
 struct Progress {
@@ -128,8 +129,8 @@ fn repo_of(rel: &str, origin_is_repo: bool) -> PathBuf {
 // 밖을 가리키는 링크라 config/.env를 밖에 썼다).
 fn place_inside(place: &Path, bound: &Path) -> Result<(), String> {
     let parent = place.parent().ok_or("no parent folder")?;
-    let real = std::fs::canonicalize(parent).map_err(|_| "its folder is not in the work group".to_string())?;
-    let bound = std::fs::canonicalize(bound).map_err(|e| format!("{}: {e}", bound.display()))?;
+    let real = crate::platform::canonical(parent).map_err(|_| "its folder is not in the work group".to_string())?;
+    let bound = crate::platform::canonical(bound).map_err(|e| format!("{}: {e}", bound.display()))?;
     if !real.starts_with(&bound) {
         return Err("its folder leads outside the work group".into());
     }
@@ -170,10 +171,34 @@ pub fn run_helper(args: &[String]) -> i32 {
     if script.is_empty() {
         return 0;
     }
+    run_script(script, origin, name)
+}
+
+#[cfg(unix)]
+fn run_script(script: &str, origin: &Path, name: &str) -> i32 {
     use std::os::unix::process::CommandExt;
     let err = Command::new("/bin/sh").arg(script).env("DDAK_ORIGIN", origin).env("DDAK_GROUP", name).exec();
     eprintln!("[ddak] could not run {script}: {err}");
     127
+}
+
+// Windows에는 exec가 없어 Git Bash로 돌리고 그 종료 코드로 끝난다
+#[cfg(windows)]
+fn run_script(script: &str, origin: &Path, name: &str) -> i32 {
+    let sh = match crate::platform::sh() {
+        Ok(sh) => sh,
+        Err(e) => {
+            eprintln!("[ddak] could not run {script}: {e}");
+            return 127;
+        }
+    };
+    match Command::new(sh).arg(script).env("DDAK_ORIGIN", origin).env("DDAK_GROUP", name).status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("[ddak] could not run {script}: {e}");
+            127
+        }
+    }
 }
 
 // 고른 항목 하나를 새 작업그룹으로: 파일은 복사, 파이썬 가상 환경은 새로 만들기, 그 밖의 폴더는 복제.
@@ -244,9 +269,10 @@ fn bring(origin: &Path, group: &Path, temp_root: &Path, origin_is_repo: bool, re
     true
 }
 
-// 완성된 가상 환경처럼 보이는지 (pyvenv.cfg와 bin/python)
+// 완성된 가상 환경처럼 보이는지 (pyvenv.cfg와 bin/python, Windows는 Scripts\python.exe)
 fn complete_venv(dir: &Path) -> bool {
-    dir.join("pyvenv.cfg").is_file() && dir.join("bin/python").exists()
+    let python = if cfg!(windows) { dir.join("Scripts").join("python.exe") } else { dir.join("bin/python") };
+    dir.join("pyvenv.cfg").is_file() && python.exists()
 }
 
 // 가상 환경 새로 만들기. 만드는 곳 안에 경로가 박혀서 다른 곳에 만들어 옮길 수 없다. 그래서 폴더를 직접 만들어 그
@@ -316,7 +342,7 @@ fn install(group: &Path, origin_is_repo: bool, dir: &str, command: &str, progres
     }
     // 그 폴더를 실제로 따라간 곳도 그 worktree 안이어야 한다 (밖을 가리키는 링크 폴더에서 돌리지 않게)
     let bound = group.join(repo_of(dir, origin_is_repo));
-    let inside = std::fs::canonicalize(&at).ok().zip(std::fs::canonicalize(&bound).ok()).is_some_and(|(real, b)| real.starts_with(b));
+    let inside = crate::platform::canonical(&at).ok().zip(crate::platform::canonical(&bound).ok()).is_some_and(|(real, b)| real.starts_with(b));
     if !inside {
         return fail("the folder leads outside the work group".into());
     }
@@ -334,7 +360,11 @@ fn install(group: &Path, origin_is_repo: bool, dir: &str, command: &str, progres
         return fail(e);
     }
     println!("[ddak] running {label}");
-    match Command::new("/bin/sh").arg("-c").arg(command).current_dir(&at).status() {
+    let sh = match crate::platform::sh() {
+        Ok(sh) => sh,
+        Err(e) => return fail(e),
+    };
+    match Command::new(sh).arg("-c").arg(command).current_dir(&at).status() {
         Ok(status) if status.success() => match progress.mark(&key, true) {
             Ok(()) => true,
             Err(e) => fail(e),
@@ -344,7 +374,8 @@ fn install(group: &Path, origin_is_repo: bool, dir: &str, command: &str, progres
     }
 }
 
-#[cfg(test)]
+// 유닉스 권한·링크·sh를 쓰는 시험 (Windows 시험은 platform.rs·conpty.rs·fs.rs)
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

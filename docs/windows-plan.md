@@ -2,7 +2,8 @@
 
 > 작성: 2026-10-27
 > 상태: 계획. 결정 W1~W3은 사용자가 정함 (2026-10-27). 문서 리뷰 통과 (2026-10-28, 재리뷰 2회,
-> `docs/reviews/2026-10-28-windows-plan.md`). 0단계 시작 전.
+> `docs/reviews/2026-10-28-windows-plan.md`). 0단계와 1단계 코드 작성 (2026-10-28, 맥에서 Windows 타입 검사만 함. 진행은
+> 아래 "진행"). Windows CI와 실기기 확인 전.
 > 결정이 나면 확정된 내용만 `docs/spec.md`로 옮긴다.
 
 ## 목표
@@ -103,7 +104,9 @@
 portable-pty 0.9의 ConPTY는 `CreateProcessW`를 `CREATE_SUSPENDED` 없이 부른다 (`win/psuedocon.rs`). 띄운 뒤에 Job에
 넣으면 그 사이에 생긴 자식은 Job 밖에 남을 수 있다. 그래서:
 
-- 처음부터 Job 안에서 시작하게 한다. 후보 둘을 1단계 처음에 실험해 고른다:
+- 처음부터 Job 안에서 시작하게 한다. 후보 2(`JOB_LIST`)로 정했다 (`conpty.rs`가 ConPTY를 직접 띄운다): 후보 1의 도우미는
+  ddak.exe인데 릴리스는 GUI 서브시스템(`windows_subsystem = "windows"`)이라 ConPTY 콘솔에 붙는다는 보장이 없고, 후보 2는
+  portable-pty를 고치지 않고 같은 일을 windows-sys로 할 수 있었다. 실기기·CI에서 동작은 아직 확인 전이다. 두 후보:
   1. 도우미 거치기: ConPTY로 `ddak --ddak-job <Job 이름> -- bash …`를 띄우고, 도우미가 먼저 자기를 그 Job에 넣은 뒤(실패하면
      아무것도 띄우지 않고 오류로 끝남) bash를 띄워 끝날 때까지 기다리고 종료 코드를 넘긴다. 자식은 Job을 물려받는다.
   2. `PROC_THREAD_ATTRIBUTE_JOB_LIST`로 만들 때 Job을 지정한다 (portable-pty의 띄우기를 고쳐 써야 한다).
@@ -169,6 +172,42 @@ portable-pty 0.9의 ConPTY는 `CreateProcessW`를 `CREATE_SUSPENDED` 없이 부�
 ### 3단계: 배포
 
 기존 "배포 계획 2단계"(updater, GitHub Releases)에 Windows 설치 파일을 더한다. 코드 서명은 그때 정한다.
+
+## 진행 (2026-10-28)
+
+맥에서 한 것 (Windows 실행은 아직 없음: 맥 `cargo test`·자체 테스트 전체, `cargo check --target x86_64-pc-windows-msvc
+--all-targets`만):
+- 0단계: 유닉스·맥 전용 코드를 나눔 (`platform.rs`, cfg), `stay_in_app`의 Windows 출처, Windows CI(`.github/workflows/windows.yml`:
+  cargo test, NSIS 설치 파일). CI는 main에 올라가야 돈다.
+- 1단계 Rust: ConPTY + Job(`conpty.rs`)과 끝내기 판정(`pty.rs` terminate), Git Bash 찾기(`DDAK_BASH`, PATH의 git.exe 옆, 기본 설치
+  위치), 잠자기 막기(`platform::KeepAwake`), 이름 바꾸기(`MoveFileExW`), 휴지통(`SHFileOperationW`), 파일 이름 검사(`fs.rs`),
+  확장 길이 경로 바꾸기(`platform::plain_path`: 링크 열기·claude 신뢰 키), 링크 열기 차단(`links.rs` WINDOWS_RUNNABLE +
+  `AssocIsDangerous`), Git Bash 경로(`/c/…`) 링크, 심볼릭 링크, 메모장으로 설정 열기, 컴퓨터 이름, HOME 대신 USERPROFILE,
+  claude 신뢰 키에 `/` 꼴도.
+- 1단계 화면: Ctrl 단축키(`platform.ts` cmdKey), 문구의 키 표시(⌘ → Ctrl), 터미널 Ctrl+C(선택 있을 때 복사)·Ctrl+V, Ctrl+클릭 링크,
+  `\`·드라이브·UNC 경로(문서 탭, 끌기의 상대 경로, 탭 폴더), Windows 메뉴(편집 메뉴 없음: 메뉴 단축키가 웹뷰보다 먼저 잡혀 Ctrl+C를
+  가로챈다. 맥 전용 항목 없음).
+- 2단계 일부: 준비 도우미(Git Bash로 스크립트·설치 명령, `Scripts\python.exe`), 폴더 복제 후보는 Windows에서 내지 않음.
+
+- 코드 리뷰 통과 (`docs/reviews/2026-10-28-windows-code.md`). 그 뒤:
+  - 실제 경로는 모두 `platform::canonical` (canonicalize + 일반 형식, 맥은 그대로).
+  - 뒤에서 돌리는 git·tailscale은 콘솔 창 없이 (`platform::background`, CREATE_NO_WINDOW). Git Graph가 3초마다 git을 부른다.
+  - Tailscale은 Program Files의 tailscale.exe.
+  - 알림은 WinRT 토스트 (`notify.rs` win: 앱 ID = 앱 식별자, 누르면 clicked), 배지는 작업 표시줄 단추의 빨간 점 (수는 없음).
+  - 탐색기에서 끌어 놓기 (`windrop.rs`): 화면이 놓은 File을 `postMessageWithAdditionalObjects`로 보내고, Rust가 ICoreWebView2File의
+    경로를 토큰별로 둔다. 화면은 `drop_paths`로 가져간다.
+
+남은 것:
+- Windows 자체 테스트: `selftest.sh`는 zsh와 맥 도구(caffeinate, mktemp -t)를 쓰고, 시나리오는 셸의 `pwd` 등을 프로젝트 경로와
+  비교한다 (Git Bash는 `/c/…`). Windows PC에서 돌리며 고쳐야 한다.
+- 실기기 확인이 필요한 가정:
+  - 토스트의 앱 ID가 설치 프로그램의 바로 가기와 같은지 (다르면 토스트가 보이지 않는다). 떠 있는 토스트를 누를 때와 알림
+    센터에서 나중에 누를 때 각각 그 프로젝트로 가는지.
+  - Tauri IPC 처리기가 끌어 놓기 메시지("ddak-drop:…")를 받아도 문제없는지.
+  - claude가 신뢰 키를 어느 꼴로 적는지.
+  - claude·codex의 Windows판 상태 알림(OSC 7501)과 깨우기.
+- 확인: Windows CI 통과, 사용자의 PC에서 1·2단계 끝 조건.
+- 3단계 (배포): 코드 서명, updater. 사용자 결정이 필요하다.
 
 ## 위험
 

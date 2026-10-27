@@ -78,10 +78,10 @@ struct Inner {
     requests: u64,
 }
 
-// 추측할 수 없는 id (macOS arc4random)
+// 추측할 수 없는 id
 fn prompt_id() -> String {
     let mut bytes = [0u8; 12];
-    unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
+    crate::platform::fill_random(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -263,7 +263,7 @@ pub fn pty_dialog(app: tauri::AppHandle, ptys: State<'_, crate::pty::Ptys>, prom
 // 열린 선택 창 id (채팅 패널: 이것만 누를 수 있다)
 #[tauri::command]
 pub fn chat_prompts(ptys: State<'_, crate::pty::Ptys>, prompts: State<'_, Prompts>, project: String) -> Vec<String> {
-    let project = std::fs::canonicalize(&project).unwrap_or_else(|_| PathBuf::from(&project));
+    let project = crate::platform::canonical(&project).unwrap_or_else(|_| PathBuf::from(&project));
     prompts.open_in(&project, |pty| ptys.exists(pty))
 }
 
@@ -291,7 +291,7 @@ pub fn prompt_write(ptys: State<'_, crate::pty::Ptys>, chats: State<'_, ChatsSta
 
 #[tauri::command]
 pub fn chat_answer(app: tauri::AppHandle, project: String, prompt: String, option: usize) -> Result<(), String> {
-    let project = std::fs::canonicalize(&project).unwrap_or_else(|_| PathBuf::from(&project));
+    let project = crate::platform::canonical(&project).unwrap_or_else(|_| PathBuf::from(&project));
     answer(&app, &project, &prompt, option, None)
 }
 

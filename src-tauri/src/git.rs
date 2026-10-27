@@ -17,8 +17,8 @@ fn is_sha(s: &str) -> bool {
 // git을 돌려 출력을 그대로 (자르지 않고) 돌려준다. input이 있으면 표준 입력으로 준다.
 fn raw(repo: &Path, args: &[&str], input: Option<&str>) -> Result<Vec<u8>, CodeError> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("git")
+    use std::process::Stdio;
+    let mut child = crate::platform::background("git")
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -188,7 +188,7 @@ fn assign_lanes(commits: &mut [Commit]) -> u32 {
 // 저장소의 그래프. limit: 읽을 커밋 수 (넘으면 자르고 truncated). places: 작업그룹 탭의 폴더들. worktree마다 그것이 들어 있는
 // 곳(가장 깊은 것)을 찾는다 (경로 표기가 달라도 맞게 실제 경로로).
 fn graph(repo: &Path, limit: usize, places: &[String]) -> Result<Graph, CodeError> {
-    let real = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| Path::new(p).to_path_buf());
+    let real = |p: &str| crate::platform::canonical(p).unwrap_or_else(|_| Path::new(p).to_path_buf());
     let places: Vec<std::path::PathBuf> = places.iter().map(|p| real(p)).collect();
     let mut worktrees = list_worktrees(repo)?;
     for w in &mut worktrees {
@@ -322,7 +322,7 @@ fn fingerprint(repo: &Path) -> Result<String, CodeError> {
 
 #[tauri::command]
 pub fn git_repos(project: String) -> Result<Vec<Repo>, CodeError> {
-    let root = std::fs::canonicalize(&project).map_err(|e| code_err("io", e))?;
+    let root = crate::platform::canonical(&project).map_err(|e| code_err("io", e))?;
     let (repos, _) = crate::worktrees::project_repos(&root)?;
     Ok(repos.into_iter().map(|r| Repo { name: r.name.unwrap_or_default(), path: r.path.to_string_lossy().into_owned() }).collect())
 }

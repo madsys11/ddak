@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { IS_WINDOWS, baseName, relativeTo } from "./platform";
 
 // 파일 트리에서 끌어 온 경로 (터미널·채팅 입력란에 놓는다). path: 절대 경로, rel: 트리 루트(프로젝트나 작업그룹 worktree)
 // 기준 상대 경로 (루트 밖이면 없음). 작업그룹마다 worktree가 달라도 상대 경로는 같은 파일을 가리킨다.
@@ -7,7 +8,7 @@ export type DraggedPath = { path: string; rel?: string };
 export const PATH_DRAG = "application/x-ddak-path";
 
 export function setDraggedPath(dt: DataTransfer, path: string, root: string) {
-  const rel = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : undefined;
+  const rel = relativeTo(path, root);
   dt.setData(PATH_DRAG, JSON.stringify({ path, rel } satisfies DraggedPath));
   dt.setData("text/plain", path);
   dt.effectAllowed = "copy";
@@ -52,16 +53,39 @@ export function noteFileDrag() {
 export function droppedFiles(dt: DataTransfer | null): Promise<string[]> {
   const nfc = (s: string) => s.normalize("NFC");
   const names = [...(dt?.files ?? [])].map((f) => nfc(f.name)).sort();
+  if (IS_WINDOWS) return windowsDropped(dt, names);
   const seen = seenCount;
   if (!names.length || seen === null) return Promise.resolve([]);
   return invoke<{ count: number; paths: string[] }>("drag_files").then(
     (got) => {
-      const have = got.paths.map((p) => nfc(p.slice(p.lastIndexOf("/") + 1))).sort();
+      const have = got.paths.map((p) => nfc(baseName(p))).sort();
       const same = seen === got.count && have.length === names.length && have.every((n, i) => n === names[i]);
       return same ? got.paths : [];
     },
     () => [],
   );
+}
+
+// Windows: 놓은 File들을 토큰과 함께 WebView2에 보내면 Rust가 실제 경로를 받는다 (src-tauri/src/windrop.rs). 보내기는 놓을 때
+// 바로 해야 한다 (File은 drop 처리 중에만 읽힌다). 경로가 오기를 2초까지 기다리고, 놓은 이름들과 개수까지 같을 때만 쓴다.
+type WebView2 = { postMessageWithAdditionalObjects?: (message: string, objects: ArrayLike<unknown>) => void };
+function windowsDropped(dt: DataTransfer | null, names: string[]): Promise<string[]> {
+  const webview = (window as unknown as { chrome?: { webview?: WebView2 } }).chrome?.webview;
+  if (!names.length || !dt || !webview?.postMessageWithAdditionalObjects) return Promise.resolve([]);
+  const token = crypto.randomUUID();
+  webview.postMessageWithAdditionalObjects(`ddak-drop:${token}`, dt.files);
+  const nfc = (s: string) => s.normalize("NFC");
+  return (async () => {
+    for (let i = 0; i < 40; i++) {
+      const paths = await invoke<string[] | null>("drop_paths", { token }).catch(() => null);
+      if (paths) {
+        const have = paths.map((p) => nfc(baseName(p, true))).sort();
+        return have.length === names.length && have.every((n, i) => n === names[i]) ? paths : [];
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return [];
+  })();
 }
 
 // 입력란 글 before의 start..end를 text로 바꾸는 초안 갱신. 적용할 때 초안이 before가 아니면(그 사이 고침·보내기로 비움)

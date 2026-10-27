@@ -2,20 +2,20 @@
 // 로컬 저장소를 프로젝트 안으로 옮기는 방법은 두지 않는다 (실행 중인 저장소가 끊길 수 있어서).
 
 use crate::fs::{child_path as dest, code_err as err, git_kind, CodeError};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 #[tauri::command]
 pub fn repo_link(project: String, target: String, name: String) -> Result<String, CodeError> {
-    let real = std::fs::canonicalize(&target).map_err(|_| err("notFound", &target))?;
+    let real = crate::platform::canonical(&target).map_err(|_| err("notFound", &target))?;
     if git_kind(&real).is_none() {
         return Err(err("notRepo", &target));
     }
-    let project_real = std::fs::canonicalize(&project).map_err(|_| err("notFound", &project))?;
+    let project_real = crate::platform::canonical(&project).map_err(|_| err("notFound", &project))?;
     if real.starts_with(&project_real) {
         return Err(err("insideProject", &target));
     }
     let dest = dest(&project, &name)?;
-    std::os::unix::fs::symlink(&real, &dest).map_err(|e| err("io", e))?;
+    crate::platform::symlink(&real, &dest).map_err(|e| err("io", e))?;
     Ok(dest.to_string_lossy().into_owned())
 }
 
@@ -30,7 +30,7 @@ pub async fn repo_clone(project: String, url: String, name: String) -> Result<St
     let dest = dest(&project, &name)?;
     let target = dest.clone();
     let out = tauri::async_runtime::spawn_blocking(move || {
-        let mut cmd = Command::new("git");
+        let mut cmd = crate::platform::background("git");
         // "--": URL이 "-"로 시작해도 옵션으로 읽히지 않게
         cmd.args(["clone", "--"]).arg(&url).arg(&target);
         cmd.env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());

@@ -65,7 +65,7 @@ fn decode(s: &str) -> Result<Vec<u8>, String> {
 
 fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), N) };
+    crate::platform::fill_random(&mut bytes);
     bytes
 }
 

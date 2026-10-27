@@ -13,6 +13,14 @@ const RUNNABLE: &[&str] = &[
     "applescript", "jar", "webloc", "inetloc", "fileloc", "prefpane", "kext", "action", "osax",
 ];
 
+// Windows에서 실행되거나 설치·설정을 바꾸는 형식 (AssocIsDangerous와 함께 본다)
+#[cfg(windows)]
+const WINDOWS_RUNNABLE: &[&str] = &[
+    "exe", "com", "bat", "cmd", "ps1", "psm1", "psd1", "vbs", "vbe", "js", "jse", "wsf", "wsh", "msi", "msp", "mst", "msix", "msixbundle",
+    "appx", "appxbundle", "appref-ms", "lnk", "url", "scr", "cpl", "hta", "pif", "reg", "inf", "scf", "gadget", "application", "jar",
+    "ws", "msc", "settingcontent-ms", "library-ms", "search-ms", "diagcab", "py", "pyw", "pl", "rb",
+];
+
 // 자체 테스트는 열지 않고 기록한다 (selftest_opened_links)
 static OPENED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
@@ -21,7 +29,7 @@ fn selftest() -> bool {
 }
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::platform::home()
 }
 
 // 상대 경로의 기준: 폴더들 (앞의 것부터), 그 바로 아래 git 저장소들 (처음 필요할 때 한 번 구해 후보들이 같이 쓴다)
@@ -72,6 +80,8 @@ impl Bases {
 // 안의 경로(`docs/spec.md`)로 말한다. 저장소 한 곳에서만 찾아질 때만 (여러 곳이면 어느 것인지 몰라 링크로 보지 않는다.
 // 같은 실제 대상을 가리키는 저장소 링크는 한 곳)
 fn resolve(candidate: &str, bases: &Bases) -> Option<PathBuf> {
+    let candidate = crate::platform::from_msys(candidate);
+    let candidate = candidate.as_ref();
     let path = if let Some(rest) = candidate.strip_prefix("~/") {
         home()?.join(rest)
     } else {
@@ -103,7 +113,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn process_cwd(pid: libc::pid_t) -> Option<PathBuf> {
+fn process_cwd(pid: i32) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
@@ -117,7 +127,7 @@ fn process_cwd(pid: libc::pid_t) -> Option<PathBuf> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn process_cwd(_pid: libc::pid_t) -> Option<PathBuf> {
+fn process_cwd(_pid: i32) -> Option<PathBuf> {
     None
 }
 
@@ -139,6 +149,7 @@ enum Action {
     Reveal(PathBuf),
 }
 
+#[cfg(unix)]
 fn runnable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
@@ -146,6 +157,23 @@ fn runnable(path: &Path) -> bool {
         return true;
     }
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+// Windows: 실행 권한이 없어서 형식으로만 안다. 알려진 실행·설치·바로 가기 형식이거나 셸이 위험하다고 하는 연결
+// (AssocIsDangerous)이면 실행될 수 있는 것. 폴더는 열고, 확장자 없는 파일은 실행되지 않는다.
+#[cfg(windows)]
+fn runnable(path: &Path) -> bool {
+    if path.is_dir() {
+        return false;
+    }
+    let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_lowercase()) else {
+        return false;
+    };
+    if RUNNABLE.contains(&ext.as_str()) || WINDOWS_RUNNABLE.contains(&ext.as_str()) {
+        return true;
+    }
+    let assoc: Vec<u16> = format!(".{ext}").encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { windows_sys::Win32::UI::Shell::AssocIsDangerous(assoc.as_ptr()) != 0 }
 }
 
 // 무엇을 할지: http(s)는 브라우저, 있는 파일·폴더는 기본 앱(실행될 수 있으면 Finder에서 보이기). 그 밖은 거절.
@@ -164,7 +192,7 @@ fn action(target: &str) -> Result<Action, String> {
         return Err(format!("no such file: {target}"));
     }
     // 실행 판정은 적힌 이름과 실제 대상 모두로 (리뷰 R2: `X.app/Contents/..`나 다른 이름의 링크로 .app·.command를 열 수 있었다)
-    let real = path.canonicalize().map_err(|_| format!("no such file: {target}"))?;
+    let real = crate::platform::canonical(&path).map_err(|e| format!("{target}: {e}"))?;
     Ok(if runnable(&path) || runnable(&real) { Action::Reveal(real) } else { Action::Open(real) })
 }
 
@@ -193,7 +221,8 @@ pub fn selftest_opened_links() -> Vec<(String, String)> {
     std::mem::take(&mut *OPENED.lock().unwrap())
 }
 
-#[cfg(test)]
+// 유닉스 권한·링크·sh를 쓰는 시험 (Windows 시험은 platform.rs·conpty.rs·fs.rs)
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -308,7 +337,7 @@ mod tests {
     #[test]
     fn reads_a_process_working_directory() {
         let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
-        let got = process_cwd(std::process::id() as libc::pid_t).unwrap().canonicalize().unwrap();
+        let got = process_cwd(std::process::id() as i32).unwrap().canonicalize().unwrap();
         assert_eq!(got, cwd);
     }
 }

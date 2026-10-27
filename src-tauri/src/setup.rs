@@ -28,7 +28,7 @@ const TEMPLATE: &str = r#"# Work group setup for this project.
 "#;
 
 fn setup_file<R: Runtime>(app: &AppHandle<R>, project: &Path, ext: &str) -> Result<PathBuf, CodeError> {
-    let root = std::fs::canonicalize(project).map_err(|e| code_err("io", e))?;
+    let root = crate::platform::canonical(project).map_err(|e| code_err("io", e))?;
     let dir = data_dir(app).map_err(|e| code_err("io", e))?;
     Ok(dir.join("setup").join(format!("{}.{ext}", project_slug(&root))))
 }
@@ -93,6 +93,8 @@ fn secret_file(name: &str) -> bool {
         || name.ends_with(".key")
 }
 
+const CAN_CLONE: bool = cfg!(target_os = "macos");
+
 // 원본에서 가져올 만한 무시된 항목. 저장소마다 git이 무시하는 항목(접힌 폴더 단위)에서 고른다.
 // dist·알 수 없는 캐시·DB·로그는 후보로 내지 않는다 (사양).
 fn candidates(repos: &[crate::worktrees::Repo]) -> Vec<Candidate> {
@@ -109,9 +111,10 @@ fn candidates(repos: &[crate::worktrees::Repo]) -> Vec<Candidate> {
             let path = repo.path.join(rel);
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             let kind = if is_dir {
+                // 폴더 복제는 맥(APFS clonefile)에서만 한다. Windows는 설치 명령으로 (docs/windows-plan.md)
                 match name {
-                    "node_modules" if path.with_file_name("package.json").is_file() => "node",
-                    "target" if path.join("CACHEDIR.TAG").is_file() => "cargo",
+                    "node_modules" if CAN_CLONE && path.with_file_name("package.json").is_file() => "node",
+                    "target" if CAN_CLONE && path.join("CACHEDIR.TAG").is_file() => "cargo",
                     _ if path.join("pyvenv.cfg").is_file() => "venv",
                     _ => continue,
                 }
@@ -183,7 +186,10 @@ fn suggestions(repos: &[crate::worktrees::Repo], venvs: &[&str]) -> Vec<Suggesti
                     let here = project_path(repo, dir);
                     let venv = venvs.iter().find(|v| Path::new(v).parent().map(|p| p.to_string_lossy()) == Some(here.as_str().into()));
                     match venv.and_then(|v| Path::new(v).file_name()) {
-                        Some(name) => format!("{}/bin/pip install -r requirements.txt", shell_word(&name.to_string_lossy())),
+                        Some(name) => {
+                            let bin = if cfg!(windows) { "Scripts" } else { "bin" };
+                            format!("{}/{bin}/pip install -r requirements.txt", shell_word(&name.to_string_lossy()))
+                        }
                         None => continue,
                     }
                 }
@@ -212,7 +218,7 @@ pub struct SetupInfo {
 #[tauri::command]
 pub async fn setup_load(app: AppHandle, project: String) -> Result<SetupInfo, CodeError> {
     let config = load_config(&setup_file(&app, Path::new(&project), "json")?)?;
-    let root = std::fs::canonicalize(&project).map_err(|e| code_err("io", e))?;
+    let root = crate::platform::canonical(&project).map_err(|e| code_err("io", e))?;
     let (candidates, suggestions) = tauri::async_runtime::spawn_blocking(move || {
         let (repos, _) = project_repos(&root)?;
         let candidates = candidates(&repos);
@@ -303,7 +309,7 @@ pub fn setup_script_edit(app: AppHandle, project: String) -> Result<String, Code
     let path = script_path(&app, Path::new(&project))?;
     ensure(&path)?;
     if std::env::var_os("DDAK_SELFTEST").is_none() {
-        std::process::Command::new("open").arg("-t").arg(&path).spawn().map_err(|e| code_err("io", e))?;
+        crate::platform::edit_text(&path).map_err(|e| code_err("io", e))?;
     }
     Ok(path.to_string_lossy().into_owned())
 }

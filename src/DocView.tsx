@@ -5,6 +5,7 @@ import { baseName, isDocPath, renderMarkdown, requestOpenDoc, resolveHref } from
 import { useT } from "./prefs";
 import { openLink } from "./terminalLinks";
 import { watchDir } from "./watchDir";
+import { dirName } from "./platform";
 
 // 문서 탭: 마크다운 파일을 읽기 전용으로 그린다 (src/docs.ts). 파일이 바뀌면 다시 읽는다 (그 폴더를 감시).
 // 링크: 웹 주소는 브라우저, 다른 문서는 문서 탭, 그 밖의 파일은 기본 앱 (터미널 링크와 같은 규칙, links.rs open_link),
@@ -33,7 +34,7 @@ export function DocView({ path, project, jump }: { path: string; project: string
       );
     };
     load();
-    const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+    const dir = dirName(path) || "/";
     const unwatch = watchDir(dir, load, { contents: true });
     return () => {
       alive = false;

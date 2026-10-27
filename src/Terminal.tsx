@@ -15,6 +15,7 @@ import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 import { TerminalSearch } from "./TerminalSearch";
 import { linkProvider, oscLinkHandler } from "./terminalLinks";
+import { IS_WINDOWS, cmdKey, otherKey } from "./platform";
 
 // xterm이 따로 보내지 않는 키 조합을 셸·CLI가 아는 입력으로 바꾼다.
 // - ⌘⌫ → Ctrl+U (커서 앞 지우기, zsh는 줄 전체). VS Code 터미널과 같은 값.
@@ -23,9 +24,17 @@ import { linkProvider, oscLinkHandler } from "./terminalLinks";
 //   세션 구성이 없으면 (그냥 셸에서 claude를 직접 띄움 등) 누를 때 앞에서 도는 프로그램을 보고 groups.json shiftEnterFor에서
 //   찾는다 (Terminal 안의 sendShiftEnter). 거기도 없으면 Enter.
 export function terminalKey(ev: KeyboardEvent, shiftEnter?: string | null): string | undefined {
-  const only = (meta: boolean, shift: boolean) => ev.metaKey === meta && ev.shiftKey === shift && !ev.ctrlKey && !ev.altKey;
+  const only = (cmd: boolean, shift: boolean) => cmdKey(ev) === cmd && ev.shiftKey === shift && !otherKey(ev) && !ev.altKey;
   if (ev.key === "Backspace" && only(true, false)) return "\x15";
   if (isShiftEnter(ev) && shiftEnter) return shiftEnter;
+}
+
+// Windows의 터미널 복사·붙여넣기 (docs/windows-plan.md W3. 맥은 편집 메뉴의 ⌘C·⌘V): Ctrl+C는 선택이 있을 때만 복사하고
+// 없으면 터미널로 (인터럽트). Ctrl+V는 xterm이 ^V를 보내지 않게 넘기고 웹뷰의 붙여넣기(paste 이벤트)를 xterm이 받는다.
+export function clipboardKey(ev: KeyboardEvent, hasSelection: boolean, windows = IS_WINDOWS): "copy" | "paste" | undefined {
+  if (!windows || ev.type !== "keydown" || !ev.ctrlKey || ev.shiftKey || ev.altKey || ev.metaKey) return;
+  if (ev.code === "KeyC" && hasSelection) return "copy";
+  if (ev.code === "KeyV") return "paste";
 }
 
 // 조합이 끝난 ⇧↩인지. 입력기 조합 중(isComposing, WebKit의 keyCode 229)의 Enter는 조합 확정이라 입력기 경로(passesImeKey,
@@ -124,6 +133,14 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     // 한글 입력기 글자 보정 (macOS WebKit은 composition 이벤트 없이 "바꾸기"로 조합한다. src/hangul.ts)
     const unfixIme = term.textarea ? fixImeInput(term, el, term.textarea) : () => {};
     term.attachCustomKeyEventHandler((ev) => {
+      const clip = clipboardKey(ev, term.hasSelection());
+      if (clip === "copy") {
+        ev.preventDefault();
+        void navigator.clipboard.writeText(term.getSelection());
+        term.clearSelection();
+        return false;
+      }
+      if (clip === "paste") return false;
       const seq = ev.type === "keydown" ? terminalKey(ev, latest.current.shiftEnter) : undefined;
       if (seq) {
         ev.preventDefault(); // 입력란 자체의 줄 지우기 등 기본 동작은 막는다
