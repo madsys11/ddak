@@ -532,6 +532,8 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 ## 배포 계획
 
 - 공개 GitHub 저장소(madsys11/ddak). 사용자가 먼저 쓰고 이후 팀원(모두 macOS)에게 배포한다.
+- Windows(x64)도 지원한다 (계획과 단계: `docs/windows-plan.md`). 세션·준비 스크립트는 Git Bash에서 돌고, 단축키는 ⌘를
+  Ctrl로 그대로 바꾼다 (메뉴·프론트가 받는 Ctrl 키는 터미널 프로그램에 가지 않는다).
 - 저장소에 개인정보를 넣지 않는다. 커밋 작성자는 GitHub noreply 주소 (이 저장소의 로컬 git 설정).
 - 앱 식별자: `io.github.madsys11.ddak` (GitHub 계정 도메인을 거꾸로 쓴 것). 앱 데이터는
   `~/Library/Application Support/<식별자>`에 있어서 식별자를 바꾸면 이어 쓰지 못한다.
