@@ -365,7 +365,10 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   루트(프로젝트나 작업그룹 worktree) 기준 상대 경로를 함께 싣는다.
   - 터미널: 셸에 쓸 수 있게 감싼 절대 경로 + 공백을 붙여넣는다 (안전한 글자만 있으면 그대로, 아니면 작은따옴표). 사용자 입력이다.
   - 채팅 입력란: 상대 경로 + 공백을 커서 자리에 (루트 밖이면 절대 경로). 작업그룹마다 worktree가 달라도 같은 파일을 가리킨다.
-  - Finder 등 앱 밖에서 끌어 온 파일은 받지 않는다.
+  - Finder 등 앱 밖에서 끌어 온 파일은 받지 않는다. 어디에 놓아도 놓을 수 없게 표시하고 무시한다
+    (`dragPath.ts` `refuseOutsideDrops`, 창 전체).
+- 웹뷰는 앱 화면 밖으로 이동하지 않는다 (`lib.rs` `stay_in_app`, Tauri `on_navigation`): 앱 화면(설치한 앱의 `tauri://`,
+  개발 서버와 같은 출처)과 `about:`만 허락한다. 놓은 파일·끌어 온 링크가 작업 화면을 덮지 않게 한다. 바깥 주소는 기본 앱으로 연다.
   - 창의 네이티브 끌어 놓기 처리기는 끈다 (`tauri.conf.json` `dragDropEnabled: false`, Rust 테스트가 확인). 켜 두면 Tauri가
     모든 끌기를 가로채 웹뷰가 dragover·drop을 받지 못한다. 앱은 Tauri의 파일 끌어 놓기 이벤트를 쓰지 않는다.
 - 이름 바꾸기는 같은 폴더 안에서 `renamex_np(RENAME_EXCL)` (덮어쓰지 않음, 대소문자만 바꾸기도 됨).

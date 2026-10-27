@@ -29,10 +29,29 @@ pub fn setup_helper() -> Option<i32> {
     (args.first().map(String::as_str) == Some(prepare::HELPER)).then(|| prepare::run_helper(&args[1..]))
 }
 
+// 웹뷰가 앱 화면에 머무는 주소인지. 그 밖의 주소로는 이동하지 않는다 (stay_in_app).
+// 앱 화면: 설치한 앱은 tauri://, 개발·자체 테스트는 개발 서버(dev_url)와 같은 출처. about:blank 같은 빈 화면은 둔다.
+fn app_page(url: &tauri::Url, dev_url: Option<&tauri::Url>) -> bool {
+    url.scheme() == "tauri" || url.scheme() == "about" || dev_url.is_some_and(|d| url.origin() == d.origin())
+}
+
+// 웹뷰가 앱 화면을 떠나지 않게 한다. Finder에서 끌어 온 파일을 놓으면 WKWebView가 그 파일로 이동해 작업 화면이 모두
+// 사라졌다 (docs/reviews/2026-10-27-drop-navigation.md). 바깥 주소는 웹뷰가 아니라 기본 앱으로 연다 (links.rs open_link).
+// 화면 쪽도 앱 밖에서 끌어 온 파일을 받지 않는다 (src/dragPath.ts refuseOutsideDrops).
+fn stay_in_app<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("stay-in-app")
+        .on_navigation(|webview, url| {
+            let dev_url = if tauri::is_dev() { webview.config().build.dev_url.as_ref() } else { None };
+            app_page(url, dev_url)
+        })
+        .build()
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(stay_in_app())
         .manage(pty::Ptys::default())
         .manage(watch::Watches::default())
         .manage(prompts::Prompts::default())
@@ -149,6 +168,21 @@ mod tests {
     fn bundle_is_signed_ad_hoc() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         assert_eq!(conf["bundle"]["macOS"]["signingIdentity"], "-");
+    }
+
+    #[test]
+    fn webview_stays_on_app_pages() {
+        let url = |s: &str| tauri::Url::parse(s).unwrap();
+        let dev = url("http://localhost:1430");
+        for ok in ["tauri://localhost/", "tauri://localhost/index.html#x", "about:blank", "http://localhost:1430/src/App.tsx"] {
+            assert!(super::app_page(&url(ok), Some(&dev)), "{ok}");
+        }
+        for no in ["file:///Users/x/a.png", "https://example.com/", "http://localhost:3000/", "https://localhost:1430/", "data:text/html,x"] {
+            assert!(!super::app_page(&url(no), Some(&dev)), "{no}");
+        }
+        // 설치한 앱(개발 서버 없음)
+        assert!(super::app_page(&url("tauri://localhost/"), None));
+        assert!(!super::app_page(&url("http://localhost:1430/"), None));
     }
 
     #[test]

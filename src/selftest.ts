@@ -2550,6 +2550,42 @@ async function testTrashAndDrag(root: string, term: Terminal) {
     `${accepted} ${line} | ${JSON.stringify(relDropped)}`,
   );
   await run(term, `rm -f "${root}/keep.txt" "${root}/d d's.txt"`);
+
+  // Finder에서 끌어 온 파일: 어디에 놓아도 받지 않는다 (놓을 수 없게 표시, 놓아도 기본 동작 없음. 기본 동작은 웹뷰가 그 파일로
+  // 이동해 작업 화면이 사라지는 것이었다)
+  const outside = (target: Element) => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(["x"], "photo.png", { type: "image/png" }));
+    const over = new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt });
+    target.dispatchEvent(over);
+    const dropEffect = dt.dropEffect;
+    const drop = new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt });
+    target.dispatchEvent(drop);
+    return over.defaultPrevented && drop.defaultPrevented && dropEffect === "none";
+  };
+  const refused = [termEl, chatInput, document.querySelector(".sidebar .tree") ?? document.body, document.body].map(outside);
+  await sleep(200);
+  check("끌어 놓기: 앱 밖에서 끌어 온 파일은 터미널·채팅 입력란·빈 곳 어디에도 받지 않음", refused.every(Boolean) && chatInput.value === "", `${refused} ${JSON.stringify(chatInput.value)}`);
+
+  // 웹뷰는 앱 화면 밖으로 이동하지 않는다 (lib.rs stay_in_app). 창 전체로 시험하면 실패할 때 테스트가 멈추므로 액자(iframe)로:
+  // 앱 안 빈 화면(srcdoc)은 열려 알려 오고, 바깥 주소(data:)는 열리지 않아야 한다
+  const framed = async (set: (f: HTMLIFrameElement) => void) => {
+    const f = document.createElement("iframe");
+    f.style.display = "none";
+    let got = false;
+    const onMessage = (e: MessageEvent) => e.source === f.contentWindow && e.data === "ddak-frame" && (got = true);
+    window.addEventListener("message", onMessage);
+    set(f);
+    document.body.appendChild(f);
+    await waitFor("액자", () => got, 1500).catch(() => {});
+    window.removeEventListener("message", onMessage);
+    f.remove();
+    return got;
+  };
+  const script = `<script>parent.postMessage("ddak-frame", "*")</script>`;
+  const inApp = await framed((f) => (f.srcdoc = script));
+  const away = await framed((f) => (f.src = `data:text/html,${encodeURIComponent(script)}`));
+  check("웹뷰: 앱 화면 밖 주소로는 이동하지 않음 (앱 안 빈 화면은 열림)", inApp && !away, `${inApp} ${away}`);
 }
 
 async function testRename(root: string, term: Terminal) {
