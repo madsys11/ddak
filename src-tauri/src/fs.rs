@@ -134,7 +134,8 @@ thread_local! {
 }
 
 // 원본을 연다: 지우기·이름 바꾸기에 필요한 DELETE와 종류를 볼 속성 읽기만 (리뷰 R6: 쓰지 않는 권한을 요구하면 ACL이 그것만
-// 막은 파일을 못 바꾼다. 링크 만들기는 따로 권한이 필요 없다), 지우기 공유 없음, 링크는 따라가지 않음, 폴더도
+// 막은 파일을 못 바꾼다. 링크 만들기는 핸들 권한과 상관없이 파일의 속성 쓰기 권한을 본다: 2026-10-28 CI 실험), 지우기 공유
+// 없음, 링크는 따라가지 않음, 폴더도
 #[cfg(windows)]
 fn open_exclusive(path: &Path) -> std::io::Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::FromRawHandle;
@@ -757,6 +758,14 @@ mod tests {
             std::fs::create_dir(&d).unwrap();
             d
         };
+
+        // 권한이 보통인 파일은 이 최소 권한 핸들로 링크가 만들어진다 (링크하지 못할 때의 길은 권한이 막힌 파일에만 간다)
+        let d = sub("plain");
+        std::fs::write(d.join("p.txt"), "P").unwrap();
+        let file = open_exclusive(&d.join("p.txt")).unwrap();
+        set_name(&file, windows_sys::Wdk::Storage::FileSystem::FileLinkInformation, &nt_path(&d.join("q.txt")).unwrap()).unwrap();
+        drop(file);
+        assert_eq!(names(&d), ["p.txt", "q.txt"]);
 
         // 같은 파일의 다른 이름, 대소문자만 (구분하지 않는 폴더)
         let d = sub("link");
