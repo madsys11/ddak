@@ -14,6 +14,7 @@ import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, pars
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
 import { renderMarkdown } from "./docs";
 import { insertAt } from "./dragPath";
+import selftestPlan from "../scripts/selftest-plan.json";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
@@ -213,10 +214,17 @@ const near = (a: number, b: number) => Math.abs(a - b) < 0.03;
 const mouseDown = (el: Element) => !el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
 const blur = () => (document.activeElement as HTMLElement | null)?.blur();
 
-async function testTerminal(root: string) {
+// 첫 터미널 (기본 단계 terminalReady): 뒤 단계가 이어 쓰는 터미널이 뜨고 셸이 명령을 받을 때까지 기다린다.
+// 터미널 검사는 terminal 단계에 따로 있다 (골라 돌릴 때 매번 돌지 않게).
+async function openFirstTerminal() {
   const term = await waitFor("터미널 생성", () => visiblePanes()[0]?.term);
   await ready(term);
+  const out = await run(term, "echo READY-$((40+2))");
+  if (!out.some((l) => l.trim() === "READY-42")) throw new Error(`첫 터미널이 명령을 받지 않음: ${out.join("|")}`);
+  return term;
+}
 
+async function testTerminal(root: string, term: Terminal) {
   const pwd = await run(term, "pwd");
   check("터미널: 작업 폴더가 루트", pwd.some((l) => l.trim() === root), pwd.join("|"));
 
@@ -400,8 +408,6 @@ async function testTerminal(root: string) {
   check("터미널: 크기 조절이 PTY에 반영", size.some((l) => l.trim() === `${term.rows} ${term.cols}`), `${size.join("|")} vs ${term.rows} ${term.cols}`);
   document.querySelector<HTMLElement>(".panel")!.style.maxWidth = "";
   await waitFor("터미널 폭 복원", () => term.cols === before);
-
-  return term;
 }
 
 // Claude Code TUI가 뜨는지만 본다. 아무것도 입력하지 않고 바로 끝낸다.
@@ -4506,7 +4512,7 @@ async function testCorrupt(root: string) {
 // 단계마다 예외를 따로 잡아 FAIL로 남기고 다음 단계로 간다 (하나가 죽어도 나머지 결과를 얻게). 걸린 시간은 INFO로 남긴다.
 // only(scripts/selftest.sh의 SELFTEST_ONLY)를 주면 기본 단계(BASE_STEPS)와 고른 단계만 순서대로 돈다. 앞 단계가 만든 상태에
 // 기대는 단계는 혼자 돌면 실패할 수 있다: 고칠 때는 관련 단계만 돌리고, 리뷰 전에는 전체를 돌린다.
-const BASE_STEPS = ["projectStart", "terminal"];
+const BASE_STEPS = ["projectStart", "terminalReady"];
 // 한 단계가 이 시간 안에 끝나지 않으면 멈춘 것으로 보고 FAIL로 남긴 뒤, 뒤 단계는 돌지 않고 결과를 보고한다 (멈춘 단계가
 // 뒤에서 계속 돌아 섞이지 않게). 없으면 멈춘 단계 하나로 전체가 보고 없이 끝나지 않아 어디서 멈췄는지 알 수 없었다.
 // 가장 긴 단계가 25초 남짓 (2026-10-25)이라 넉넉히 둔다.
@@ -4514,16 +4520,49 @@ const STEP_TIMEOUT_MS = 300_000;
 // 진짜 CLI. 작업그룹 설정에 이것이 있으면 새 작업그룹·세션이 실제로 띄운다.
 const REAL_CLIS = ["claude", "codex"];
 const usesRealCli = (g: Groups | null | undefined) => !!g?.groups.some((x) => x.sessions.some((s) => REAL_CLIS.includes(s.command)));
-// 혼자 돌면 실패하는 단계가 기대는 앞 단계 (고르면 함께 돈다). 실제로 혼자 돌려 확인한 것만 적는다 (2026-10-25):
-// addSession·projects·claude·tabsAndSplits·manyTerminals는 혼자 돈다.
-// groupWorktree는 repos가 넣은 저장소에, groupClone·groupEnd는 groupWorktree의 작업그룹 폴더·준비 스크립트에,
-// gitGraph는 groupEnd가 만든 커밋과 그때까지의 작업그룹 번호(test-6)에 기댄다.
-const STEP_DEPS: Record<string, string[]> = {
-  groupWorktree: ["repos"],
-  groupClone: ["repos", "groupWorktree"],
-  groupEnd: ["repos", "groupWorktree"],
-  gitGraph: ["repos", "groupWorktree", "groupClone", "groupEnd"],
-};
+// 혼자 돌면 실패하는 단계가 기대는 앞 단계 (고르면 함께 돈다). scripts/selftest-plan.json의 deps (이유는 depsWhy).
+// 고르기(scripts/selftest-changed.mjs)와 같은 표를 쓴다.
+const STEP_DEPS: Record<string, string[]> = selftestPlan.deps;
+
+// 고른 단계와 그 앞 단계를 끝까지 펼친다. 표에 없는 단계, 앞 단계가 뒤에 있음, 순환은 오류로 알린다 (말없이 넘기면
+// 고른 실행이 엉뚱하게 통과한다). 도는 순서는 늘 단계 목록 순서다.
+export function expandSteps(order: string[], only: string[], deps: Record<string, string[]>) {
+  const errors: string[] = [];
+  for (const [name, ds] of Object.entries(deps)) {
+    for (const d of ds) {
+      if (!order.includes(name) || !order.includes(d)) errors.push(`앞 단계 표에 없는 단계: ${order.includes(name) ? d : name}`);
+      else if (order.indexOf(d) > order.indexOf(name)) errors.push(`앞 단계가 뒤에 있음: ${name} → ${d}`);
+    }
+  }
+  const chosen = new Set<string>();
+  const visit = (name: string, path: string[]) => {
+    if (path.includes(name)) return void errors.push(`앞 단계 순환: ${[...path, name].join(" → ")}`);
+    if (chosen.has(name)) return;
+    if (!order.includes(name)) return void errors.push(`없는 단계: ${name}`);
+    for (const d of deps[name] ?? []) visit(d, [...path, name]);
+    chosen.add(name);
+  };
+  for (const name of only) visit(name, []);
+  return { chosen, errors };
+}
+
+// 단계 펼치기 (expandSteps): 앞 단계를 끝까지 따라가고, 표의 잘못은 오류로
+function testStepPlanUnit() {
+  const order = ["a", "b", "c", "d", "e"];
+  const deep = expandSteps(order, ["d"], { b: ["a"], c: ["b"], d: ["c"] });
+  check("단계 고르기: 앞 단계를 끝까지 펼침", [...deep.chosen].sort().join(",") === "a,b,c,d" && !deep.errors.length, `${[...deep.chosen]} ${deep.errors}`);
+  const bad = [
+    expandSteps(order, ["x"], {}).errors,
+    expandSteps(order, ["b"], { b: ["c"] }).errors,
+    expandSteps(order, ["b"], { b: ["zz"] }).errors,
+    expandSteps(order, ["b"], { b: ["a"], a: ["b"] }).errors,
+  ];
+  check(
+    "단계 고르기: 없는 단계·앞 단계가 뒤에 있음·표에 없는 앞 단계·순환은 오류",
+    bad.every((e) => e.length > 0) && bad[0][0].includes("x") && bad[1].some((e) => e.includes("b → c")) && bad[3].some((e) => e.includes("순환")),
+    JSON.stringify(bad),
+  );
+}
 
 export async function runSelftest(root: string, scenario: string, only: string[] = []) {
   const single: Record<string, (root: string) => Promise<void>> = {
@@ -4546,7 +4585,8 @@ export async function runSelftest(root: string, scenario: string, only: string[]
   const steps: [string, () => Promise<unknown> | void][] = [
     ["projectStart", () => testProjectStart(root)],
     ["tree", testTree],
-    ["terminal", async () => (first = await testTerminal(root))],
+    ["terminalReady", async () => (first = await openFirstTerminal())],
+    ["terminal", () => testTerminal(root, t())],
     ["watch", () => testWatch(root, t())],
     ["repos", () => testRepos(root, t())],
     ["create", () => testCreate(root, t())],
@@ -4555,6 +4595,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["imeUnit", testImeUnit],
     ["terminalReplyUnit", testTerminalReplyUnit],
     ["workspaceStateUnit", testWorkspaceStateUnit],
+    ["stepPlanUnit", testStepPlanUnit],
     ["groups", () => testGroups(t())],
     ["groupWorktree", () => testGroupWorktree(root, t())],
     ["tabRename", testTabRename],
@@ -4592,10 +4633,13 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["projects", () => testProjects(root, t())],
     ["lastExit", () => testLastExit(t())],
   ];
-  const unknown = only.filter((n) => !steps.some(([name]) => name === n));
-  const chosen = new Set([...BASE_STEPS, ...only, ...only.flatMap((n) => STEP_DEPS[n] ?? [])]);
-  if (unknown.length) check("단계 이름", false, `없는 단계: ${unknown.join(", ")} (있는 단계: ${steps.map(([n]) => n).join(", ")})`);
-  const terminalAt = steps.findIndex(([n]) => n === "terminal");
+  const order = steps.map(([n]) => n);
+  const { chosen, errors } = expandSteps(order, [...BASE_STEPS, ...only], STEP_DEPS);
+  // 고르기 표(scripts/selftest-plan.json)의 단계 이름도 실제 단계와 맞아야 한다
+  const unplanned = selftestPlan.rules.flatMap((r) => r.steps).filter((n) => !order.includes(n));
+  if (unplanned.length) errors.push(`고르기 표에 없는 단계: ${[...new Set(unplanned)].join(", ")}`);
+  if (errors.length) check("단계 이름·앞 단계", false, `${errors.join("; ")} (있는 단계: ${order.join(", ")})`);
+  const terminalAt = order.indexOf("terminalReady");
   let stopped = "";
   for (const [i, [name, step]] of steps.entries()) {
     if (only.length && !chosen.has(name)) continue;

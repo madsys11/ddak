@@ -1,0 +1,144 @@
+{
+  "about": "자체 테스트 고르기 (scripts/selftest-changed.mjs). 바뀐 파일마다 처음 맞는 규칙: ignore → full → src/selftest.ts는 바뀐 줄의 함수로 → rules(맞는 것 모두의 합집합). 어디에도 없으면 전체. deps는 src/selftest.ts runSelftest도 쓴다.",
+  "deps": {
+    "groupWorktree": ["repos"],
+    "groupClone": ["groupWorktree"],
+    "groupEnd": ["groupWorktree"],
+    "gitGraph": ["groupClone", "groupEnd"]
+  },
+  "depsWhy": "groupWorktree는 repos가 넣은 저장소에, groupClone·groupEnd는 groupWorktree의 작업그룹 폴더·준비 스크립트에, gitGraph는 groupEnd가 만든 커밋과 그때까지의 작업그룹 번호(test-6)에 기댄다. 나머지 단계는 기본 단계(projectStart, terminalReady)만으로 혼자 돈다.",
+  "ignore": {
+    "why": "자체 테스트가 쓰지 않는 파일: 문서, 아이콘, 편집기 설정, 폰 배포(GitHub Pages)·PWA 아이콘·매니페스트(서비스 워커 sw.js는 mobilePushUnit이 실행한다), 설치 스크립트(scripts/test-install.sh로 따로), 폰 빌드 설정(npm run build:mobile로 따로)",
+    "files": [
+      "docs/**",
+      "README.md",
+      "CLAUDE.md",
+      ".gitignore",
+      ".vscode/**",
+      ".github/**",
+      "src-tauri/.gitignore",
+      "src-tauri/icons/**",
+      "src-tauri/app-icon.svg",
+      "src/mobile/public/icon-*.png",
+      "src/mobile/public/manifest.webmanifest",
+      "scripts/install.sh",
+      "scripts/test-install.sh",
+      "vite.mobile.config.ts"
+    ]
+  },
+  "full": {
+    "why": "여러 단계가 함께 쓰는 바탕(앱 뼈대, 터미널, 탭 상태, 문구·테마·스타일, 빌드·설정, Rust 진입점·PTY·메뉴·상태 저장)과 고르기 자체(이 표, 고르는 스크립트, selftest.sh)는 전체를 돌린다",
+    "files": [
+      "index.html",
+      "package.json",
+      "package-lock.json",
+      "tsconfig.json",
+      "tsconfig.node.json",
+      "vite.config.ts",
+      "scripts/selftest.sh",
+      "scripts/selftest-changed.mjs",
+      "scripts/selftest-plan.json",
+      "src/main.tsx",
+      "src/App.tsx",
+      "src/App.css",
+      "src/Workspace.tsx",
+      "src/Terminal.tsx",
+      "src/workspaceState.ts",
+      "src/ContextMenu.tsx",
+      "src/icons.tsx",
+      "src/layout.ts",
+      "src/devHooks.ts",
+      "src/prefs.tsx",
+      "src/themes.ts",
+      "src/i18n/**",
+      "src/errors.ts",
+      "src/useProjects.ts",
+      "src/useGroups.ts",
+      "src/vite-env.d.ts",
+      "src-tauri/Cargo.toml",
+      "src-tauri/Cargo.lock",
+      "src-tauri/build.rs",
+      "src-tauri/tauri.conf.json",
+      "src-tauri/capabilities/**",
+      "src-tauri/src/main.rs",
+      "src-tauri/src/lib.rs",
+      "src-tauri/src/pty.rs",
+      "src-tauri/src/menu.rs",
+      "src-tauri/src/selftest.rs",
+      "src-tauri/src/workspace.rs"
+    ]
+  },
+  "rules": [
+    {
+      "files": ["src/FileTree.tsx", "src/Sidebar.tsx"],
+      "steps": ["tree", "watch", "repos", "create", "rename", "trashDrag", "docView", "projects", "groupWorktree", "addSession"]
+    },
+    {
+      "files": ["src/watchDir.ts", "src-tauri/src/watch.rs"],
+      "steps": ["tree", "watch", "create", "rename", "docView"]
+    },
+    {
+      "files": ["src-tauri/src/fs.rs"],
+      "steps": ["tree", "watch", "create", "rename", "trashDrag", "docView"]
+    },
+    { "files": ["src/dragPath.ts"], "steps": ["trashDrag"] },
+    { "files": ["src/hangul.ts"], "steps": ["imeUnit", "terminal"] },
+    { "files": ["src/TerminalSearch.tsx"], "steps": ["terminalSearch"] },
+    {
+      "files": ["src/terminalLinks.ts", "src-tauri/src/links.rs"],
+      "steps": ["terminalLinksUnit", "terminalLinkWrap", "terminalLinks", "docView"]
+    },
+    { "files": ["src/docs.ts", "src/DocView.tsx"], "steps": ["docView", "workspaceStateUnit"] },
+    { "files": ["src/Resizer.tsx", "src/pointerTrack.ts"], "steps": ["panels", "tabsAndSplits"] },
+    { "files": ["src/zoom.ts"], "steps": ["zoom"] },
+    {
+      "files": ["src/ChatPanel.tsx", "src-tauri/src/chat.rs"],
+      "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects"]
+    },
+    {
+      "files": ["src/MobileDialog.tsx", "src/mobile/**", "src-tauri/src/mobile.rs", "src-tauri/src/push.rs"],
+      "why": "src/mobile/public/sw.js는 mobilePushUnit이 가짜 self로 실행한다",
+      "steps": ["mobile", "mobileSyncUnit", "mobilePushUnit", "mobileThemeUnit", "mobileChatUnit"]
+    },
+    {
+      "files": ["src/PromptChoices.tsx", "src/programStatus.ts", "src-tauri/src/prompts.rs"],
+      "steps": ["programStatusUnit", "promptAnswerUnit", "statusContrastUnit", "programStatus", "addSession"]
+    },
+    { "files": ["src/notifyClick.ts"], "steps": ["notifyClickUnit", "addSession"] },
+    {
+      "files": ["src-tauri/src/notify.rs"],
+      "steps": ["notifySound", "mobile", "notifyClickUnit", "programStatus", "addSession"]
+    },
+    {
+      "files": ["src/GitGraph.tsx", "src-tauri/src/git.rs"],
+      "steps": ["tree", "repos", "gitGraph"]
+    },
+    {
+      "files": ["src/AddRepoDialog.tsx", "src-tauri/src/repos.rs"],
+      "steps": ["repos", "groupWorktree", "groupClone", "groupEnd", "gitGraph"]
+    },
+    {
+      "files": [
+        "src/SetupDialog.tsx",
+        "src-tauri/src/worktrees.rs",
+        "src-tauri/src/clone.rs",
+        "src-tauri/src/prepare.rs",
+        "src-tauri/src/setup.rs",
+        "src-tauri/src/claude_trust.rs"
+      ],
+      "steps": ["groupWorktree", "groupClone", "groupEnd", "gitGraph", "addSession"]
+    },
+    { "files": ["src/EndGroupDialog.tsx"], "steps": ["groupEnd"] },
+    { "files": ["src/AddSessionDialog.tsx"], "steps": ["addSession"] },
+    {
+      "files": ["src-tauri/src/groups.rs"],
+      "steps": ["groups", "groupWorktree", "groupClone", "groupEnd", "addSession", "shiftEnterProgram"],
+      "scenarios": ["restart", "corrupt", "resume"]
+    },
+    {
+      "files": ["src-tauri/src/projects.rs"],
+      "steps": ["projects"],
+      "scenarios": ["restart", "corrupt"]
+    }
+  ]
+}

@@ -498,7 +498,15 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   진짜 claude·codex를 띄우지 않도록 테스트용 `groups.json`을 넣는다.
 - `main`은 이름 붙은 단계의 차례다 (`src/selftest.ts` runSelftest). 단계마다 예외를 따로 잡아 FAIL로 남기고 다음 단계로
   가며 (첫 터미널을 못 띄우면 그 뒤는 SKIP), 걸린 시간을 `INFO  단계`로 남긴다. `SELFTEST_ONLY="addSession gitGraph"`로
-  단계를 고르면 기본 단계(`projectStart`, `terminal`)와 고른 단계가 기대는 앞 단계(`STEP_DEPS`)만 돈다.
+  단계를 고르면 기본 단계(`projectStart`, 첫 터미널을 띄우는 `terminalReady`)와 고른 단계, 그 앞 단계
+  (`scripts/selftest-plan.json`의 `deps`, 끝까지 펼침)만 단계 목록 순서대로 돈다. 없는 단계·앞 단계가 뒤에 있음·순환은 FAIL.
+- 바뀐 파일로 고르기 (`scripts/selftest-changed.mjs`, 고치는 동안): 비교 기준(기본 HEAD, `--base`) 대비 바뀐 파일과 추적하지
+  않는 새 파일을 표(`scripts/selftest-plan.json`)로 나눈다. `ignore`(문서·아이콘 등)는 건너뛰고, `full`(앱 뼈대·터미널·탭
+  상태·문구·테마·빌드 설정·Rust 진입점·PTY·메뉴·고르기 자체)이나 표에 없는 파일이 하나라도 있으면 전체, 그 밖에는
+  `rules`(파일 → 단계·시나리오)의 합집합. `src/selftest.ts`는 바뀐 줄이 속한 맨 위 함수를 쓰는 단계·시나리오를 고르고, 고르기의
+  바탕(runSelftest와 그것이 쓰는 이름, 가져오기)이면 전체. TS가 바뀌면 tsc, `src-tauri`가 바뀌면 cargo test도 돌린다.
+  `--plan`은 고른 결과만, `--check`는 고르기 규칙과 표(추적하는 파일이 모두 표에 있는지 포함)를 검사한다.
+  리뷰를 요청하기 전에는 전체를 돌린다 (고르기는 예상 못 한 곳의 회귀를 놓칠 수 있다).
   - 단계가 300초 안에 끝나지 않으면 시간 초과 FAIL, 뒤 단계 SKIP, 결과를 보고한다. 단계가 끝날 때마다 작업그룹 설정에 진짜
     claude·codex가 있으면 (설정을 바꾸는 단계가 되돌리지 못함) "테스트 설정 유지" FAIL과 함께 뒤 단계를 SKIP한다.
   - 테스트 모듈을 불러오지 못하면 (문법 오류 등) 바로 FAIL로 끝난다 (`main.tsx`). `selftest.sh`는 도는 동안 `caffeinate`로
