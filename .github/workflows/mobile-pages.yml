@@ -23,6 +23,7 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+# 액션은 Node 24에서 도는 판 (Node 20 판은 GitHub가 지원을 끝냈다). 빌드의 node-version은 로컬 개발 환경과 같게 둔다.
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -30,16 +31,16 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
       - run: npm ci
       - run: npm run build:mobile
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist-mobile
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
