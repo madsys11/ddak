@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(a.name, "dev-1");
         let dest = PathBuf::from(&a.path);
         assert_eq!(git(&dest.join("server"), &["branch", "--show-current"]).unwrap(), "ddak/dev-1");
-        assert_eq!(std::fs::read_link(dest.join("notes.md")).unwrap(), std::fs::canonicalize(&proj).unwrap().join("notes.md"));
+        assert_eq!(std::fs::read_link(dest.join("notes.md")).unwrap(), crate::platform::canonical(&proj).unwrap().join("notes.md"));
         assert!(std::fs::read_link(dest.join("docs")).is_ok());
         assert_eq!(create(&home, &p, "dev").unwrap().name, "dev-2");
 
@@ -777,7 +777,9 @@ mod tests {
     // 확인한 커밋에서 브랜치가 움직였으면 지우지 않는다 (리뷰 후속 P2: git branch -d는 upstream이 있으면 원본 HEAD가 아니라
     // upstream 기준이라, upstream에만 있는 새 커밋으로 옮겨진 브랜치를 지웠다). 지우는 명령 직전에 브랜치를 옮기는 git
     // 래퍼로 순서를 정한다. upstream은 같은 저장소의 브랜치(remote ".")로 둔다.
+    // (Windows는 .sh 래퍼를 git 대신 바로 실행하지 못해 유닉스에서만)
     #[test]
+    #[cfg(unix)]
     fn end_keeps_branch_moved_after_check() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-moved-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
@@ -825,8 +827,9 @@ mod tests {
     }
 
     // 브랜치를 쓰는지 확인하지 못하면 (다른 worktree의 HEAD를 읽지 못함) 지우지 않고 남긴다 (리뷰 후속 P2: 빈 내용으로
-    // 보고 그 worktree가 체크아웃한 브랜치를 지웠다).
+    // 보고 그 worktree가 체크아웃한 브랜치를 지웠다). (Windows는 chmod 000으로 읽기를 막지 못해 유닉스에서만)
     #[test]
+    #[cfg(unix)]
     fn end_keeps_branch_it_cannot_check() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-unchecked-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
@@ -844,8 +847,9 @@ mod tests {
     }
 
     // 리뷰 후속 P1: 이름을 정한 뒤 (또는 마지막 확인 뒤) 다른 프로세스가 같은 브랜치를 만들어도 그 브랜치를 지우지 않는다.
-    // 브랜치를 만드는 명령 직전에 외부 브랜치(고유 커밋)를 만드는 git 래퍼로 실행 순서를 정한다.
+    // 브랜치를 만드는 명령 직전에 외부 브랜치(고유 커밋)를 만드는 git 래퍼로 실행 순서를 정한다. (유닉스에서만, 위와 같이)
     #[test]
+    #[cfg(unix)]
     fn never_deletes_branch_created_by_others() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-race-{}", std::process::id()));
         let proj = shared_repo_project(&tmp, &[]);
