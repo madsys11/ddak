@@ -10,7 +10,7 @@ import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, type Dialog } from "./programStatus";
 import { findLinks, linkProvider } from "./terminalLinks";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
@@ -1900,6 +1900,42 @@ function testProgramStatusUnit() {
     dialogs.every((d) => dialogOnScreen(d)) && plain.every((p) => !dialogOnScreen(p)),
     `${dialogs.map((d) => dialogOnScreen(d))} ${plain.map((p) => dialogOnScreen(p))}`,
   );
+  // 선택 창 읽기 (채팅에서 답하기): 질문 줄(가로줄·빈 줄 셋 위는 뺌), 선택지(상자 테두리 빼고, 넘친 줄은 이어 붙임), 커서
+  const claude = [
+    "earlier output",
+    "────────────────────────────",
+    " Bash command",
+    "",
+    "   npm test",
+    "",
+    " Do you want to proceed?",
+    " ❯ 1. Yes",
+    "   2. Yes, and don't ask again for npm test commands in",
+    "      /Users/me/project",
+    "   3. No, and tell Claude what to do differently (esc)",
+    "",
+    " Esc to cancel · Tab to add additional instructions",
+  ];
+  const boxed = ["╭────────────────────────────╮", "│ Allow this?                │", "│   1. Yes                    │", "│ › 2. No                     │", "│ Press enter to confirm      │"];
+  // 위 경계 없이 화면 맨 위까지 오면 질문이 잘렸을 수 있다
+  const cut = ["  rm -rf project", "Do you want to proceed?", "❯ 1. Yes", "  2. No"];
+  const read = [readDialog(claude), readDialog(boxed), readDialog(["$ ls", "1. first", "2. second"]), readDialog(["❯ 1. only one"]), readDialog(cut)];
+  check(
+    "선택 창 읽기: 질문·선택지·커서 (claude 모양, 상자 테두리, 넘친 선택지) / 커서 없는 목록·선택지 하나는 아님",
+    JSON.stringify(read) ===
+      JSON.stringify([
+        { question: ["Bash command", "npm test", "Do you want to proceed?"], options: ["Yes", "Yes, and don't ask again for npm test commands in /Users/me/project", "No, and tell Claude what to do differently (esc)"], cursor: 0, complete: true },
+        { question: ["Allow this?"], options: ["Yes", "No"], cursor: 1, complete: true },
+        null,
+        null,
+        { question: ["rm -rf project", "Do you want to proceed?"], options: ["Yes", "No"], cursor: 0, complete: false },
+      ]),
+    JSON.stringify(read),
+  );
+  // 질문이 길어도 줄 수를 자르지 않아 위쪽 명령만 다른 두 선택 창은 다르다 (리뷰 R2)
+  const long = (cmd: string) => ["────────", " Bash command", `   ${cmd}`, ...Array.from({ length: 8 }, (_, i) => ` Details ${i}`), " Do you want to proceed?", " ❯ 1. Yes", "   2. No"];
+  const [harmless, harmful] = [readDialog(long("echo harmless")), readDialog(long("rm -rf project"))];
+  check("선택 창 읽기: 질문은 줄 수를 자르지 않음 (위쪽 명령만 다른 두 선택 창은 다름)", !!harmless && !!harmful && harmful.question.includes("rm -rf project") && !sameDialog(harmless, harmful), JSON.stringify(harmful?.question));
   // 선택 창이 오래 남으면 (DIALOG_CAP) 풀린다. blocked는 상한 없음
   const now = 1_000_000_000;
   check(
@@ -2152,6 +2188,83 @@ async function testTerminalLinks(root: string, term: Terminal) {
   check("터미널 링크: 그 폴더에 없는 상대 경로는 바로 아래 git 저장소에서 찾음", one("docs/guide.md", "open", "/lk/repo/docs/guide.md"), JSON.stringify(results["docs/guide.md"]));
   mouse("mousemove", term.cols - 1);
   await run(term, `cd "${root}" && rm -rf "${dir}"`);
+}
+
+// 채팅에서 고른 답 넣기 (src/programStatus.ts driveAnswer): 가짜 선택 창에 화살표를 하나씩 보내 커서가 따라온 뒤에만 Enter.
+// 화면이 바뀌거나 커서가 따라오지 않으면 Enter 없이 끝난다
+export async function testPromptAnswerUnit(ok: (name: string, pass: boolean, detail?: string) => void = check) {
+  // 가짜 선택 창. 키를 쓰면 커서가 움직인다 (stuck이면 안 움직임). changeAfter: 그만큼 쓴 뒤 질문이 바뀜.
+  // queueChange: 그 번째 키가 쓰는 차례를 기다리는 동안 질문이 바뀜 (리뷰 R1). cancelAfter: 그만큼 쓴 뒤 취소 (새 답이 옴, 리뷰 R3).
+  // failAt: 그 번째 쓰기가 실패 (리뷰 R4)
+  const run = async (o: { cursor: number; option: number; app?: boolean; changeAfter?: number; queueChange?: number; cancelAfter?: number; failAt?: number; stuck?: boolean; expected?: Dialog }) => {
+    const shown: Dialog = { question: ["Do you want to proceed?"], options: ["Yes", "Yes, always", "No"], cursor: o.cursor, complete: true };
+    const sent: string[] = [];
+    let tries = 0;
+    let clock = 0;
+    const result = await driveAnswer({
+      option: o.option,
+      expected: o.expected ?? { ...shown },
+      read: () => ({ ...shown }),
+      send: async (data, check) => {
+        tries++;
+        if (tries === o.queueChange) shown.question = ["Something else?"];
+        if (!check({ ...shown })) return "skipped";
+        if (tries === o.failAt) return "error";
+        sent.push(data);
+        if (o.changeAfter !== undefined && sent.length >= o.changeAfter) shown.question = ["Something else?"];
+        if (!o.stuck && /[AB]$/.test(data)) shown.cursor += data.endsWith("B") ? 1 : -1;
+        return "sent";
+      },
+      appCursor: () => !!o.app,
+      cancelled: () => o.cancelAfter !== undefined && sent.length >= o.cancelAfter,
+      sleep: async () => void (clock += 100),
+      now: () => clock,
+    });
+    return `${result}:${sent.map((s) => JSON.stringify(s)).join(",")}`;
+  };
+  const got = [
+    await run({ cursor: 0, option: 2 }),
+    await run({ cursor: 2, option: 0, app: true }),
+    await run({ cursor: 1, option: 1 }),
+    await run({ cursor: 0, option: 2, changeAfter: 1 }),
+    await run({ cursor: 0, option: 1, stuck: true }),
+    await run({ cursor: 0, option: 1, expected: { question: ["Other?"], options: ["Yes", "Yes, always", "No"], cursor: 0, complete: true } }),
+    await run({ cursor: 0, option: 3 }),
+    await run({ cursor: 0, option: 1, queueChange: 2 }),
+    await run({ cursor: 0, option: 1, cancelAfter: 1 }),
+    await run({ cursor: 0, option: 1, failAt: 2 }),
+    await run({ cursor: 0, option: 0, expected: { question: ["Do you want to proceed?"], options: ["Yes", "Yes, always", "No"], cursor: 0, complete: false } }),
+  ];
+  const want = [
+    String.raw`sent:"\u001b[B","\u001b[B","\r"`,
+    String.raw`sent:"\u001bOA","\u001bOA","\r"`,
+    String.raw`sent:"\r"`,
+    String.raw`changed:"\u001b[B"`,
+    String.raw`failed:"\u001b[B"`,
+    "changed:",
+    "changed:",
+    String.raw`changed:"\u001b[B"`,
+    String.raw`changed:"\u001b[B"`,
+    String.raw`failed:"\u001b[B"`,
+    "changed:",
+  ];
+  // 한 터미널의 답 처리: 늦게 온 앞 요청(2 다음 1)·재전달(2 다시)은 버리고 지금 것을 건드리지 않음, 더 새 요청(3)은 지금 것을 취소
+  const runs = new AnswerRuns();
+  const two = runs.start(2);
+  const late = runs.start(1);
+  const again = runs.start(2);
+  const twoAlive = !!two && !two.cancelled;
+  const three = runs.start(3);
+  ok(
+    "선택 창 답 넣기: 늦게 온 앞 요청·재전달은 버리고 지금 처리를 건드리지 않음, 더 새 요청은 지금 처리를 취소",
+    late === null && again === null && twoAlive && !!three && two!.cancelled && !three.cancelled,
+    JSON.stringify({ late, again, twoAlive, two, three }),
+  );
+  ok(
+    "선택 창 답 넣기: 화살표를 하나씩 보내 커서가 따라온 뒤에만 Enter (응용 커서 키 모드는 ESC O). 화면이 바뀌거나(쓰는 차례를 기다리는 동안 포함) 취소되거나 커서가 안 따라오거나 쓰기가 실패하거나 알린 것과 다르거나 질문이 잘렸으면 Enter 없음",
+    JSON.stringify(got) === JSON.stringify(want),
+    got.join(" | "),
+  );
 }
 
 function testTerminalReplyUnit() {
@@ -2774,7 +2887,9 @@ async function testAddSession(root: string, first: Terminal) {
   const asker = `{"name":"asker","command":"sh","args":["-c","printf \\"$1\\"; sleep 1; curl -s -X POST \\"$0\\"; sleep 30","{attention}","\\\\033]7501;state=blocked:kind=question\\\\033\\\\\\\\"],"readOnly":true}`;
   // lateposter: 2초 뒤에 "@user ..."를 보낸다 (그 사이 다른 프로젝트로 옮겨 가서 받는다)
   const lateposter = `{"name":"lateposter","command":"sh","args":["-c","sleep 2; curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"","{chat}","${rpc}"],"readOnly":true}`;
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter},${attn},${asker},${hookfirst},${twice},${lateposter}`;
+  // picker: 선택 창 흉내 (testChatPrompt가 picker.py를 만든다)
+  const picker = `{"name":"picker","command":"python3","args":["${root}/picker.py"],"readOnly":true}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter},${attn},${asker},${hookfirst},${twice},${lateposter},${picker}`;
   // 터미널에 보내는 명령은 900바이트까지라 (run) 500자씩 나눠 붙인 뒤 옮긴다 (쓰는 도중의 반쪽 파일을 읽지 않게)
   const content = TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","rules":"S2","sessions":[${pick}]}]}`);
   await run(first, `: > "${file}.part"`);
@@ -2807,7 +2922,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter,pick/attn,pick/asker,pick/hookfirst,pick/twice,pick/lateposter" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter,pick/attn,pick/asker,pick/hookfirst,pick/twice,pick/lateposter,pick/picker" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -2865,6 +2980,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitAsync("prompter 나감", async () => !(await invoke<string[]>("chat_members", { project: root })).includes("origin/prompter"), 5000).catch(() => null);
 
   await testChatPanel(root, open, choose);
+  await testChatPrompt(root, first, open, choose);
 
   // 경고에서 새 작업그룹을 고르면 별도 worktree의 작업그룹을 연다 (기본 그룹)
   await open("menu");
@@ -2886,6 +3002,131 @@ async function testAddSession(root: string, first: Terminal) {
   check("채팅방: 터미널을 닫으면 참여자에서 빠짐", left?.join(",") === "user", String(left));
   await run(first, `printf '%s' '${TEST_GROUPS}' > "${file}"`);
   await waitFor("테스트 설정 복귀", () => devHooks.groups?.groups.length === 1, 3000);
+}
+
+// 선택 창 답하기 (src-tauri/src/prompts.rs, src/PromptChoices.tsx, Terminal.tsx answerPrompt): 세션이 선택 창을 띄우면 그 이름으로
+// 채팅에 질문·선택지가 올라오고 (채팅 알림은 내지 않음), 누르면 (승인일 수 있으면 확인 뒤) 화살표로 커서를 옮겨 확인한 다음 Enter.
+// 알린 뒤 화면이 바뀌었으면 넣지 않고 "바뀜"으로 기록한다. picker.py가 claude 권한 확인 모양을 흉내 낸다 (두 번 묻고, x면 질문이 바뀜)
+async function testChatPrompt(root: string, first: Terminal, openAdd: (how: "menu" | "tab") => Promise<void>, choose: (id: string) => void) {
+  const script = String.raw`import os, sys, time, tty
+R = [["Bash command", "", "  npm test", "", "Do you want to proceed?"], ["Yes", "Yes, always", "No"]]
+S = [["Second?"], ["Allow", "Deny"]]
+X = [["Changed?"], ["Allow", "Deny"]]
+def ask(d):
+    c = 0
+    while True:
+        q, o = d
+        w = sys.stdout.write
+        w("\x1b[2J\x1b[H" + "\u2500" * 20 + "\r\n" + "\r\n".join(q) + "\r\n")
+        for i, x in enumerate(o):
+            w(("❯ " if i == c else "  ") + str(i + 1) + ". " + x + "\r\n")
+        w("Enter to confirm · Esc to cancel\r\n")
+        sys.stdout.flush()
+        k = os.read(0, 16)
+        if k in (b"\x1b[B", b"\x1bOB"):
+            c = min(c + 1, len(o) - 1)
+        elif k in (b"\x1b[A", b"\x1bOA"):
+            c = max(c - 1, 0)
+        elif k == b"x":
+            d = X
+        elif k == b"\r":
+            return o[c]
+tty.setraw(0)
+a = ask(R)
+b = ask(S)
+sys.stdout.write("\x1b[2J\x1b[HCHOSE:" + a + "|" + b + "\r\n")
+sys.stdout.flush()
+time.sleep(60)`;
+  await run(first, `: > "${root}/picker.py"`);
+  for (const line of script.split("\n")) await run(first, `printf '%s\\n' '${line}' >> "${root}/picker.py"`);
+
+  const ws = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const panel = () => ws().querySelector<HTMLElement>(".chat-panel")!;
+  const shown = () => !!ws().querySelector(".chat-panel") && panel().style.display !== "none";
+  if (!shown()) ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  await waitFor("채팅 패널", shown, 3000);
+  type Stored = { id: number; from: string; to: string[]; prompt?: { id: string; question: string[]; options: { label: string; confirm: boolean }[] }; answer?: { prompt: string; option: number; result: string } };
+  const stored = () => invoke<Stored[]>("chat_messages", { project: root });
+  const promptAsking = async (q: string) => (await stored()).find((m) => m.prompt?.question.includes(q));
+  const card = (id: string) => panel().querySelector<HTMLElement>(`[data-prompt="${id}"]`);
+  const option = (id: string, i: number) => card(id)?.querySelector<HTMLButtonElement>(`[data-option="${i}"]`) ?? null;
+
+  // 새 탭에 띄운다: 지금 탭에는 앞 검사의 창이 많아 폭이 몇 칸뿐이라 선택 창의 줄이 접혀 화면을 넘친다
+  const tabsBefore = tabCount();
+  await menu("new_tab");
+  await waitFor("picker 탭", () => tabCount() === tabsBefore + 1 && paneEls().length === 1, 5000);
+  const panesBefore = paneEls().length;
+  await openAdd("menu");
+  choose("pick/picker");
+  await waitFor("picker 창", () => paneEls().length === panesBefore + 1, 5000);
+  const pickerPane = visiblePanes().find((p) => p.el.querySelector(".pane-label")?.textContent?.startsWith("picker"))!;
+  const pickerScreen = () => screen(pickerPane.term).join("\n");
+
+  const firstAsk = await waitAsync("선택 창 메시지", () => promptAsking("Do you want to proceed?"), 10000).catch(() => undefined);
+  const firstId = firstAsk?.prompt?.id ?? "";
+  await waitFor("선택지 버튼", () => !!option(firstId, 2) && !option(firstId, 0)!.disabled, 3000).catch(() => null);
+  const notes = (await invoke<[[string, string][], number, string | null]>("selftest_notifications"))[0];
+  check(
+    "선택 창 답하기: 세션의 선택 창이 그 이름으로 채팅에 (질문·선택지, 승인일 수 있는 것만 확인), 누를 수 있음, 채팅 알림은 내지 않음",
+    firstAsk?.from === "origin/picker" && firstAsk.to.join() === "user" && firstAsk.prompt!.question.join("|") === "Bash command|npm test|Do you want to proceed?" &&
+      firstAsk.prompt!.options.map((o) => `${o.label}:${o.confirm}`).join(",") === "Yes:true,Yes, always:true,No:false" && !!option(firstId, 2) && !option(firstId, 0)!.disabled &&
+      !notes.some(([, body]) => body.startsWith("origin/picker:")),
+    `${JSON.stringify(firstAsk)} notes=${JSON.stringify(notes.slice(-3))} members=${await invoke<string[]>("chat_members", { project: root })} screen=${JSON.stringify(pickerScreen().slice(0, 300))}`,
+  );
+
+  // 승인일 수 있는 선택지는 확인을 받는다: 취소하면 아무것도 보내지 않는다
+  option(firstId, 0)!.click();
+  await waitFor("확인 줄", () => card(firstId)?.querySelector("[data-confirm='0']"), 2000).catch(() => null);
+  const asked = !!card(firstId)?.querySelector("[data-confirm='0']");
+  card(firstId)?.querySelector<HTMLElement>("[data-action=prompt-cancel]")?.click();
+  await sleep(500);
+  const untouched = !card(firstId)?.querySelector("[data-confirm]") && pickerScreen().includes("\u276f 1. Yes") && !(await stored()).some((m) => m.answer);
+  check("선택 창 답하기: 승인일 수 있는 선택지는 확인 줄, 취소하면 그대로", asked && untouched, `${asked} ${untouched} ${pickerScreen().slice(0, 200)}`);
+
+  // 2번(Yes, always)을 확인하고 보낸다: 커서를 두 칸이 아니라 한 칸 옮긴 뒤 Enter, 보냄 기록, 버튼은 닫힘
+  option(firstId, 1)!.click();
+  await waitFor("확인 줄", () => card(firstId)?.querySelector("[data-action=prompt-send]"), 2000).catch(() => null);
+  card(firstId)?.querySelector<HTMLElement>("[data-action=prompt-send]")?.click();
+  const sent = await waitAsync("보냄 기록", async () => (await stored()).find((m) => m.answer?.prompt === firstId), 8000).catch(() => undefined);
+  const secondAsk = await waitAsync("두 번째 선택 창", () => promptAsking("Second?"), 8000).catch(() => undefined);
+  await waitFor("고른 것 표시", () => option(firstId, 1)?.classList.contains("chosen") && option(firstId, 0)?.disabled, 3000).catch(() => null);
+  check(
+    "선택 창 답하기: 확인하고 보내면 그 선택지로 커서를 옮겨 Enter, 보냄 기록, 그 선택 창은 닫힘",
+    sent?.answer?.result === "sent" && sent.answer.option === 1 && sent.from === "user" && sent.to.length === 0 && !!secondAsk && !!option(firstId, 1)?.classList.contains("chosen") && !!option(firstId, 0)?.disabled,
+    `${JSON.stringify(sent)} second=${!!secondAsk} ${card(firstId)?.textContent}`,
+  );
+
+  // 알린 뒤 화면이 바뀌었으면 넣지 않는다: 바뀐 것을 Rust에 늦게 알리게 하고 그 사이에 앞 선택 창에 답한다
+  const secondId = secondAsk?.prompt?.id ?? "";
+  devHooks.statusDelay = (cmd) => (cmd === "pty_dialog" ? 2000 : 0);
+  pickerPane.term.input("x");
+  await waitFor("화면이 바뀜", () => pickerScreen().includes("Changed?"), 3000).catch(() => null);
+  const accepted = await invoke("chat_answer", { project: root, prompt: secondId, option: 0 }).then(() => true, (e) => String(e));
+  const changed = await waitAsync("바뀜 기록", async () => (await stored()).find((m) => m.answer?.prompt === secondId), 5000).catch(() => undefined);
+  devHooks.statusDelay = undefined;
+  const thirdAsk = await waitAsync("바뀐 선택 창", () => promptAsking("Changed?"), 8000).catch(() => undefined);
+  check(
+    "선택 창 답하기: 알린 뒤 화면의 선택 창이 바뀌었으면 넣지 않고 바뀜으로 기록, 바뀐 것은 새 메시지",
+    accepted === true && changed?.answer?.result === "changed" && pickerScreen().includes("Changed?") && !!thirdAsk,
+    `${accepted} ${JSON.stringify(changed)} third=${!!thirdAsk}`,
+  );
+
+  // 거절 쪽(Deny)은 확인 없이 바로 보낸다
+  const thirdId = thirdAsk?.prompt?.id ?? "";
+  await waitFor("세 번째 버튼", () => !!option(thirdId, 1) && !option(thirdId, 1)!.disabled, 3000).catch(() => null);
+  option(thirdId, 1)?.click();
+  const done = await waitFor("고름", () => pickerScreen().includes("CHOSE:Yes, always|Deny"), 8000).then(() => true, () => false);
+  const closed = await waitAsync("열린 선택 창 없음", async () => (await invoke<string[]>("chat_prompts", { project: root })).length === 0, 3000).then(() => true, () => false);
+  check("선택 창 답하기: 거절 쪽은 확인 없이 보냄, 끝나면 열린 선택 창 없음", done && closed, `${done} ${closed} ${pickerScreen().slice(0, 120)}`);
+
+  pickerPane.term.focus();
+  await menu("close_pane");
+  await waitFor("picker 닫힘", () => paneEls().length === panesBefore, 5000).catch(() => null);
+  await menu("close_pane");
+  await waitFor("picker 탭 닫힘", () => tabCount() === tabsBefore, 5000).catch(() => null);
+  ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  await waitFor("채팅 닫기", () => !shown(), 2000).catch(() => null);
+  await run(first, `rm -f "${root}/picker.py"`);
 }
 
 // 채팅 패널 (src/ChatPanel.tsx): 탭 바 버튼으로 연다. 세션이 보낸 메시지와 참여자를 보이고, 참여자를 누르면 멘션을
@@ -3899,6 +4140,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["terminalLinkWrap", () => testTerminalLinkWrap(root, t())],
     ["terminalLinks", () => testTerminalLinks(root, t())],
     ["programStatusUnit", testProgramStatusUnit],
+    ["promptAnswerUnit", () => testPromptAnswerUnit()],
     ["notifyClickUnit", testNotifyClickUnit],
     ["programStatus", () => testProgramStatus(root, t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],

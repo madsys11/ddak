@@ -10,7 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
 import { draggedPath, isPathDrag, shellQuote } from "./dragPath";
 import { fixImeInput, passesImeKey } from "./hangul";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, type ProgramStatus } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, AnswerRuns, type Dialog, type ProgramStatus, type SendKey } from "./programStatus";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 import { TerminalSearch } from "./TerminalSearch";
@@ -261,7 +261,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     // 상태는 보낸 순서대로 도착해야 한다 (invoke는 호출마다 따로 가서 순서가 보장되지 않는다. 늦게 온 오래된 값이 남으면 잠자기
     // 막기가 반대로 굳는다, 리뷰 R3). 한 줄로 세우고, PTY가 생기기 전에 바뀐 것은 생길 때까지 기다렸다 보낸다
     let statusSends: Promise<unknown> = Promise.resolve();
-    const sendStatus = (cmd: "pty_awaiting" | "pty_working", args: Record<string, unknown>) => {
+    const sendStatus = (cmd: "pty_awaiting" | "pty_working" | "pty_dialog", args: Record<string, unknown>) => {
       statusSends = statusSends
         .then(() => idReady)
         .then(async (target) => {
@@ -304,13 +304,64 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       }
       return true;
     });
+    // 보이는 화면의 줄 (위에서 아래로)
+    const screenLines = () => {
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      for (let y = buf.baseY; y < buf.baseY + term.rows; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+      return lines;
+    };
+    // 기다리는 동안 화면의 선택 창 (채팅에서 답하기, src-tauri/src/prompts.rs). 바뀔 때마다 차례(seq)를 붙여 알린다
+    let dialogSeq = 0;
+    let sentDialog: Dialog | null = null;
+    let sentKind = "";
+    const reportDialog = (lines: string[]) => {
+      const d = awaiting ? readDialog(lines) : null;
+      const kind = awaitKind();
+      if (JSON.stringify(d) === JSON.stringify(sentDialog) && (!d || kind === sentKind)) return;
+      sentDialog = d;
+      sentKind = kind;
+      sendStatus("pty_dialog", { seq: ++dialogSeq, kind, dialog: d });
+    };
+    // 채팅에서 고른 답을 넣는다 (src/programStatus.ts driveAnswer). 알린 뒤 화면이 바뀌었으면 넣지 않는다 (차례·내용으로 본다).
+    // 이 터미널에서는 한 번에 하나, 더 새 요청만 받는다 (AnswerRuns). 키는 prompt_write로 써서 Rust가 지금 요청인지 다시 본다.
+    // 결과는 그 요청 번호와 함께 알리고, Rust가 지금 요청의 결과만 채팅에 기록한다
+    const runs = new AnswerRuns();
+    const answerPrompt = async ({ seq, prompt, option, request }: { seq: number; prompt: string; option: number; request: number }) => {
+      const run = runs.start(request);
+      if (!run) return;
+      const result = (r: "sent" | "changed" | "failed") => invoke("prompt_result", { prompt, request, option, result: r }).catch(() => {});
+      try {
+        if (id === undefined || seq !== dialogSeq || !sentDialog) return result("changed");
+        const target = id;
+        // 쓰는 차례가 오면 그때의 화면으로 확인하고 쓴다. 다른 입력의 줄은 실패해도 이어 간다
+        const send: SendKey = (data, ok) => {
+          const p = sending.then(async () => {
+            if (run.cancelled || disposed || !ok(readDialog(screenLines()))) return "skipped" as const;
+            try {
+              await invoke("prompt_write", { id: target, prompt, request, data });
+              return "sent" as const;
+            } catch (e) {
+              return String(e) === "stale" ? ("skipped" as const) : ("error" as const);
+            }
+          });
+          sending = p.catch(() => {});
+          return p;
+        };
+        const cancelled = () => run.cancelled || disposed;
+        return result(await driveAnswer({ option, expected: sentDialog, read: () => readDialog(screenLines()), send, appCursor: () => term.modes.applicationCursorKeysMode, cancelled }));
+      } finally {
+        runs.end(run);
+      }
+    };
+    const answers = listen<{ pty: number; seq: number; prompt: string; option: number; request: number }>("prompt-answer", ({ payload }) => {
+      if (!disposed && id !== undefined && payload.pty === id) answerPrompt(payload);
+    });
     // 화면 아래쪽의 선택 창 (출력을 그린 뒤 잠시 모아서 본다)
     let dialogCheck: ReturnType<typeof setTimeout> | undefined;
     const checkDialog = () => {
       dialogCheck = undefined;
-      const buf = term.buffer.active;
-      const lines: string[] = [];
-      for (let y = buf.baseY; y < buf.baseY + term.rows; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+      const lines = screenLines();
       if (!dialogOnScreen(lines)) {
         dialogSince = undefined;
         clearTimeout(dialogCap);
@@ -319,6 +370,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
         dialogCap = setTimeout(report, DIALOG_CAP_MS);
       }
       report();
+      reportDialog(lines);
     };
     const parsed = term.onWriteParsed(() => {
       if (dialogCheck === undefined) dialogCheck = setTimeout(checkDialog, 100);
@@ -343,6 +395,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       disposed = true;
       wakes.then((f) => f(), () => {});
       clicks.then((f) => f(), () => {});
+      answers.then((f) => f(), () => {});
       userEvents.forEach((e) => term.textarea?.removeEventListener(e, userEvent, true));
       el.removeEventListener("dragover", onDragOver);
       el.removeEventListener("drop", onDrop);

@@ -35,6 +35,45 @@ pub struct Message {
     // 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    // 세션이 띄운 선택 창 (prompts.rs): 사용자가 채팅에서 고른다
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<Prompt>,
+    // 선택 창에 보낸 답의 기록 (prompts.rs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<Answer>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Prompt {
+    // 이 선택 창의 id (답할 때 가리킨다. 열려 있는 동안만 답할 수 있다)
+    pub id: String,
+    // 무엇을 기다리는지 (permission·question·auth·dialog·blocked)
+    pub kind: String,
+    // 화면에서 읽은 질문 줄
+    pub question: Vec<String>,
+    pub options: Vec<PromptOption>,
+    // 채팅에서 답할 수 있다 (질문이 화면 밖으로 잘렸을 수 있으면 아님: 맥에서 답한다)
+    #[serde(default)]
+    pub answerable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PromptOption {
+    pub label: String,
+    // 보내기 전에 한 번 더 확인을 받는다 (승인일 수 있는 것)
+    pub confirm: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Answer {
+    pub prompt: String,
+    // 선택 창의 주인 (참여자 이름)
+    pub member: String,
+    // 고른 선택지 (0부터)와 그 글
+    pub option: usize,
+    pub label: String,
+    // sent: 보냄. changed: 화면의 선택 창이 바뀌거나 닫혀 보내지 않음. failed: 커서를 옮기지 못하는 등으로 보내지 않음
+    pub result: String,
 }
 
 struct Member {
@@ -329,6 +368,31 @@ impl Chats {
         self.post_via(project, from, text, None)
     }
 
+    // 이 토큰의 참여자 (프로젝트, 이름)
+    pub fn member_of(&self, token: &str) -> Option<(PathBuf, String)> {
+        self.inner.lock().unwrap().members.get(token).map(|m| (m.project.clone(), m.name.clone()))
+    }
+
+    // 기록을 붙인다: 받는 사람(to)을 정해서, 멘션·자동 깨우기 셈 없이 (선택 창과 그 답, prompts.rs). 받는 사람이 세션이 아니면
+    // 아무도 깨우지 않는다. 알림은 on_message가 메시지를 보고 정한다
+    pub fn post_note(&self, project: &Path, from: &str, text: &str, to: Vec<String>, prompt: Option<Prompt>, answer: Option<Answer>, via: Option<&str>) -> Result<Message, String> {
+        let message = {
+            let mut inner = self.inner.lock().unwrap();
+            let file = self.file(project);
+            self.room(&mut inner, project)?;
+            let floor = inner.floors.get(project).copied().unwrap_or(0);
+            let room = inner.rooms.get_mut(project).unwrap();
+            let id = room.iter().map(|m| m.id).max().unwrap_or(0).max(floor) + 1;
+            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held: false, via: via.map(str::to_string), prompt, answer };
+            let line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(&self.dir).and_then(|()| append_line(&file, &line)).map_err(|e| e.to_string())?;
+            room.push(message.clone());
+            message
+        };
+        (self.on_message)(project, Change::Message(&message, &[]));
+        Ok(message)
+    }
+
     // via: 폰에서 보낸 기기 이름 (mobile.rs)
     pub fn post_via(&self, project: &Path, from: &str, text: &str, via: Option<&str>) -> Result<Message, String> {
         let text = text.trim();
@@ -360,7 +424,7 @@ impl Chats {
             let floor = inner.floors.get(project).copied().unwrap_or(0);
             let room = inner.rooms.get_mut(project).unwrap();
             let id = room.iter().map(|m| m.id).max().unwrap_or(0).max(floor) + 1;
-            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held, via: via.map(str::to_string) };
+            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held, via: via.map(str::to_string), prompt: None, answer: None };
             let line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&self.dir).and_then(|()| append_line(&file, &line)).map_err(|e| e.to_string())?;
             room.push(message.clone());
@@ -654,7 +718,8 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
             Change::Message(message, released) => {
                 // 세션이 사용자에게 보낸 것만 알린다 (질문·결정 요청·작업 완료 보고. 사용자 자신이 보낸 것은 아님).
                 // 화면 갱신·깨우기(터미널 잠금을 기다릴 수 있다)보다 먼저.
-                if message.from != USER && message.to.iter().any(|n| n == USER) {
+                // 선택 창 메시지는 "기다림" 알림(Attention)이 이미 알린다 (내용은 채팅에서 본다)
+                if message.from != USER && message.to.iter().any(|n| n == USER) && message.prompt.is_none() {
                     crate::notify::send(project, crate::notify::Kind::Chat, &format!("{}: {}", message.from, crate::notify::first_line(&message.text)), None);
                 }
                 let _ = emitter.emit("chat", json!({ "project": project, "message": message }));
@@ -1019,7 +1084,7 @@ mod tests {
         let dir = temp("broken");
         let p = Path::new("/p/b");
         let chats = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
-        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![], held: false, via: None }).unwrap();
+        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![], held: false, via: None, prompt: None, answer: None }).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let mut bytes = format!("{}\n", line(1)).into_bytes();
         bytes.extend(b"\xff\xfe broken\n");

@@ -801,6 +801,78 @@ button.secondary {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* 세션이 띄운 선택 창 (src/PromptChoices.tsx): 질문은 터미널 글 그대로(고정폭), 선택지는 한 줄씩 버튼.
+   승인일 수 있는 선택지는 누르면 확인 줄이 뜬다. 닫혔거나 답한 뒤에는 누를 수 없고, 보낸 답은 강조색 테두리 */
+.prompt {
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+}
+.prompt-question {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: Menlo, monospace;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--input-bg);
+}
+.prompt-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.prompt-option,
+.prompt-confirm button {
+  font: inherit;
+  text-align: left;
+  padding: 4px 8px;
+  color: var(--button-fg);
+  background: var(--button-bg);
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.prompt-option:hover:not(:disabled),
+.prompt-confirm button:hover {
+  background: var(--button-hover);
+}
+.prompt-option:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.prompt-option.chosen {
+  opacity: 1;
+  border-color: var(--accent);
+}
+.prompt-option.asking {
+  border-color: var(--status-awaiting-bg);
+}
+.prompt-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+/* 확인의 "보내기"는 기다림 칩과 같은 색 (두 테마 모두 대비 4.5:1 이상) */
+.prompt-confirm button.primary {
+  font-weight: 600;
+  color: var(--status-awaiting-fg);
+  background: var(--status-awaiting-bg);
+  border-color: var(--status-awaiting-bg);
+}
+.prompt-state {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.prompt-error {
+  font-size: 11px;
+  color: var(--error);
+}
+.chat-answer.changed,
+.chat-answer.failed {
+  color: var(--fg-dim);
+}
 /* 자동 깨우기를 멈춘 작업그룹 (재개 버튼), 깨우지 않은 메시지 표시. 목록은 높이를 정하고 넘치면 스크롤 (입력란을 남긴다) */
 .chat-paused-list {
   flex: none;

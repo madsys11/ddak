@@ -4,11 +4,13 @@ import { listen } from "@tauri-apps/api/event";
 import { devHooks } from "./devHooks";
 import { draggedPath, isPathDrag } from "./dragPath";
 import { PANEL_SIZES, usePrefs } from "./prefs";
+import { PromptChoices, answerText, lastAnswers, type Answer, type Prompt } from "./PromptChoices";
 import { Resizer } from "./Resizer";
 
 // src-tauri/src/chat.rs Message
 // held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음. via: 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
-export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string };
+// prompt: 세션이 띄운 선택 창, answer: 그 답의 기록 (prompts.rs)
+export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string; prompt?: Prompt; answer?: Answer };
 
 // src-tauri/src/chat.rs WAKE_LIMIT
 const WAKE_LIMIT = 6;
@@ -37,6 +39,8 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   const [waiting, setWaiting] = useState<string[]>([]);
   // 자동 깨우기가 멈춘 작업그룹 (세션끼리 WAKE_LIMIT개를 주고받음). 사용자가 그 그룹에 쓰거나 재개하면 풀린다.
   const [paused, setPaused] = useState<string[]>([]);
+  // 맥에 아직 열려 있는 선택 창 id (이것만 누를 수 있다, prompts.rs)
+  const [prompts, setPrompts] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   // 이벤트를 등록하지 못함: 새 메시지를 스스로 다시 읽지 못한다
   const [listenError, setListenError] = useState<string | null>(null);
@@ -92,6 +96,11 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
       const extra = dev ? (devHooks.chatPausedExtra ?? []) : [];
       invoke<string[]>("chat_paused", { project }).then((g) => alive && mine === np && setPaused([...g, ...extra]), () => {});
     };
+    let nq = 0;
+    const loadPrompts = () => {
+      const mine = ++nq;
+      invoke<string[]>("chat_prompts", { project }).then((q) => alive && mine === nq && setPrompts(q), () => {});
+    };
     const onMembers = () => {
       loadMembers();
       loadWaiting();
@@ -107,7 +116,7 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
           if (alive) offs.push(off);
           else off();
         });
-      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", onMembers), register("chat-wake", loadWaiting), register("chat-limit", loadPaused)]);
+      const results = await Promise.allSettled([register("chat", loadMessages), register("chat-members", onMembers), register("chat-wake", loadWaiting), register("chat-limit", loadPaused), register("chat-prompts", loadPrompts)]);
       if (!alive) return;
       const failed = results.find((r): r is PromiseRejectedResult => r.status === "rejected");
       if (failed) {
@@ -118,6 +127,7 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
       loadMembers();
       loadWaiting();
       loadPaused();
+      loadPrompts();
     })();
     return () => {
       alive = false;
@@ -173,6 +183,8 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
     setDraft((d) => `${d}${d && !d.endsWith(" ") ? " " : ""}@${name} `);
     input.current?.focus();
   };
+  // 선택 창마다 마지막 답 기록
+  const answers = lastAnswers(messages);
   // 앱 언어로 (시스템 언어가 아니라)
   const time = (ms: number) => new Date(ms).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
 
@@ -214,7 +226,15 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
               )}
               <time>{time(m.time)}</time>
             </div>
-            <div className="chat-text">{m.text}</div>
+            {m.prompt ? (
+              <PromptChoices prompt={m.prompt} open={prompts.includes(m.prompt.id)} last={answers.get(m.prompt.id)} t={t} onAnswer={(option) => invoke("chat_answer", { project, prompt: m.prompt!.id, option })} />
+            ) : m.answer ? (
+              <div className={`chat-text chat-answer ${m.answer.result}`} data-answer={m.answer.result}>
+                {answerText(m.answer, t)}
+              </div>
+            ) : (
+              <div className="chat-text">{m.text}</div>
+            )}
           </div>
         ))}
       </div>

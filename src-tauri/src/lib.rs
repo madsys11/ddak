@@ -12,6 +12,7 @@ mod mobile;
 mod notify;
 mod prepare;
 mod projects;
+mod prompts;
 mod pty;
 mod push;
 mod repos;
@@ -34,6 +35,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(pty::Ptys::default())
         .manage(watch::Watches::default())
+        .manage(prompts::Prompts::default())
         .setup(|app| {
             menu::install(app.handle());
             notify::init(app.handle());
@@ -61,6 +63,11 @@ pub fn run() {
             notify::selftest_set_focused,
             notify::selftest_notify,
             links::link_targets,
+            prompts::pty_dialog,
+            prompts::chat_prompts,
+            prompts::chat_answer,
+            prompts::prompt_result,
+            prompts::prompt_write,
             links::open_link,
             links::selftest_opened_links,
             fs::list_dir,

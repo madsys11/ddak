@@ -26,7 +26,10 @@ git -C "$base/linked" -c user.name=t -c user.email=t@example.com commit -q --all
 
 # 개발용으로 띄워 둔 앱(1420)과 같이 돌 수 있게 포트를 따로 쓴다. 다른 worktree의 자체 테스트와 겹치면 SELFTEST_PORT로 바꾼다.
 port=${SELFTEST_PORT:-1430}
-config="{\"build\":{\"devUrl\":\"http://localhost:$port\",\"beforeDevCommand\":\"npm run dev -- --port $port\"}}"
+# 창은 앱 설정의 창에 웹뷰의 백그라운드 절전 끄기만 더한다: 맥 화면이 잠긴 뒤 띄운 창은 WebKit이 타이머를 멈춰
+# 테스트가 진행되지 않는다 (2026-10-27)
+windows=$(python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["app"]["windows"]; [x.update(backgroundThrottling="disabled") for x in w]; print(json.dumps(w))' src-tauri/tauri.conf.json)
+config="{\"build\":{\"devUrl\":\"http://localhost:$port\",\"beforeDevCommand\":\"npm run dev -- --port $port\"},\"app\":{\"windows\":$windows}}"
 
 # 시나리오 하나 = 앱 한 번 실행. 앱 데이터 폴더를 시나리오마다 따로 둔다 (둘째 인자: 같이 쓸 폴더 이름).
 run() {

@@ -72,6 +72,136 @@ export function dialogOnScreen(lines: readonly string[]): boolean {
   );
 }
 
+// 화면의 선택 창을 읽는다 (채팅에서 답하기, src-tauri/src/prompts.rs): 질문 줄, 선택지 글, 커서가 놓인 선택지.
+// 선택지: 1부터 이어지는 번호 줄 (커서 ❯·› 가 하나에 붙음). 긴 선택지가 다음 줄로 넘어가면 이어 붙인다.
+// 질문: 첫 선택지 위로 가로줄(─)이나 빈 줄 셋을 만나기 전까지의 글 전부 (줄 수를 자르지 않는다: 같은 선택 창인지를 질문
+// 전체로 본다. 리뷰 R2: 8줄로 자르니 위쪽 명령만 다른 두 선택 창이 같게 보였다).
+// complete: 그 경계를 화면 안에서 찾았다. 화면 맨 위까지 올라가도 없으면 질문이 화면 밖으로 잘렸을 수 있어 채팅에서는 답하지 않는다.
+// 상자 테두리(│)와 안내 줄(Esc to cancel 등)은 뺀다. 읽지 못하면 null.
+export type Dialog = { question: string[]; options: string[]; cursor: number; complete: boolean };
+const EDGE = /^\s*[│┃]|[│┃]\s*$/g;
+const RULE = /^[\s─━═╭╮╰╯┌┐└┘╌┄-]{3,}$/;
+const NUMBERED = /^(\s*)([❯›]\s*)?(\d+)\.\s+(.*\S)\s*$/;
+export function readDialog(screen: readonly string[]): Dialog | null {
+  const lines = screen.map((l) => l.replace(EDGE, "").replace(/\s+$/, ""));
+  // 아래에서 위로 1번 선택지를 찾고, 거기서 아래로 번호가 이어지는 묶음을 읽는다
+  for (let first = lines.length - 1; first >= 0; first--) {
+    const m = NUMBERED.exec(lines[first]);
+    if (!m || m[3] !== "1") continue;
+    const options: string[] = [];
+    let cursor = -1;
+    let indent = 0;
+    for (let i = first; i < lines.length; i++) {
+      const o = NUMBERED.exec(lines[i]);
+      if (o && Number(o[3]) === options.length + 1) {
+        if (o[2]) cursor = cursor === -1 ? options.length : -2;
+        options.push(o[4]);
+        indent = lines[i].indexOf(o[4]);
+      } else if (options.length && lines[i].trim() && !DIALOG_FOOTER.test(lines[i]) && !RULE.test(lines[i]) && lines[i].search(/\S/) >= indent) {
+        options[options.length - 1] += " " + lines[i].trim();
+      } else break;
+    }
+    if (options.length < 2 || cursor < 0) continue;
+    const question: string[] = [];
+    let blank = 0;
+    let complete = false;
+    for (let i = first - 1; i >= 0; i--) {
+      if (RULE.test(lines[i])) {
+        complete = true;
+        break;
+      }
+      if (!lines[i].trim()) {
+        if (++blank >= 3) {
+          complete = true;
+          break;
+        }
+        continue;
+      }
+      blank = 0;
+      question.unshift(lines[i].trim());
+    }
+    return { question, options, cursor, complete };
+  }
+  return null;
+}
+
+export const sameDialog = (a: Dialog | null, b: Dialog | null) =>
+  !!a && !!b && a.complete && b.complete && JSON.stringify([a.question, a.options]) === JSON.stringify([b.question, b.options]);
+
+// 키 하나를 보낸다: 보내기 직전(앞의 전송이 끝난 뒤, 실제로 쓰는 차례)에 그때의 화면으로 ok를 보고 아니면 보내지 않는다
+// (리뷰 R1: 확인한 뒤 쓰는 차례를 기다리는 사이에 선택 창이 바뀌어도 Enter가 나갔다). 쓰기 실패는 "error" (리뷰 R4)
+export type SendKey = (data: string, ok: (now: Dialog | null) => boolean) => Promise<"sent" | "skipped" | "error">;
+
+// 한 터미널의 답 처리: 한 번에 하나. 요청 번호는 Rust가 늘려 가며 매기므로, 이미 본 번호 이하(늦게 온 앞 요청, 끝난 요청의 재전달)는
+// 지금 처리를 건드리지 않고 버린다. 더 새 요청이 오면 지금 것을 취소한다 (재리뷰 R3: 2→1 순서로 오면 앞 요청이 새 요청을 취소하고
+// Enter를 보냈다). 키를 쓰는 Rust도 지금 요청인지 다시 본다 (prompts.rs prompt_write)
+export class AnswerRuns {
+  private last = 0;
+  private run: { cancelled: boolean } | null = null;
+  start(request: number) {
+    if (request <= this.last) return null;
+    this.last = request;
+    if (this.run) this.run.cancelled = true;
+    const run = { cancelled: false };
+    this.run = run;
+    return run;
+  }
+  end(run: { cancelled: boolean }) {
+    if (this.run === run) this.run = null;
+  }
+  cancelAll() {
+    if (this.run) this.run.cancelled = true;
+  }
+}
+
+// 채팅에서 고른 답을 넣는다 (Terminal.tsx): 지금 화면이 알린 선택 창(expected)과 같은지 보고, 화살표를 하나씩 보내 커서가 옮겨진
+// 것을 확인한 뒤에만 Enter. 키마다 보내기 직전에 선택 창·커서를 다시 본다. 화면이 바뀌거나 취소되면(cancelled: 같은 터미널에 새
+// 답이 옴, 터미널을 닫음) "changed", 커서가 한 칸에 SETTLE_MS 안에 따라오지 않거나 쓰지 못하면 "failed" (모두 Enter 없음).
+// appCursor: 응용 커서 키 모드 (xterm이 키를 보낼 때처럼 ESC O)
+export const SETTLE_MS = 1500;
+export async function driveAnswer(o: {
+  option: number;
+  expected: Dialog;
+  read: () => Dialog | null;
+  send: SendKey;
+  appCursor: () => boolean;
+  cancelled?: () => boolean;
+  sleep?: (ms: number) => Promise<unknown>;
+  now?: () => number;
+}): Promise<"sent" | "changed" | "failed"> {
+  const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const now = o.now ?? (() => performance.now());
+  const cancelled = o.cancelled ?? (() => false);
+  const start = o.read();
+  if (!start || !sameDialog(start, o.expected) || o.option < 0 || o.option >= start.options.length) return "changed";
+  // 지금 화면이 그 선택 창이고 커서가 cursor에 있는지
+  const at = (d: Dialog | null, cursor: number) => !cancelled() && sameDialog(d, start) && d!.cursor === cursor;
+  const settle = async (cursor: number) => {
+    const deadline = now() + SETTLE_MS;
+    for (;;) {
+      const d = o.read();
+      if (cancelled() || !sameDialog(d, start)) return "changed";
+      if (d!.cursor === cursor) return "ok";
+      if (now() > deadline) return "failed";
+      await sleep(50);
+    }
+  };
+  const sent = (r: "sent" | "skipped" | "error") => (r === "sent" ? "ok" : r === "skipped" ? "changed" : "failed");
+  let cursor = start.cursor;
+  while (cursor !== o.option) {
+    const down = o.option > cursor;
+    const from = cursor;
+    const r = sent(await o.send(`${o.appCursor() ? "\x1bO" : "\x1b["}${down ? "B" : "A"}`, (d) => at(d, from)));
+    if (r !== "ok") return r;
+    const next = cursor + (down ? 1 : -1);
+    const moved = await settle(next);
+    if (moved !== "ok") return moved;
+    cursor = next;
+  }
+  const r = sent(await o.send("\r", (d) => at(d, o.option)));
+  return r === "ok" ? "sent" : r;
+}
+
 // 사용자를 기다리는지: 프로그램이 blocked를 알렸거나 선택 창이 (DIALOG_CAP 안에서) 보인다
 export function awaitingUser(status: ProgramStatus | undefined, dialogSince: number | undefined, now: number): boolean {
   return status?.state === "blocked" || (dialogSince !== undefined && now - dialogSince < DIALOG_CAP_MS);

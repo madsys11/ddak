@@ -94,6 +94,10 @@ pub struct Ctx {
     pub waiting: Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>,
     // 그 프로젝트 참여자의 상태: (이름, 사용자를 기다리는 종류 또는 "working") (pty.rs statuses)
     pub status: Box<dyn Fn(&Path) -> Vec<(String, String)> + Send + Sync>,
+    // 그 프로젝트에 열린 선택 창 id (prompts.rs)
+    pub prompts: Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>,
+    // 선택 창에 답한다: (프로젝트, 선택 창 id, 선택지, 기기 이름) (prompts.rs answer)
+    pub answer: Box<dyn Fn(&Path, &str, usize, &str) -> Result<(), String> + Send + Sync>,
     // 앱 데이터 mobile 폴더
     pub dir: PathBuf,
 }
@@ -633,7 +637,8 @@ impl Mobile {
                         status.insert(name, json!(s));
                     }
                 }
-                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project) }))
+                let prompts = (self.ctx.prompts)(&project);
+                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "prompts": prompts }))
             }
             (Post, "messages") => match body.get("text").and_then(Value::as_str) {
                 Some(text) => match chats.post_via(&project, USER, text, Some(&device.name)) {
@@ -641,6 +646,14 @@ impl Mobile {
                     Err(e) => (400, json!({ "error": e })),
                 },
                 None => (400, json!({ "error": "text" })),
+            },
+            // 선택 창에 답한다 (화면이 확인을 받은 뒤). 넣은 결과는 채팅 기록으로 온다
+            (Post, "answer") => match (body.get("prompt").and_then(Value::as_str), body.get("option").and_then(Value::as_u64)) {
+                (Some(prompt), Some(option)) => match (self.ctx.answer)(&project, prompt, option as usize, &device.name) {
+                    Ok(()) => (200, json!({})),
+                    Err(e) => (409, json!({ "error": e })),
+                },
+                _ => (400, json!({ "error": "body" })),
             },
             (Post, "resume") => match body.get("group").and_then(Value::as_str) {
                 Some(group) => {
@@ -790,7 +803,7 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             return MobileState(None);
         }
     };
-    let (a, b, c) = (app.clone(), app.clone(), app.clone());
+    let (a, b, c, d, e) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
     let members = chats.clone();
     let ctx = Ctx {
         chats: chats.clone(),
@@ -807,6 +820,11 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             let statuses = c.state::<crate::pty::Ptys>().statuses();
             members.member_tokens(project).into_iter().filter_map(|(t, n)| statuses.iter().find(|(s, _)| *s == t).map(|(_, s)| (n, s.clone()))).collect()
         }),
+        prompts: Box::new(move |project| {
+            let ptys = d.state::<crate::pty::Ptys>();
+            d.state::<crate::prompts::Prompts>().open_in(project, |pty| ptys.exists(pty))
+        }),
+        answer: Box::new(move |project, prompt, option, device| crate::prompts::answer(&e, project, prompt, option, Some(device))),
         dir,
     };
     let mobile = Mobile::new(ctx);
@@ -976,6 +994,16 @@ mod tests {
         fixture_with(name, Box::new(|_| vec![]))
     }
 
+    // 선택 창 답하기 대역: "p1"만 열려 있다. 받은 것을 남긴다
+    static ANSWERS: Mutex<Vec<(String, usize, String)>> = Mutex::new(Vec::new());
+    fn answer_stub(_: &Path, prompt: &str, option: usize, device: &str) -> Result<(), String> {
+        if prompt != "p1" {
+            return Err("closed".into());
+        }
+        ANSWERS.lock().unwrap().push((prompt.to_string(), option, device.to_string()));
+        Ok(())
+    }
+
     fn fixture_with(name: &str, status: Box<dyn Fn(&Path) -> Vec<(String, String)> + Send + Sync>) -> Fixture {
         let dir = std::env::temp_dir().join(format!("ddak-mobile-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -984,7 +1012,7 @@ mod tests {
         let project = real(&project);
         let chats = Chats::new(dir.join("chats"), Box::new(|_, _| {}), 0);
         let p = project.clone();
-        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status, dir: dir.join("mobile") };
+        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status, prompts: Box::new(|_| vec!["p1".into()]), answer: Box::new(answer_stub), dir: dir.join("mobile") };
         let mobile = Mobile::new(ctx);
         {
             let mut st = mobile.state.lock().unwrap();
@@ -1197,7 +1225,7 @@ mod tests {
         f.mobile.forget(&id_a).unwrap();
         let p = f.project.clone();
         let chats = Chats::new(f.dir.join("chats"), Box::new(|_, _| {}), 0);
-        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status: Box::new(|_| vec![]), dir: f.dir.join("mobile") });
+        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status: Box::new(|_| vec![]), prompts: Box::new(|_| vec![]), answer: Box::new(answer_stub), dir: f.dir.join("mobile") });
         assert!(again.device(&a, LOGIN).is_none());
         assert!(again.device(&b, LOGIN).is_some());
     }
@@ -1301,6 +1329,15 @@ mod tests {
         let (_, body) = http(f.port, "GET", &format!("/api/projects/{id}/members"), &h, "");
         let members: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(members["status"], json!({ "dev": "permission", "rev": "working", "qa": "question" }));
+        // 열린 선택 창과 답하기 (기기 이름이 넘어간다)
+        assert_eq!(members["prompts"], json!(["p1"]));
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/answer"), &h, r#"{"prompt":"p1","option":1}"#).0, 200);
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/answer"), &h, r#"{"prompt":"p2","option":0}"#).0, 409);
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/answer"), &h, r#"{"prompt":"p1"}"#).0, 400);
+        let got = ANSWERS.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0.as_str(), got[0].1), ("p1", 1));
+        assert!(!got[0].2.is_empty(), "기기 이름");
         let (_, body) = http(f.port, "GET", "/api/projects", &h, "");
         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["projects"][0]["awaiting"], 2);
     }

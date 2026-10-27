@@ -652,7 +652,7 @@ fn invoked_name(_pid: libc::pid_t) -> Option<String> {
 }
 
 // 쓴다. 사용자 입력이면 입력 상태를 바꾸고, 채팅방에 참여한 터미널이면 그 토큰을 돌려준다.
-fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<Option<String>, String> {
+pub(crate) fn write_input(ptys: &Ptys, id: u32, data: &str, user: bool) -> Result<Option<String>, String> {
     let mut sessions = ptys.sessions.lock().unwrap();
     let session = sessions.get_mut(&id).ok_or("no such pty")?;
     if user {
@@ -856,6 +856,15 @@ impl Ptys {
     // 터미널 앞에서 도는 프로그램(포그라운드 프로세스 그룹의 대표)의 pid (터미널 링크의 상대 경로 기준, links.rs)
     pub fn foreground_pid(&self, id: u32) -> Option<libc::pid_t> {
         self.sessions.lock().unwrap().get(&id).and_then(|s| s.master.process_group_leader())
+    }
+
+    // 이 터미널의 채팅 토큰 (채팅방 참여자가 아니면 없음)
+    pub fn token_of(&self, id: u32) -> Option<String> {
+        self.sessions.lock().unwrap().get(&id).and_then(|s| s.chat_token.clone())
+    }
+
+    pub fn exists(&self, id: u32) -> bool {
+        self.sessions.lock().unwrap().contains_key(&id)
     }
 
     // 이 채팅 토큰의 터미널 (알림을 누르면 보일 창)

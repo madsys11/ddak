@@ -4,6 +4,7 @@ import { API_VERSION, ApiError, api, events, loadComputers, pair, saveComputers,
 import { locale, t } from "./i18n";
 import { changeKey, confirmed, enablePush, keyProblem, onKeyProblem, pushState, removeComputer, syncPush } from "./push";
 import { MessageView } from "./sync";
+import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 
 const USER = "user";
 // src-tauri/src/chat.rs WAKE_LIMIT
@@ -503,6 +504,8 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
   };
   const time = (ms: number) => new Date(ms).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
   const who = (n: string) => (n === USER ? t("chat.you") : n);
+  // 선택 창마다 마지막 답 기록
+  const answers = lastAnswers(messages);
 
   return (
     <div className="screen chat">
@@ -540,7 +543,19 @@ function Chat({ computer, project }: { computer: Computer; project: string }) {
                   {m.held && <span className="tag">{t("chat.held")}</span>}
                   <time>{time(m.time)}</time>
                 </div>
-                <div className="text">{m.text}</div>
+                {m.prompt ? (
+                  <PromptChoices
+                    prompt={m.prompt}
+                    open={!!members.prompts?.includes(m.prompt.id)}
+                    last={answers.get(m.prompt.id)}
+                    t={t}
+                    onAnswer={(option) => api.answer(computer, project, m.prompt!.id, option)}
+                  />
+                ) : m.answer ? (
+                  <div className={`text answer ${m.answer.result}`}>{answerText(m.answer, t)}</div>
+                ) : (
+                  <div className="text">{m.text}</div>
+                )}
               </div>
             ))}
           </div>
