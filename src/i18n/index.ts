@@ -12,7 +12,8 @@ export type Locale = keyof typeof LOCALES;
 export type { MessageKey };
 export const DEFAULT_LOCALE: Locale = "en";
 
-export const isLocale = (v: unknown): v is Locale => typeof v === "string" && v in LOCALES;
+// 자기 키만 (상속 키 "constructor" 등은 아니다, themes.ts isThemeId와 같음)
+export const isLocale = (v: unknown): v is Locale => typeof v === "string" && Object.hasOwn(LOCALES, v);
 
 // 사전의 키 기호(⌘·⇧)는 Windows에서 Ctrl·Shift로 (platform.ts keyLabels). 넣는 값(vars)은 바꾸지 않는다
 export function translate(locale: Locale, key: MessageKey, vars?: Record<string, string | number>) {

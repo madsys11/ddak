@@ -1,18 +1,13 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { applyTheme } from "../themes";
 import { MobileApp } from "./MobileApp";
 import { locale } from "./i18n";
+import { applySettings, loadSettings } from "./settings";
 import "./mobile.css";
 
-// 데스크톱과 같은 테마 토큰. 폰 설정의 밝기를 따른다.
-const dark = matchMedia("(prefers-color-scheme: dark)");
-const theme = () => {
-  applyTheme(dark.matches ? "dark" : "solarized-light");
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--tabbar-bg").trim());
-};
-theme();
-dark.addEventListener("change", theme);
+// 데스크톱과 같은 테마 토큰. 설정 화면에서 고른 테마(기본은 폰 설정의 밝기)와 글자 크기.
+applySettings(loadSettings());
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => applySettings(loadSettings()));
 document.documentElement.lang = locale;
 
 // 푸시 받기와 알림 누르기만 하는 서비스 워커 (public/sw.js). 알림을 누르면 그 채팅으로 옮긴다.

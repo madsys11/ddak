@@ -1,4 +1,4 @@
-/* 폰 화면 (src/mobile). 색은 데스크톱과 같은 테마 토큰 (src/themes.ts) */
+/* 폰 화면 (src/mobile). 색은 데스크톱과 같은 테마 토큰 (src/themes.ts), 글자 크기는 설정의 배율 --font-scale (settings.ts) */
 * {
   box-sizing: border-box;
 }
@@ -11,7 +11,7 @@ body,
 body {
   background: var(--bg);
   color: var(--fg);
-  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: calc(16px * var(--font-scale, 1))/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-text-size-adjust: 100%;
 }
 button,
@@ -19,6 +19,11 @@ input,
 textarea {
   font: inherit;
   color: inherit;
+}
+/* iOS는 16px보다 작은 입력란에 포커스하면 화면을 확대한다. 글자 크기를 줄여도 입력란은 16px 아래로 내리지 않는다 */
+input,
+textarea {
+  font-size: max(16px, calc(16px * var(--font-scale, 1)));
 }
 button {
   background: var(--button-bg);
@@ -66,7 +71,7 @@ textarea:focus {
 .bar h1 {
   flex: 1;
   margin: 0;
-  font-size: 17px;
+  font-size: calc(17px * var(--font-scale, 1));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -76,7 +81,7 @@ textarea:focus {
 .bar-side {
   color: var(--fg);
   min-width: 40px;
-  font-size: 22px;
+  font-size: calc(22px * var(--font-scale, 1));
   line-height: 1;
   padding: 6px 10px;
   background: transparent;
@@ -84,7 +89,7 @@ textarea:focus {
 }
 .banner {
   padding: 6px 16px;
-  font-size: 14px;
+  font-size: calc(14px * var(--font-scale, 1));
   color: var(--fg-dim);
   background: var(--widget-bg);
   border-bottom: 1px solid var(--border);
@@ -96,7 +101,7 @@ textarea:focus {
 }
 .hint {
   color: var(--fg-dim);
-  font-size: 14px;
+  font-size: calc(14px * var(--font-scale, 1));
 }
 
 .form {
@@ -110,7 +115,7 @@ textarea:focus {
   flex-direction: column;
   gap: 6px;
   color: var(--fg-dim);
-  font-size: 14px;
+  font-size: calc(14px * var(--font-scale, 1));
 }
 
 .list {
@@ -150,7 +155,7 @@ textarea:focus {
   display: flex;
   gap: 8px;
   align-items: center;
-  font-size: 14px;
+  font-size: calc(14px * var(--font-scale, 1));
   color: var(--fg-dim);
 }
 .row-side {
@@ -182,7 +187,7 @@ textarea:focus {
 }
 .earlier {
   align-self: center;
-  font-size: 14px;
+  font-size: calc(14px * var(--font-scale, 1));
 }
 .msg {
   padding: 8px 10px;
@@ -199,7 +204,7 @@ textarea:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 2px 8px;
-  font-size: 13px;
+  font-size: calc(13px * var(--font-scale, 1));
   color: var(--fg-dim);
 }
 .meta .from {
@@ -231,7 +236,7 @@ textarea:focus {
 .prompt-question {
   white-space: pre-wrap;
   word-break: break-word;
-  font: 13px/1.4 ui-monospace, Menlo, monospace;
+  font: calc(13px * var(--font-scale, 1))/1.4 ui-monospace, Menlo, monospace;
   padding: 6px 8px;
   border-radius: 6px;
   background: var(--input-bg);
@@ -269,11 +274,11 @@ textarea:focus {
   border-color: var(--status-awaiting-bg);
 }
 .prompt-state {
-  font-size: 13px;
+  font-size: calc(13px * var(--font-scale, 1));
   color: var(--fg-dim);
 }
 .prompt-error {
-  font-size: 13px;
+  font-size: calc(13px * var(--font-scale, 1));
   color: var(--error);
 }
 .paused {
@@ -281,7 +286,7 @@ textarea:focus {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: calc(13px * var(--font-scale, 1));
   border-top: 1px solid var(--border);
   background: var(--widget-bg);
 }
@@ -294,7 +299,7 @@ textarea:focus {
 }
 .chip {
   padding: 4px 10px;
-  font-size: 14px;
+  font-size: calc(14px * var(--font-scale, 1));
   border-radius: 14px;
 }
 .chip.waiting {
@@ -303,7 +308,7 @@ textarea:focus {
 .chip-note {
   margin-left: 6px;
   color: var(--fg-dim);
-  font-size: 12px;
+  font-size: calc(12px * var(--font-scale, 1));
 }
 /* 세션 상태 (참여자 칩): 작업 중, 사용자를 기다림 (권한 확인 등) */
 .chip.working .chip-note {
@@ -333,4 +338,30 @@ textarea:focus {
 }
 .composer textarea {
   resize: none;
+}
+/* 설정 (MobileApp.tsx Settings): 항목마다 고르는 버튼 줄. 고른 것은 선택 행 색과 테두리 */
+.settings {
+  flex: 1;
+  padding: 8px 16px calc(16px + env(safe-area-inset-bottom));
+  overflow-y: auto;
+}
+.setting h2 {
+  margin: 16px 0 8px;
+  font-size: calc(14px * var(--font-scale, 1));
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.choices button {
+  color: var(--fg);
+  background: transparent;
+}
+.choices button.on {
+  background: var(--row-active);
+  border-color: var(--focus-border);
+  font-weight: 600;
 }

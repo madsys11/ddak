@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { MessageKey } from "../i18n";
+import { LOCALES, type Locale, type MessageKey } from "../i18n";
+import { THEMES, type ThemeId } from "../themes";
 import { API_VERSION, ApiError, api, events, loadComputers, pair, saveComputers, type Computer, type Members, type Message, type Project } from "./api";
 import { locale, t } from "./i18n";
 import { changeKey, confirmed, enablePush, keyProblem, onKeyProblem, pushState, removeComputer, syncPush } from "./push";
+import { FONT_SCALES, applySettings, loadSettings, resolveLocale, saveSettings, type PhoneSettings } from "./settings";
 import { MessageView, ReadMark, readTarget } from "./sync";
 import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 
@@ -22,9 +24,9 @@ const STATUS: Record<string, MessageKey> = {
   blocked: "status.blocked",
 };
 
-// 주소(hash): #/ 처음, #/add 컴퓨터 추가, #/c/<컴퓨터 id> 프로젝트 목록, #/c/<컴퓨터 id>/p/<프로젝트 id> 채팅.
+// 주소(hash): #/ 처음, #/add 컴퓨터 추가, #/settings 설정, #/c/<컴퓨터 id> 프로젝트 목록, #/c/<컴퓨터 id>/p/<프로젝트 id> 채팅.
 // 맥의 QR은 #pair=<API 주소>&code=<코드>로 연다 (추가 화면에 채워 넣는다).
-type Route = { view: "home" } | { view: "add"; address: string; code: string } | { view: "projects"; computer: string } | { view: "chat"; computer: string; project: string };
+type Route = { view: "home" } | { view: "settings" } | { view: "add"; address: string; code: string } | { view: "projects"; computer: string } | { view: "chat"; computer: string; project: string };
 
 function parse(hash: string): Route {
   const h = hash.replace(/^#/, "");
@@ -34,6 +36,7 @@ function parse(hash: string): Route {
   }
   const parts = h.split("/").filter(Boolean).map(decodeURIComponent);
   if (parts[0] === "add") return { view: "add", address: "", code: "" };
+  if (parts[0] === "settings") return { view: "settings" };
   if (parts[0] === "c" && parts[1] && parts[2] === "p" && parts[3]) return { view: "chat", computer: parts[1], project: parts[3] };
   if (parts[0] === "c" && parts[1]) return { view: "projects", computer: parts[1] };
   return { view: "home" };
@@ -138,6 +141,7 @@ export function MobileApp() {
     setComputers(list);
   };
 
+  if (route.view === "settings") return <Settings />;
   if (route.view === "add" || (route.view === "home" && computers.length === 0)) {
     const r = route.view === "add" ? route : { address: "", code: "" };
     return (
@@ -195,6 +199,7 @@ function AddComputer({ computers, address: initialAddress, code: initialCode, ca
           </button>
         )}
         <h1>{t("phone.addComputer")}</h1>
+        <SettingsButton />
       </header>
       <KeyProblem computers={computers} />
       <main className="form">
@@ -211,6 +216,62 @@ function AddComputer({ computers, address: initialAddress, code: initialCode, ca
         <button className="primary" disabled={busy} onClick={submit}>
           {busy ? t("phone.pairing") : t("phone.pair")}
         </button>
+      </main>
+    </div>
+  );
+}
+
+const SettingsButton = () => (
+  <button className="bar-side" onClick={() => go("/settings")} aria-label={t("phone.settings")} title={t("phone.settings")}>
+    ⚙
+  </button>
+);
+
+// 설정 (settings.ts): 테마·언어·글자 크기. 테마와 글자 크기는 바로 바뀌고, 언어는 화면을 다시 읽어 바꾼다 (문구를 시작할 때 고른다).
+// apply·reload는 자체 테스트가 바꾼다 (데스크톱 화면에 적용하지 않게)
+export function Settings({ apply = applySettings, reload = () => location.reload() }: { apply?: (s: PhoneSettings) => void; reload?: () => void }) {
+  const [settings, setSettings] = useState(loadSettings);
+  const [unsaved, setUnsaved] = useState(false);
+  // 저장하지 못하면 테마·글자 크기는 지금 화면에만 반영하고 알린다. 언어는 다시 읽어야 바뀌는데 다시 읽으면 저장값(이전 언어)으로
+  // 돌아가므로 바꾸지 않는다 (리뷰 R2)
+  const change = (next: PhoneSettings) => {
+    const saved = saveSettings(next);
+    setUnsaved(!saved);
+    const relocale = resolveLocale(next, navigator.language) !== locale;
+    if (relocale && !saved) return;
+    setSettings(next);
+    if (relocale) reload();
+    else apply(next);
+  };
+  const auto = t("phone.followPhone");
+  const themes: ["auto" | ThemeId, string][] = [["auto", auto], ...Object.entries(THEMES).map(([id, th]): [ThemeId, string] => [id as ThemeId, t(th.name)])];
+  const locales: ["auto" | Locale, string][] = [["auto", auto], ...Object.entries(LOCALES).map(([id, l]): [Locale, string] => [id as Locale, l.name])];
+  const group = <T extends string | number>(label: string, key: keyof PhoneSettings, options: [T, string][]) => (
+    <section className="setting" data-setting={key}>
+      <h2>{label}</h2>
+      <div className="choices">
+        {options.map(([value, text]) => (
+          <button key={value} className={settings[key] === value ? "on" : ""} aria-pressed={settings[key] === value} data-value={value} onClick={() => change({ ...settings, [key]: value })}>
+            {text}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+  return (
+    <div className="screen">
+      <header className="bar">
+        <button className="bar-back" onClick={() => go("/")} aria-label={t("phone.back")}>
+          ‹
+        </button>
+        <h1>{t("phone.settings")}</h1>
+      </header>
+      <main className="settings">
+        {unsaved && <p className="error">{t("phone.settingsUnsaved")}</p>}
+        {group(t("phone.theme"), "theme", themes)}
+        {group(t("phone.language"), "locale", locales)}
+        <p className="hint">{t("phone.languageHint")}</p>
+        {group(t("phone.fontSize"), "fontScale", FONT_SCALES.map((f): [number, string] => [f, `${Math.round(f * 100)}%`]))}
       </main>
     </div>
   );
@@ -293,6 +354,7 @@ function ComputerList({ computers, onRemove }: { computers: Computer[]; onRemove
     <div className="screen">
       <header className="bar">
         <h1>{t("phone.computers")}</h1>
+        <SettingsButton />
       </header>
       <PushBanner computers={computers} />
       <main className="list">
@@ -354,6 +416,7 @@ function ProjectList({ computer, computers }: { computer: Computer; computers: C
             +
           </button>
         )}
+        <SettingsButton />
       </header>
       {live !== "live" && !error && <div className="banner">{t("phone.reconnecting")}</div>}
       {error && <div className="banner bad">{error}</div>}

@@ -106,7 +106,7 @@
     {
       "files": ["src/MobileDialog.tsx", "src/mobile/**", "src-tauri/src/mobile.rs", "src-tauri/src/push.rs"],
       "why": "src/mobile/public/sw.js는 mobilePushUnit이 가짜 self로 실행한다",
-      "steps": ["mobile", "mobileSyncUnit", "mobilePushUnit", "mobileThemeUnit", "mobileChatUnit"]
+      "steps": ["mobile", "mobileSyncUnit", "mobilePushUnit", "mobileThemeUnit", "mobileChatUnit", "mobileSettingsUnit"]
     },
     {
       "files": ["src/PromptChoices.tsx", "src/programStatus.ts", "src-tauri/src/prompts.rs"],

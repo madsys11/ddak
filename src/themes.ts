@@ -245,7 +245,8 @@ const solarizedLight: Theme = {
 export const THEMES = { dark, light, "solarized-light": solarizedLight } satisfies Record<string, Theme>;
 export type ThemeId = keyof typeof THEMES;
 export const DEFAULT_THEME: ThemeId = "dark";
-export const isThemeId = (v: unknown): v is ThemeId => typeof v === "string" && v in THEMES;
+// 자기 키만 (`in`이면 "constructor"·"__proto__" 같은 상속 키도 통과해 저장값이 이상할 때 시작이 멈춘다, 폰 설정 리뷰 R1)
+export const isThemeId = (v: unknown): v is ThemeId => typeof v === "string" && Object.hasOwn(THEMES, v);
 
 export function applyTheme(id: ThemeId) {
   const root = document.documentElement;

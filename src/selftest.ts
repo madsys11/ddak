@@ -18,12 +18,14 @@ import { clipboardKey } from "./Terminal";
 import { insertAt } from "./dragPath";
 import selftestPlan from "../scripts/selftest-plan.json";
 import { gitDecorations } from "./gitStatus";
-import { THEMES } from "./themes";
-import { LOCALES } from "./i18n";
+import { THEMES, isThemeId } from "./themes";
+import { LOCALES, isLocale } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
 import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
-import { Chat, KeyProblem } from "./mobile/MobileApp";
+import { Chat, KeyProblem, Settings as PhoneSettingsView } from "./mobile/MobileApp";
+import { locale as phoneLocale } from "./mobile/i18n";
+import { DEFAULT_SETTINGS as DEFAULT_PHONE_SETTINGS, parseSettings as parsePhoneSettings, resolveLocale as resolvePhoneLocale, resolveTheme as resolvePhoneTheme, type PhoneSettings } from "./mobile/settings";
 import { API_VERSION as PHONE_API, api as phoneApi } from "./mobile/api";
 import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
@@ -764,6 +766,111 @@ async function testMobileChatUnit() {
     root.unmount();
     Object.assign(phoneApi, saved);
     frame.remove();
+  }
+}
+
+// 폰 설정 (src/mobile/settings.ts, MobileApp.tsx Settings): 테마·언어·글자 크기. 저장한 값이 이상하면 기본(폰 설정 따라, 100%).
+// 실제 설정 화면을 iframe에 그려 누른다: 테마·글자 크기는 바로 적용, 지금과 다른 언어는 화면을 다시 읽는다.
+// 글자 크기는 모든 글자에 배율로 걸리고, 입력란은 iOS 확대를 막으려고 16px 아래로 내려가지 않는다.
+async function testMobileSettingsUnit() {
+  const def = JSON.stringify(DEFAULT_PHONE_SETTINGS);
+  const parsed = [null, "x{", '{"theme":"neon","locale":"fr","fontScale":9}', '{"theme":"light","locale":"ko","fontScale":1.3}'].map((r) => JSON.stringify(parsePhoneSettings(r)));
+  check(
+    "폰 설정: 없거나 깨지거나 모르는 값은 기본, 맞는 값은 그대로",
+    parsed[0] === def && parsed[1] === def && parsed[2] === def && parsed[3] === '{"theme":"light","locale":"ko","fontScale":1.3}',
+    parsed.join(" | "),
+  );
+  // 상속 키는 테마·언어가 아니다 (리뷰 R1: 그대로 받아 applyTheme·translate에서 예외로 시작이 멈췄다). 데스크톱 설정도 같은 검사를 쓴다
+  const inherited = ["constructor", "__proto__", "toString", "hasOwnProperty"];
+  const odd = inherited.map((k) => JSON.stringify(parsePhoneSettings(JSON.stringify({ theme: k, locale: k })))).filter((r) => r !== def);
+  check(
+    "폰 설정: 상속 키(constructor·__proto__ 등)는 테마·언어로 받지 않고 기본으로 (데스크톱 isThemeId·isLocale도)",
+    odd.length === 0 && inherited.every((k) => !isThemeId(k) && !isLocale(k)) && isThemeId("light") && isLocale("ko"),
+    odd.join(" | "),
+  );
+  const auto = { theme: "auto", locale: "auto", fontScale: 1 } as const;
+  check(
+    "폰 설정: 폰 설정 따라는 밝기(Dark/Solarized Light)와 폰 언어, 고르면 그 값",
+    resolvePhoneTheme(auto, true) === "dark" && resolvePhoneTheme(auto, false) === "solarized-light" && resolvePhoneTheme({ ...auto, theme: "light" }, true) === "light" &&
+      resolvePhoneLocale(auto, "ko-KR") === "ko" && resolvePhoneLocale(auto, "en-US") === "en" && resolvePhoneLocale({ ...auto, locale: "en" }, "ko-KR") === "en",
+  );
+
+  const frame = document.createElement("iframe");
+  frame.style.cssText = "position:fixed;left:-10000px;top:0;width:400px;height:600px";
+  document.body.appendChild(frame);
+  const vars = Object.entries(THEMES.dark.ui).map(([k, v]) => `${k}:${v}`).join(";");
+  const loaded = new Promise((r) => (frame.onload = r));
+  frame.srcdoc = `<style>:root{${vars}}${mobileCss}</style><div id="root"></div><div class="row-sub">s</div><textarea></textarea>`;
+  await loaded;
+  const doc = frame.contentDocument!;
+  const applied: string[] = [];
+  let reloads = 0;
+  const stored = localStorage.getItem("ddak.phone.settings");
+  localStorage.removeItem("ddak.phone.settings");
+  const root = createRoot(doc.getElementById("root")!);
+  const button = (key: string, value: string) => doc.querySelector<HTMLElement>(`[data-setting="${key}"] button[data-value="${value}"]`);
+  try {
+    root.render(createElement(PhoneSettingsView, { apply: (s: PhoneSettings) => void applied.push(`${s.theme}/${s.locale}/${s.fontScale}`), reload: () => void reloads++ }));
+    await waitFor("설정 화면", () => button("theme", "auto"), 3000);
+    const themes = [...doc.querySelectorAll<HTMLElement>('[data-setting="theme"] button')].map((b) => b.dataset.value).join(",");
+    check("폰 설정: 테마는 폰 설정 따라와 모든 테마, 처음엔 폰 설정 따라", themes === `auto,${Object.keys(THEMES).join(",")}` && button("theme", "auto")!.getAttribute("aria-pressed") === "true", themes);
+    button("theme", "light")!.click();
+    await sleep(50);
+    button("fontScale", "1.3")!.click();
+    await sleep(50);
+    check(
+      "폰 설정: 테마·글자 크기는 고르면 바로 적용하고 저장, 고른 것 표시",
+      applied.join(" ") === "light/auto/1 light/auto/1.3" && reloads === 0 && localStorage.getItem("ddak.phone.settings") === '{"theme":"light","locale":"auto","fontScale":1.3}' &&
+        button("fontScale", "1.3")!.classList.contains("on") && !button("fontScale", "1")!.classList.contains("on"),
+      `${applied.join(" ")} reload=${reloads} ${localStorage.getItem("ddak.phone.settings")}`,
+    );
+    const other = phoneLocale === "ko" ? "en" : "ko";
+    button("locale", other)!.click();
+    await sleep(50);
+    const reloadedForOther = reloads === 1 && applied.length === 2;
+    button("locale", "auto")!.click();
+    await sleep(50);
+    check("폰 설정: 지금과 다른 언어를 고르면 화면을 다시 읽고, 같은 언어면 그대로 적용", reloadedForOther && reloads === 1 && applied.length === 3, `reload=${reloads} ${applied.join(" ")}`);
+
+    // 저장하지 못하면: 언어는 바꾸지 않고(다시 읽으면 이전 언어로 돌아간다) 알린다, 테마는 지금 화면에만 적용하고 알린다 (리뷰 R2)
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = () => {
+      throw new Error("quota");
+    };
+    try {
+      button("locale", other)!.click();
+      await sleep(50);
+      const keptLocale = reloads === 1 && applied.length === 3 && button("locale", "auto")!.classList.contains("on") && !!doc.querySelector(".settings .error");
+      button("theme", "dark")!.click();
+      await sleep(50);
+      check(
+        "폰 설정: 저장하지 못하면 언어는 바꾸지 않고(다시 읽지 않음) 알리며, 테마는 지금 화면에만 적용하고 알림",
+        keptLocale && reloads === 1 && applied[3] === "dark/auto/1.3" && button("theme", "dark")!.classList.contains("on") && !!doc.querySelector(".settings .error"),
+        `${keptLocale} reload=${reloads} ${applied.join(" ")} ${doc.querySelector(".settings .error")?.textContent ?? "(알림 없음)"}`,
+      );
+    } finally {
+      Storage.prototype.setItem = setItem;
+    }
+    button("theme", "light")!.click();
+    await sleep(50);
+    check("폰 설정: 다시 저장되면 알림이 사라짐", !doc.querySelector(".settings .error") && localStorage.getItem("ddak.phone.settings") === '{"theme":"light","locale":"auto","fontScale":1.3}');
+
+    const size = (sel: string) => frame.contentWindow!.getComputedStyle(doc.querySelector(sel)!).fontSize;
+    doc.documentElement.style.setProperty("--font-scale", "1.3");
+    const big = [size("body"), size("body > .row-sub"), size("body > textarea"), size(".bar h1")];
+    doc.documentElement.style.setProperty("--font-scale", "0.85");
+    const small = [size("body"), size("body > .row-sub"), size("body > textarea")];
+    check(
+      "폰 설정: 글자 크기 배율이 본문·작은 글자·제목에 걸리고, 입력란은 16px 아래로 내려가지 않음",
+      // 계산값은 20.799999px처럼 나온다
+      [...big, ...small].map((v) => Math.round(parseFloat(v) * 10) / 10).join(",") === "20.8,18.2,20.8,22.1,13.6,11.9,16",
+      `${big.join(",")} / ${small.join(",")}`,
+    );
+  } finally {
+    root.unmount();
+    frame.remove();
+    if (stored === null) localStorage.removeItem("ddak.phone.settings");
+    else localStorage.setItem("ddak.phone.settings", stored);
   }
 }
 
@@ -4755,6 +4862,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["mobilePushUnit", testMobilePushUnit],
     ["mobileThemeUnit", testMobileThemeUnit],
     ["mobileChatUnit", testMobileChatUnit],
+    ["mobileSettingsUnit", testMobileSettingsUnit],
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["claude", () => testClaude(t())],
