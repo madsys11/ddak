@@ -98,7 +98,7 @@
     },
     { "files": ["src/docs.ts", "src/DocView.tsx"], "steps": ["docView", "workspaceStateUnit"] },
     { "files": ["src/Resizer.tsx", "src/pointerTrack.ts"], "steps": ["panels", "tabsAndSplits"] },
-    { "files": ["src/zoom.ts"], "steps": ["zoom"] },
+    { "files": ["src/zoom.ts"], "steps": ["zoom", "zoomIme"] },
     {
       "files": ["src/ChatPanel.tsx", "src-tauri/src/chat.rs"],
       "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects"]

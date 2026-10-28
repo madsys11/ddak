@@ -10,17 +10,25 @@
 // 덮어쓴 값이 아니라 실제 값을 따른다 (실험: 배율 1.1에서 1dppx만 맞고 1.1dppx는 안 맞음).
 // 그래서 xterm의 쿼리는 늘 안 맞아 모니터를 옮겨도 알림이 없다. 실제 값으로 따로 감시하고,
 // 바뀌면 resize 이벤트를 보내 xterm이 다시 읽게 한다.
+//
+// Windows의 WebView2(Chromium)는 배율(ZoomFactor)을 devicePixelRatio에 이미 넣는다 (실험 2026-10-28: 화면 비율 1.5,
+// 배율 1.5에서 2.25). 여기서 또 곱하면 xterm이 아는 칸 폭과 캔버스에 그려지는 칸 폭이 배율만큼 달라져 한글 조합 박스가
+// 커서에서 어긋났다. 그래서 Chromium에서는 덮어쓰지 않는다 (xterm의 모니터 감시도 그대로 맞는다).
+// Chromium인지는 alignToPixels처럼 devicePixelContentBoxSize로 본다 (WebKit에는 없다).
 
 let factor = 1;
+
+// 웹뷰가 배율을 devicePixelRatio에 넣는지 (Chromium)
+export const zoomInPixelRatio = typeof ResizeObserverEntry !== "undefined" && "devicePixelContentBoxSize" in ResizeObserverEntry.prototype;
 
 const real =
   Object.getOwnPropertyDescriptor(window, "devicePixelRatio")?.get ??
   Object.getOwnPropertyDescriptor(Window.prototype, "devicePixelRatio")?.get;
 
 // 배율을 뺀 실제 화면 픽셀 비율 (레티나 2, 일반 모니터 1)
-export const screenPixelRatio = (): number => (real ? real.call(window) : 1);
+export const screenPixelRatio = (): number => (real ? real.call(window) : 1) / (zoomInPixelRatio ? factor : 1);
 
-if (real) {
+if (real && !zoomInPixelRatio) {
   Object.defineProperty(window, "devicePixelRatio", { configurable: true, get: () => screenPixelRatio() * factor });
   watchScreen();
 }
@@ -51,7 +59,7 @@ export function setZoomFactor(zoom: number) {
 // 그래서 CSS 크기를 나누어떨어지는 소수 그대로 두고, 화면 픽셀 경계에 오도록 위치도 소수점만큼 옮긴다.
 // screen: `.xterm-screen`. 돌려주는 함수로 멈춘다.
 export function alignToPixels(screen: HTMLElement): () => void {
-  if (typeof ResizeObserverEntry !== "undefined" && "devicePixelContentBoxSize" in ResizeObserverEntry.prototype) return () => {};
+  if (zoomInPixelRatio) return () => {};
   let shift = { x: 0, y: 0 };
   let frame = 0;
   const align = () => {

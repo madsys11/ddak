@@ -30,7 +30,7 @@ import { API_VERSION as PHONE_API, api as phoneApi } from "./mobile/api";
 import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
-import { screenPixelRatio } from "./zoom";
+import { screenPixelRatio, setZoomFactor } from "./zoom";
 import { ZOOM_LEVELS } from "./prefs";
 
 const log: string[] = [];
@@ -1225,6 +1225,42 @@ async function testMobile(root: string) {
   await waitFor("창 닫힘", () => !dialog(), 3000).catch(() => null);
   // 뒤 단계(채팅 패널)는 방이 비어 있다고 본다 (첫 메시지가 세션의 것)
   await invoke("chat_clear", { project: root });
+}
+
+// 배율과 한글 조합 박스 (src/zoom.ts): xterm이 아는 칸 폭이 캔버스에 실제로 그려진 칸 폭과 같아야 조합 박스(.composition-view,
+// 커서 열 × 칸 폭에 놓임)가 커서 자리에 뜬다. Windows WebView2는 배율을 devicePixelRatio에 이미 넣는데 한 번 더 곱해서
+// 배율만큼 어긋났다. 보기 메뉴 클릭(selftest_click_menu)이 맥에만 있어 웹뷰 배율을 직접 바꾼다.
+async function testZoomIme(term: Terminal) {
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  const zoom = async (z: number) => {
+    setZoomFactor(z);
+    await getCurrentWebview().setZoom(z);
+  };
+  const ta = term.textarea!;
+  try {
+    for (const z of [1.5, 0.8]) {
+      const before = term.cols;
+      await zoom(z);
+      await waitFor("칸 수 바뀜", () => term.cols !== before, 3000).catch(() => null);
+      await sleep(300);
+      const d = (term as unknown as { _core: { _renderService: { dimensions: { css: { cell: { width: number } }; device: { cell: { width: number } } } } } })._core._renderService.dimensions;
+      const canvas = term.element!.querySelector<HTMLCanvasElement>(".xterm-screen > canvas:not(.xterm-link-layer)")!;
+      const shown = (d.device.cell.width * canvas.getBoundingClientRect().width) / canvas.width;
+      ta.dispatchEvent(new CompositionEvent("compositionstart", { data: "" }));
+      ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: "한" }));
+      const x = term.buffer.active.cursorX;
+      const left = parseFloat(term.element!.querySelector<HTMLElement>(".composition-view")!.style.left);
+      ta.dispatchEvent(new CompositionEvent("compositionend", { data: "" }));
+      ta.value = "";
+      check(
+        `배율 ${z}: 터미널 칸 폭이 그려진 대로라 한글 조합 박스가 커서 자리에`,
+        Math.abs(shown - d.css.cell.width) < 0.05 && Math.abs(left - x * shown) < 0.5,
+        `dpr=${window.devicePixelRatio} cell=${d.css.cell.width} shown=${shown} x=${x} left=${left}`,
+      );
+    }
+  } finally {
+    await zoom(Number(localStorage.getItem("ddak.zoom") ?? 1));
+  }
 }
 
 // 화면 배율: 보기 메뉴(⌘= ⌘- ⌘0)로 웹뷰 전체를 키우고 줄인다.
@@ -4894,6 +4930,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["mobileSettingsUnit", testMobileSettingsUnit],
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
+    ["zoomIme", () => testZoomIme(t())],
     ["claude", () => testClaude(t())],
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
     ["terminalSearch", () => testTerminalSearch(t())],
