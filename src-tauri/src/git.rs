@@ -119,7 +119,7 @@ fn run(repo: &Path, args: &[&str]) -> Result<String, CodeError> {
     git(repo, args).map_err(|e| code_err("git", e))
 }
 
-// 커밋마다 레인을 정한다 (커밋은 자식이 부모보다 먼저인 순서, git log --topo-order).
+// 커밋마다 레인을 정한다 (커밋은 자식이 부모보다 먼저인 순서, git log --date-order).
 // 레인마다 다음에 올 것으로 기다리는 커밋을 둔다. 커밋은 자기를 기다리는 첫 레인(없으면 빈 레인)에 놓이고, 같은 커밋을
 // 기다리던 다른 레인은 여기서 합쳐져 끝난다. 그 레인은 첫 부모를 기다리고, 다른 부모는 이미 기다리는 레인이 있으면 그리로,
 // 없으면 빈 레인을 새로 쓴다. 레인은 옮기지 않는다 (지나가는 선은 곧게).
@@ -231,8 +231,10 @@ fn graph(repo: &Path, limit: usize, places: &[String]) -> Result<Graph, CodeErro
     let mut commits = Vec::new();
     if !starts.is_empty() {
         let count = format!("--max-count={}", limit + 1);
-        // 커밋마다 NUL로 나눈 네 칸: "SHA 부모…", 작성자, 시각, 제목 (-z: 커밋 사이도 NUL)
-        let mut args = vec!["log", "-z", "--topo-order", &count, "--format=%H %P%x00%an%x00%at%x00%s", "--end-of-options"];
+        // 커밋마다 NUL로 나눈 네 칸: "SHA 부모…", 작성자, 시각, 제목 (-z: 커밋 사이도 NUL).
+        // --date-order: 자식이 부모보다 먼저인 것은 지키고 그 밖에는 커밋 시각 순. --topo-order는 한쪽 줄기를 몰아서 내므로
+        // 병합을 되풀이하는 저장소에서 레인이 병합마다 열린 채 오른쪽으로 넓어졌다 (repeated_merges_keep_lanes_narrow)
+        let mut args = vec!["log", "-z", "--date-order", &count, "--format=%H %P%x00%an%x00%at%x00%s", "--end-of-options"];
         args.extend(starts.iter().map(String::as_str));
         args.push("--");
         let out = raw(repo, &args, None)?;
@@ -477,26 +479,28 @@ mod tests {
 
         let g = graph(&repo, 100, &places).unwrap();
         let subjects: Vec<&str> = g.commits.iter().map(|c| c.subject.as_str()).collect();
-        assert_eq!(subjects, ["merge", "side work", "rename", "first"], "{subjects:?}");
+        // side work와 rename은 형제이고 같은 초의 커밋이라 --date-order에서 둘의 순서는 정해지지 않는다
+        assert!(subjects.len() == 4 && subjects[0] == "merge" && subjects[3] == "first" && subjects[1..3].contains(&"side work") && subjects[1..3].contains(&"rename"), "{subjects:?}");
+        let by = |s: &str| g.commits.iter().find(|c| c.subject == s).unwrap().sha.clone();
         let names: Vec<(&str, &str)> = g.refs.iter().map(|r| (r.kind, r.name.as_str())).collect();
         assert!(names.contains(&("branch", "main")) && names.contains(&("branch", "side")) && names.contains(&("remote", "origin/main")) && names.contains(&("tag", "v1")), "{names:?}");
         // 주석 태그는 가리키는 커밋으로
         let v1 = g.refs.iter().find(|r| r.name == "v1").unwrap();
-        assert_eq!(v1.sha, g.commits[3].sha);
-        assert_eq!(g.head.as_deref(), Some(g.commits[0].sha.as_str()));
+        assert_eq!(v1.sha, by("first"));
+        assert_eq!(g.head.as_deref(), Some(by("merge").as_str()));
         assert_eq!(g.worktrees.len(), 2);
         assert_eq!(g.worktrees[1].branch, None);
-        assert_eq!(g.worktrees[1].sha.as_deref(), Some(g.commits[1].sha.as_str()));
+        assert_eq!(g.worktrees[1].sha.as_deref(), Some(by("side work").as_str()));
         assert_eq!((g.worktrees[0].place, g.worktrees[1].place), (Some(0), Some(1)), "가장 깊은 곳을 찾음");
         assert!(!g.truncated && g.lanes == 2);
         assert!(graph(&repo, 2, &[]).unwrap().truncated);
 
-        let d = detail(&repo, &g.commits[1].sha).unwrap();
+        let d = detail(&repo, &by("side work")).unwrap();
         assert_eq!((d.message.as_str(), d.files.len()), ("side work\n\nbody line", 1));
         assert_eq!((d.files[0].status.as_str(), d.files[0].path.as_str()), ("A", "b.txt"));
-        let r = detail(&repo, &g.commits[2].sha).unwrap();
+        let r = detail(&repo, &by("rename")).unwrap();
         assert!(r.files[0].status.starts_with('R') && r.files[0].path == "renamed.txt", "{:?}", r.files);
-        let root = detail(&repo, &g.commits[3].sha).unwrap();
+        let root = detail(&repo, &by("first")).unwrap();
         assert_eq!(root.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["a.txt"]);
 
         sh(&tmp.join("wt"), &commit("in worktree").replace("commit -qm", "commit -q --allow-empty -m"));
@@ -548,6 +552,42 @@ mod tests {
         files.sort();
         assert_eq!(files, tab.into_iter().chain(["한글 파일.txt"]).collect::<Vec<_>>());
         assert_eq!(d.message, evil.trim_end());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // 병합을 되풀이하는 저장소: 기능 브랜치가 몇 회차 동안 열려 있다가 develop에 병합되고, 매 회차 develop을 master로 병합
+    // ("운영배포"). --topo-order는 한쪽 줄기를 몰아서 내므로 병합마다 연 레인이 다른 쪽 커밋이 나올 때까지 닫히지 않아
+    // 오른쪽으로 계속 넓어졌다 (이 저장소 30회차: topo-order 31 / date-order 8, 사용자 저장소 최근 1000개: 209 / 12).
+    #[test]
+    fn repeated_merges_keep_lanes_narrow() {
+        let tmp = std::env::temp_dir().join(format!("ddak-git-merges-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // 같은 초의 커밋이 없게 시각을 10초씩 올린다
+        let script = r#"
+            T=1700000000
+            c() { T=$((T+10)); GIT_AUTHOR_DATE=@$T GIT_COMMITTER_DATE=@$T git -c user.name=t -c user.email=t@example.com "$@"; }
+            git init -q -b master && echo 0 > m && git add m && c commit -qm base && git checkout -q -b develop
+            i=1
+            while [ $i -le 30 ]; do
+                git checkout -q -b f$i develop && echo $i > f$i && git add f$i && c commit -qm f$i
+                git checkout -q develop && echo $i > d && git add d && c commit -qm d$i
+                j=$((i-5))
+                if [ $j -ge 1 ]; then
+                    git checkout -q f$j && echo b >> f$j && git add f$j && c commit -qm f$j-b
+                    git checkout -q develop && c merge -q --no-ff f$j -m mf$j
+                fi
+                git checkout -q master && c merge -q --no-ff develop -m "운영배포 $i" && git checkout -q develop
+                i=$((i+1))
+            done
+        "#;
+        sh(&tmp, script);
+        let g = graph(&tmp, 1000, &[]).unwrap();
+        assert!(g.commits.len() > 100 && !g.truncated);
+        assert!(g.lanes <= 10, "레인 {}개", g.lanes);
+        // 자식이 부모보다 먼저 (레인 계산의 전제)
+        let pos: std::collections::HashMap<&str, usize> = g.commits.iter().enumerate().map(|(i, c)| (c.sha.as_str(), i)).collect();
+        assert!(g.commits.iter().enumerate().all(|(i, c)| c.parents.iter().all(|p| pos[p.as_str()] > i)));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
