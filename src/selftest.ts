@@ -1,7 +1,7 @@
 // 실제 앱 안에서 도는 자체 테스트. scripts/selftest.sh로 실행한다.
 // 테스트용 폴더 구조는 그 스크립트가 만든다.
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { Terminal, type ILink } from "@xterm/xterm";
@@ -253,6 +253,11 @@ function visiblePanes() {
     .filter((p) => p.term)
     .sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
 }
+// 창 이름 줄의 글 (오른쪽 끝 단추 ↻·×는 빼고). 이름 줄이 없으면 undefined
+const paneLabel = (pane: Element) => {
+  const label = pane.querySelector(".pane-label");
+  return label ? [...label.childNodes].filter((n) => !(n instanceof Element && n.classList.contains("pane-actions"))).map((n) => n.textContent).join("") : undefined;
+};
 // 터미널이 없는 창(작업그룹 준비를 기다리는 세션)까지 포함한 보이는 창
 const paneEls = () => [...document.querySelectorAll<HTMLElement>(".pane")].filter((el) => el.offsetParent !== null);
 const setupStatus = (pane: HTMLElement) => pane.querySelector<HTMLElement>("[data-setup-status]")?.dataset.setupStatus;
@@ -3858,7 +3863,34 @@ async function testAddSession(root: string, first: Terminal) {
     promptLines.includes("A:R {chat}") && promptLines.some((l) => l.includes('S2|B:v="R {chat}\\n\\nS2"|')),
     promptLines.filter((l) => l.trim()).slice(-4).join(" ⏎ "),
   );
-  await menu("close_pane");
+  // 세션 다시 시작 (이름 줄 ↻): 확인을 받고 그 창의 터미널만 새로 띄워 세션을 다시 띄운다. 취소하면 그대로, 채팅 이름도 그대로
+  const realConfirm = devHooks.confirm;
+  let restartAsked = "";
+  devHooks.confirm = async (m) => ((restartAsked = m), false);
+  prompterPane.el.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  await sleep(300);
+  const kept = visiblePanes().find((p) => p.el === prompterPane.el)?.term === prompterPane.term;
+  devHooks.confirm = async () => true;
+  prompterPane.el.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  const restarted = await waitFor("다시 띄운 prompter", () => {
+    const p = visiblePanes().find((x) => x.el === prompterPane.el);
+    return p && p.term !== prompterPane.term && screen(p.term).some((l) => l.includes("|B:")) && p;
+  }, 10000).catch(() => undefined);
+  devHooks.confirm = realConfirm;
+  const afterRestart = await waitAsync("다시 참여", async () => {
+    const m = await invoke<string[]>("chat_members", { project: root });
+    return m.includes("origin/prompter") && m;
+  }, 5000).catch(() => [] as string[]);
+  check(
+    "세션 다시 시작: 확인을 받고(취소하면 그대로) 그 창의 터미널을 새로 띄워 세션을 다시 띄움, 채팅 이름은 그대로",
+    kept && restartAsked.includes("prompter") && !!restarted && paneEls().includes(prompterPane.el) && !afterRestart.some((n) => n.startsWith("origin/prompter-")),
+    `${kept} ${JSON.stringify(restartAsked)} ${!!restarted} ${afterRestart.join(",")}`,
+  );
+  // 창 닫기 (이름 줄 ×): 묻지 않고 그 창을 닫는다
+  const panesBeforeClose = paneEls().length;
+  prompterPane.el.querySelector<HTMLElement>("[data-action=pane-close]")?.click();
+  await waitFor("× 닫기", () => paneEls().length === panesBeforeClose - 1, 3000).catch(() => null);
+  check("창 닫기: 이름 줄 ×로 묻지 않고 그 창을 닫음", paneEls().length === panesBeforeClose - 1 && !paneEls().includes(prompterPane.el), `${panesBeforeClose} → ${paneEls().length}`);
   await waitAsync("prompter 나감", async () => !(await invoke<string[]>("chat_members", { project: root })).includes("origin/prompter"), 5000).catch(() => null);
 
   await testChatPanel(root, open, choose);
@@ -4028,6 +4060,99 @@ time.sleep(60)`;
   const done = await waitFor("고름", () => pickerScreen().includes("CHOSE:Yes, always|Deny|Deny|Allow|Skip"), 8000).then(() => true, () => false);
   const closed = await waitAsync("열린 선택 창 없음", async () => (await invoke<string[]>("chat_prompts", { project: root })).length === 0, 3000).then(() => true, () => false);
   check("선택 창 답하기: 거절 쪽은 확인 없이 보냄, 끝나면 열린 선택 창 없음", done && closed, `${done} ${closed} ${pickerScreen().slice(0, 120)}`);
+
+  // 세션 다시 시작 (이름 줄 ↻)과 옛 터미널의 것들: 다시 띄운 picker가 선택 창을 다시 띄워 채팅에 올라오고 대기 배지가 선다.
+  // 그 채로 다시 시작하면 옛 터미널이 끝나기를 기다리는 동안 터미널 대신 안내만 (배지 지움, 리뷰 R2), 옛 선택 창은 닫혀 채팅에
+  // 알림 (리뷰 R3), 옛 터미널이 끝나지 않으면 띄우지 않음 (리뷰 R1). 다시 누르면 새로 띄운다
+  const realConfirm = devHooks.confirm;
+  devHooks.confirm = async () => true;
+  const pickerEl = pickerPane.el;
+  const pickerTerm = () => visiblePanes().find((p) => p.el === pickerEl)?.term;
+  const freshAsk = async (not: string[]) =>
+    waitAsync("다시 띄운 선택 창", async () => (await stored()).find((m) => m.prompt?.question.includes("Do you want to proceed?") && !not.includes(m.prompt.id)), 10000).catch(() => undefined);
+  const seenAsks = (await stored()).flatMap((m) => (m.prompt ? [m.prompt.id] : []));
+  pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  const again = await freshAsk(seenAsks);
+  await waitFor("대기 배지", () => pickerEl.querySelector(".pane-label [data-status]"), 3000).catch(() => null);
+  const before = { again: !!again && pickerTerm() !== pickerPane.term, badge: !!pickerEl.querySelector(".pane-label [data-status]"), open: (await invoke<string[]>("chat_prompts", { project: root })).includes(again?.prompt?.id ?? "-") };
+  let promptEvents = 0;
+  const unlistenPrompts = await listen("chat-prompts", () => promptEvents++);
+  let finishWait: (ended: boolean) => void = () => {};
+  devHooks.paneWaitClosed = () => new Promise<boolean>((r) => (finishWait = r));
+  pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  await waitFor("기다리는 안내", () => pickerEl.querySelector("[data-restarting=waiting]"), 3000).catch(() => null);
+  const whileWaiting = {
+    notice: !!pickerEl.querySelector("[data-restarting=waiting]"),
+    noTerminal: !pickerEl.querySelector(".xterm"),
+    noBadge: !pickerEl.querySelector(".pane-label [data-status]"),
+    noRestart: !pickerEl.querySelector("[data-action=pane-restart]"),
+  };
+  const promptClosed = await waitAsync("옛 선택 창 닫힘", async () => promptEvents > 0 && !(await invoke<string[]>("chat_prompts", { project: root })).includes(again?.prompt?.id ?? "-") && true, 3000).catch(() => false);
+  await waitFor("닫힌 선택 창 단추", () => option(again?.prompt?.id ?? "-", 0)?.disabled, 3000).catch(() => null);
+  const cardClosed = !!option(again?.prompt?.id ?? "-", 0)?.disabled;
+  finishWait(false);
+  await waitFor("끝나지 않음 안내", () => pickerEl.querySelector("[data-restarting=failed]"), 3000).catch(() => null);
+  await sleep(300);
+  const notEnded = !!pickerEl.querySelector("[data-restarting=failed]") && !pickerEl.querySelector(".xterm");
+  unlistenPrompts();
+  devHooks.paneWaitClosed = undefined;
+  const seenAsks2 = (await stored()).flatMap((m) => (m.prompt ? [m.prompt.id] : []));
+  pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  const third = await freshAsk(seenAsks2);
+  // 새 터미널의 PTY 번호가 오기 전(만드는 중)에는 ↻가 없다: 그때 다시 시작하면 이미 떠 있을 수 있는 옛 프로세스를 기다릴 수
+  // 없다 (재리뷰 R1). 번호가 오면 생긴다
+  const termBefore = pickerTerm();
+  devHooks.spawnDelay = 2000;
+  pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  await waitFor("만드는 중인 새 터미널", () => !pickerEl.querySelector("[data-restarting]") && pickerTerm() && pickerTerm() !== termBefore, 5000).catch(() => null);
+  const spawning = { newTerm: !!pickerTerm() && pickerTerm() !== termBefore, noRestart: !pickerEl.querySelector("[data-action=pane-restart]") };
+  devHooks.spawnDelay = undefined;
+  const restartBack = await waitFor("번호가 온 뒤 ↻", () => pickerEl.querySelector("[data-action=pane-restart]"), 5000).then(() => true, () => false);
+  // 겹친 두 요청은 하나만: 두 번 눌러도 기다림은 한 번 (재리뷰 R1)
+  let waits = 0;
+  let finishBoth: (ended: boolean) => void = () => {};
+  devHooks.paneWaitClosed = () => {
+    waits++;
+    return new Promise<boolean>((r) => (finishBoth = r));
+  };
+  const termBeforeDouble = pickerTerm();
+  pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  await waitFor("기다리는 안내", () => pickerEl.querySelector("[data-restarting=waiting]"), 3000).catch(() => null);
+  await sleep(300);
+  const oneWait = waits === 1 && !!pickerEl.querySelector("[data-restarting=waiting]") && !pickerEl.querySelector(".xterm");
+  finishBoth(true);
+  const afterDouble = await waitFor("겹친 요청 뒤 새 터미널", () => !pickerEl.querySelector("[data-restarting]") && pickerTerm() && pickerTerm() !== termBeforeDouble, 5000).then(() => true, () => false);
+  await sleep(300);
+  devHooks.paneWaitClosed = undefined;
+  // ↻가 아닌 길로 터미널이 바뀌어도 (작업그룹 끝내기 실패 뒤 다시 띄우기) 새 터미널의 번호가 오기 전에는 ↻가 없고, 누르면 옛
+  // 번호가 아니라 지금 터미널의 번호를 기다린다 (재리뷰 2회 R4)
+  const termBeforeRelaunch = pickerTerm();
+  devHooks.spawnDelay = 2000;
+  devHooks.relaunchActiveTab?.();
+  await waitFor("다시 띄운 터미널", () => pickerTerm() && pickerTerm() !== termBeforeRelaunch, 5000).catch(() => null);
+  const relaunchSpawning = !!pickerTerm() && pickerTerm() !== termBeforeRelaunch && !pickerEl.querySelector("[data-action=pane-restart]");
+  devHooks.spawnDelay = undefined;
+  await waitFor("번호가 온 뒤 ↻", () => pickerEl.querySelector("[data-action=pane-restart]"), 5000).catch(() => null);
+  const relaunchedPty = Number(pickerEl.querySelector<HTMLElement>("[data-pty]")?.dataset.pty);
+  let waitedFor: number | undefined;
+  devHooks.paneWaitClosed = async (pty) => ((waitedFor = pty), true);
+  const termBeforeR4 = pickerTerm();
+  pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
+  const afterR4 = await waitFor("R4 다시 시작", () => !pickerEl.querySelector("[data-restarting]") && pickerTerm() && pickerTerm() !== termBeforeR4, 5000).then(() => true, () => false);
+  devHooks.paneWaitClosed = undefined;
+  const relaunchOk = relaunchSpawning && relaunchedPty > 0 && waitedFor === relaunchedPty && afterR4;
+  check(
+    "세션 다시 시작: 새 터미널을 만드는 중(PTY 번호 전)에는 ↻가 없고, 겹쳐 누른 두 요청은 한 번만 기다려 한 번 띄움, ↻ 밖의 길로 다시 띄운 뒤에도 지금 터미널의 번호만 씀",
+    Object.values(spawning).every(Boolean) && restartBack && oneWait && afterDouble && waits === 1 && relaunchOk,
+    `${JSON.stringify(spawning)} ${restartBack} ${oneWait} ${afterDouble} waits=${waits} relaunch=${relaunchSpawning} ${relaunchedPty} waited=${waitedFor} ${afterR4}`,
+  );
+  devHooks.confirm = realConfirm;
+  check(
+    "세션 다시 시작: 옛 터미널이 끝나기를 기다리는 동안 터미널 대신 안내(상태 배지 지움), 옛 선택 창은 닫혀 채팅에 알림, 끝나지 않으면 띄우지 않고 다시 누르면 띄움",
+    Object.values(before).every(Boolean) && Object.values(whileWaiting).every(Boolean) && promptClosed === true && cardClosed && notEnded && !!third,
+    `${JSON.stringify(before)} ${JSON.stringify(whileWaiting)} ${promptClosed} ${cardClosed} ${notEnded} ${!!third}`,
+  );
 
   pickerPane.term.focus();
   await menu("close_pane");
@@ -4836,7 +4961,7 @@ async function testGroupStart(root: string) {
     panes.map((p) => Math.round(p.rect.width)).join(","),
   );
   check("작업그룹: 탭이 하나이고 제목은 그룹 이름", tabCount() === 1 && document.querySelector(".tab-title")?.textContent === "Trio");
-  const labels = panes.map((p) => p.el.querySelector(".pane-label")?.textContent);
+  const labels = panes.map((p) => paneLabel(p.el));
   check("작업그룹: 창마다 역할 이름, 읽기 전용 표시", labels.join(",") === "alpha,betaRead-only,gamma", labels.join(","));
 
   const [alpha, beta, gamma] = panes.map((p) => p.term);
@@ -4939,7 +5064,7 @@ async function testResumeCheck(root: string) {
   check("복원: 탭 셋, 이름과 활성 탭", titles()[0] === "saved tab" && titles()[2] === "duo-1" && activeTabIndex() === 0, `${titles().join(",")} ${activeTabIndex()}`);
   const panes = await waitFor("복원한 창", () => visiblePanes().length === 3 && visiblePanes(), 15000);
   const [keeps, shell, fresh] = panes;
-  const label = (p: (typeof panes)[number]) => p.el.querySelector(".pane-label")?.textContent ?? "";
+  const label = (p: (typeof panes)[number]) => paneLabel(p.el) ?? "";
   check("복원: 분할과 세션 자리 (keeps | 셸 | fresh)", label(keeps) === "keeps" && label(shell) === "" && label(fresh) === "fresh", panes.map(label).join(","));
   await ready(shell.term);
   const facts = await savedFacts(shell.term, root);

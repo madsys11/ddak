@@ -176,6 +176,7 @@ pub fn run() {
             pty::selftest_keep_awake,
             pty::pty_resize,
             pty::pty_kill,
+            pty::pty_wait_closed,
             pty::chat_wake_now,
             selftest::selftest_config,
             selftest::selftest_report,

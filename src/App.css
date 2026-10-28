@@ -347,6 +347,28 @@ button:hover {
   border-radius: 3px;
   font-size: 10px;
 }
+/* 이름 줄 오른쪽 끝의 창 단추 (세션 다시 시작 ↻, 창 닫기 ×) */
+.pane-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+.pane-action {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 16px;
+  font-size: 13px;
+  color: var(--fg-dim);
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.pane-action:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
 .pane-badge.error {
   color: var(--error);
   border-color: var(--error);

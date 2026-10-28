@@ -193,6 +193,11 @@ export const en = {
   "endGroup.kept": "The work group ended. These branches were kept:",
   "endGroup.close": "OK",
 
+  "pane.restart": "Restart Session",
+  "pane.restartConfirm": "Restart {name}? The program running in this pane ends, and the session starts again with its work group settings (continuing the previous conversation, with the chat connected).",
+  "pane.restarting": "Waiting for the previous program to end…",
+  "pane.restartFailed": "The previous program did not end, so the session was not started again. Press ↻ to try again, or close the pane.",
+  "pane.close": "Close Pane",
   "session.readOnly": "Read-only",
   "session.setup": "setup",
   "setup.running": "Running…",

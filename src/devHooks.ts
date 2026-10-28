@@ -15,6 +15,10 @@ export const devHooks: {
   groups?: Groups | null;
   // 터미널이 PTY 생성 응답을 이만큼(ms) 늦게 받은 것처럼 한다 (자체 테스트)
   spawnDelay?: number;
+  // 세션 다시 시작이 옛 터미널이 다 끝나기를 기다리는 것 (pty_wait_closed) 대신 쓴다: 늦게 끝남·끝나지 않음 (자체 테스트)
+  paneWaitClosed?: (pty: number) => Promise<boolean>;
+  // 보이는 프로젝트의 지금 탭 세션을 다시 띄운다 (작업그룹 끝내기 실패 뒤와 같은 길, 자체 테스트. Workspace가 채운다)
+  relaunchActiveTab?: () => void;
   // 작업그룹 준비 창이 설정을 읽을 때마다 불러서, 그 응답을 돌려준 값(ms)만큼 늦게 받은 것처럼 한다 (자체 테스트)
   setupLoadDelay?: () => number;
   // 작업 화면 상태 읽기·저장 (자체 테스트): load가 있으면 읽기를 이것으로 바꾼다 (실패·늦게 오기), saveDelay는 저장할

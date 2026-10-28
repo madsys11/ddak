@@ -260,6 +260,14 @@ pub fn pty_dialog(app: tauri::AppHandle, ptys: State<'_, crate::pty::Ptys>, prom
     }
 }
 
+// 터미널을 닫았다 (pty.rs pty_kill): 그 터미널의 열린 선택 창을 닫고 채팅에 알린다. 열린 목록(chat_prompts)은 살아 있는
+// 터미널만 보이지만 그것만으로는 채팅 패널이 다시 읽지 않아, 세션 다시 시작·창 닫기 뒤 옛 선택 창이 누를 수 있는 채로 남았다
+pub fn pty_gone(app: &tauri::AppHandle, pty: u32) {
+    if let Report::Changed(projects) = app.state::<Prompts>().report(pty, 0, "", None, None, Instant::now()) {
+        changed(app, &projects);
+    }
+}
+
 // 열린 선택 창 id (채팅 패널: 이것만 누를 수 있다)
 #[tauri::command]
 pub fn chat_prompts(ptys: State<'_, crate::pty::Ptys>, prompts: State<'_, Prompts>, project: String) -> Vec<String> {

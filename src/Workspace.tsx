@@ -33,6 +33,7 @@ type Action =
   | { type: "closeTab"; id: number }
   | { type: "split"; dir: "row" | "col" }
   | { type: "closePane"; pane?: number }
+  | { type: "restartPane"; pane: number }
   | { type: "focus"; pane: number }
   | { type: "reveal"; pane: number }
   | { type: "ratio"; tab: number; path: Path; ratio: number }
@@ -166,6 +167,13 @@ function step(s: State, a: Action): State {
         setup = setup.status === "running" ? { ...setup, pane: null, status: "failed", code: null } : { ...setup, pane: null };
       }
       return update(owner.id, (t) => ({ ...t, layout, focus, setup }));
+    }
+    // 세션 다시 시작: 그 창의 세션을 설정의 이어서 하기(resume) 인자로 다시 띄운다 (터미널은 paneRuns를 늘려 새로 만든다).
+    // CLI가 끝나 셸만 남은 창에서 손으로 CLI를 띄우면 ddak 인자(채팅 주소 등)가 빠지므로 이것으로 되살린다 (2026-10-28)
+    case "restartPane": {
+      const session = s.sessions[a.pane];
+      if (!session?.command || session.setup) return s;
+      return { ...s, sessions: { ...s.sessions, [a.pane]: { ...session, resumed: true } } };
     }
     // 세션 추가: 그 탭의 포커스된 창 오른쪽에 새 창을 두고 그 세션을 띄운다 (창마다 새 세션 ID)
     case "addSession": {
@@ -341,6 +349,61 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   activeRef.current = s.tabs.some((tab) => tab.id === s.active) ? s.active : -1;
   // 탭마다 터미널을 다시 띄운 횟수. 터미널 key에 넣어서, 늘면 그 탭의 터미널을 새로 띄운다.
   const [runs, setRuns] = useState<Record<number, number>>({});
+  // 창마다 세션을 다시 시작한 횟수 (세션 다시 시작). 터미널 key에 넣어 그 창의 터미널만 새로 띄운다
+  const [paneRuns, setPaneRuns] = useState<Record<number, number>>({});
+  // 창마다 터미널의 PTY 번호 (Terminal onPty): 그 터미널의 key와 함께 둔다. 지금 터미널(keyOf)의 것이 아니면 아직 만드는 중으로
+  // 본다 — 작업그룹 끝내기 실패 뒤 다시 띄우기처럼 ↻가 아닌 길로 터미널이 바뀌어도 옛 번호를 쓰지 않게 (재리뷰 2회 R4).
+  // pty null은 만들지 못함. 만드는 중에는 다시 시작을 막는다 (재리뷰 R1: 번호가 오기 전에는 이미 떠 있을 수 있는 옛 프로세스를
+  // 기다릴 수 없다)
+  const [ptys, setPtys] = useState<Record<number, { key: string; pty: number | null }>>({});
+  const keyOf = useRef<Record<number, string>>({});
+  // 지금 터미널의 PTY 번호 (undefined: 만드는 중)
+  const ptyNow = (pane: number, all = ptys) => (all[pane] && all[pane].key === keyOf.current[pane] ? all[pane].pty : undefined);
+  const ptyOf = useRef(ptys);
+  ptyOf.current = ptys;
+  // 다시 시작을 처리하는 창 (확인을 묻는 동안 포함). 창마다 하나만 (재리뷰 R1: 겹친 두 번째 요청이 기다림을 건너뛰었다)
+  const restartBusy = useRef(new Set<number>());
+  // 다시 시작하는 창: 옛 터미널이 다 끝나기를 기다리는 중(waiting) / 끝나지 않아 띄우지 않음(failed). 그동안 터미널 대신 안내
+  const [restarting, setRestarting] = useState<Record<number, "waiting" | "failed">>({});
+  const without = <T,>(all: Record<number, T>, pane: number) => {
+    const { [pane]: _, ...rest } = all;
+    return rest;
+  };
+  // 세션 다시 시작: 확인을 받고, 옛 터미널을 내린 뒤 (안내로 바꾸면 Terminal이 PTY를 닫는다) 그 프로세스가 다 끝나기를 기다렸다가
+  // 같은 세션을 이어서 하기로 띄운다 (리뷰 R1: 바로 띄우면 옛 프로세스가 아직 세션을 쥐고 있었다). 끝나지 않으면 띄우지 않는다.
+  // 옛 터미널의 상태 배지·깨우기 단추는 지운다 (리뷰 R2: 새 터미널은 상태가 바뀌기 전에는 알리지 않는다). 옛 선택 창은 Rust가
+  // PTY를 닫을 때 닫는다 (prompts.rs pty_gone)
+  const restartPane = async (pane: number, name: string) => {
+    if (restartBusy.current.has(pane) || ptyNow(pane, ptyOf.current) === undefined) return;
+    restartBusy.current.add(pane);
+    try {
+      const ok = await devHooks.confirm(t("pane.restartConfirm", { name }), { okLabel: t("pane.restart"), cancelLabel: t("common.cancel") });
+      const pty = ptyNow(pane, ptyOf.current);
+      if (!ok || pty === undefined) return;
+      setStatuses((all) => without(all, pane));
+      setWaking((all) => without(all, pane));
+      setRestarting((all) => ({ ...all, [pane]: "waiting" }));
+      const wait = import.meta.env.DEV && devHooks.paneWaitClosed ? devHooks.paneWaitClosed : (id: number) => invoke<boolean>("pty_wait_closed", { id, timeoutMs: 8000 });
+      const ended = pty === null || (await wait(pty).catch(() => false));
+      if (!ended) {
+        setRestarting((all) => ({ ...all, [pane]: "failed" }));
+        return;
+      }
+      dispatch({ type: "restartPane", pane });
+      setPaneRuns((r) => ({ ...r, [pane]: (r[pane] ?? 0) + 1 }));
+      setRestarting((all) => without(all, pane));
+    } finally {
+      restartBusy.current.delete(pane);
+    }
+  };
+  // 그 탭들의 세션을 이어서 하기로 다시 띄운다 (작업그룹 끝내기가 세션을 끝낸 뒤 멈췄을 때). 끝낸 터미널의 늦은 종료는 이전 key의
+  // 것이라 창을 닫지 않는다
+  const relaunchTabs = (ids: number[]) => {
+    dispatch({ type: "resumeTabs", ids });
+    setRuns((r) => ({ ...r, ...Object.fromEntries(ids.map((id) => [id, (r[id] ?? 0) + 1])) }));
+  };
+  // 자체 테스트: 지금 탭을 위처럼 다시 띄운다 (↻가 아닌 길로 터미널이 바뀌는 경우, 재리뷰 2회 R4)
+  if (import.meta.env.DEV && visible) devHooks.relaunchActiveTab = () => relaunchTabs([s.active]);
   // 작업그룹을 끝내느라 세션을 끝내는(끝낸) 터미널 ("탭:횟수"). 그 터미널은 끝나도 창을 닫지 않는다.
   const stopping = useRef(new Set<string>());
   // 그 폴더(작업그룹 폴더)에서 띄운 탭. group_end가 그 폴더의 터미널을 모두 끝낸다.
@@ -720,6 +783,8 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
               const setup = tab.setup;
               // 준비를 기다리는 세션 창: 터미널 대신 안내 (터미널을 만들면 CLI가 바로 뜬다)
               const waiting = session && !session.setup && setup && !setup.started;
+              const termKey = session?.setup ? `setup-${setup?.run}` : `term-${runs[tab.id] ?? 0}-${paneRuns[id] ?? 0}`;
+              keyOf.current[id] = termKey;
               return (
               <div
                 key={id}
@@ -749,9 +814,26 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                         {setup.status === "running" ? t("setup.running") : setup.status === "ok" ? t("setup.done") : setupProblem(setup)}
                       </span>
                     )}
+                    {/* 오른쪽 끝: 세션 다시 시작(확인을 받음), 창 닫기(탭의 ×처럼 묻지 않음, ⌘W와 같음) */}
+                    <span className="pane-actions">
+                      {session.command && !session.setup && !waiting && restarting[id] !== "waiting" && ptyNow(id) !== undefined && (
+                        <button className="pane-action" data-action="pane-restart" title={t("pane.restart")} onClick={() => restartPane(id, session.name)}>
+                          ↻
+                        </button>
+                      )}
+                      <button className="pane-action" data-action="pane-close" title={t("pane.close")} onClick={() => dispatch({ type: "closePane", pane: id })}>
+                        ×
+                      </button>
+                    </span>
                   </div>
                 )}
-                {waiting ? (
+                {restarting[id] ? (
+                  <div className="setup-wait pane-restarting" data-restarting={restarting[id]}>
+                    <div className={restarting[id] === "failed" ? "setup-wait-error" : undefined}>
+                      {restarting[id] === "failed" ? t("pane.restartFailed") : t("pane.restarting")}
+                    </div>
+                  </div>
+                ) : waiting ? (
                   <div className="setup-wait">
                     {setup.status === "failed" ? (
                       <>
@@ -772,7 +854,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                 ) : (
                   <Terminal
                     // 다시 준비하면 새 터미널에서 다시 돌린다
-                    key={session?.setup ? `setup-${setup?.run}` : `term-${runs[tab.id] ?? 0}`}
+                    key={termKey}
                     cwd={tab.cwd}
                     {...commandOf(session)}
                     shiftEnter={session?.shiftEnter}
@@ -809,8 +891,12 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                         : !stopping.current.has(runKey(tab.id)) && dispatch({ type: "closePane", pane: id })
                     }
                     // 준비 창을 띄우지 못하면 준비 실패로 (세션이 계속 기다리지 않게)
+                    onPty={(pty) => setPtys((all) => ({ ...all, [id]: { key: termKey, pty } }))}
+                    // 세션 창은 띄우지 못해도 다시 시작할 수 있게 (기다릴 프로세스 없음)
                     onSpawnError={
-                      session?.setup && setup ? () => dispatch({ type: "setupExit", tab: tab.id, run: setup.run, code: null, spawnFailed: true }) : undefined
+                      session?.setup && setup
+                        ? () => dispatch({ type: "setupExit", tab: tab.id, run: setup.run, code: null, spawnFailed: true })
+                        : () => setPtys((all) => ({ ...all, [id]: { key: termKey, pty: null } }))
                     }
                   />
                 )}
@@ -856,9 +942,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
           onFailed={(stopped) => {
             const ids = tabsIn(ending.cwd);
             if (!stopped) return ids.forEach((id) => stopping.current.delete(runKey(id)));
-            // 세션을 끝낸 뒤라 다시 띄운다 (끝낸 터미널의 늦은 종료는 이전 key의 것이라 창을 닫지 않는다)
-            dispatch({ type: "resumeTabs", ids });
-            setRuns((r) => ({ ...r, ...Object.fromEntries(ids.map((id) => [id, (r[id] ?? 0) + 1])) }));
+            relaunchTabs(ids);
           }}
           // 끝났으면 그 폴더의 탭을 닫는다 (세션은 이미 끝났다)
           onEnded={() => tabsIn(ending.cwd).forEach((id) => dispatch({ type: "closeTab", id }))}

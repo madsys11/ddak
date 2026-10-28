@@ -1004,10 +1004,37 @@ pub fn pty_resize(ptys: State<'_, Ptys>, id: u32, cols: u16, rows: u16) -> Resul
 }
 
 #[tauri::command]
-pub fn pty_kill(ptys: State<'_, Ptys>, id: u32) -> Result<(), String> {
+pub fn pty_kill(app: tauri::AppHandle, ptys: State<'_, Ptys>, id: u32) -> Result<(), String> {
     // 기다림이 길 수 있어 (SIGHUP 뒤 유예) 따로 돌린다
     close(&ptys, id);
+    // 그 터미널의 열린 선택 창을 닫고 채팅에 알린다 (세션 다시 시작·창 닫기 뒤 옛 선택 창이 열린 단추로 남았다)
+    crate::prompts::pty_gone(&app, id);
     Ok(())
+}
+
+// 이 터미널이 다 끝날 때까지 기다린다 (세션 다시 시작: 옛 세션의 프로세스가 끝나기 전에 같은 세션을 띄우지 않게 — codex는
+// 이어 갈 대화를 다른 프로세스가 쥐고 있으면 이어 가지 못했다). 열려 있거나 닫는 중(close의 terminate가 아직 안 끝났거나
+// 끝내지 못함)이면 기다린다. 목록에서 다 빠지면 true, timeout 안에 안 빠지면 false
+pub fn wait_closed(ptys: &Ptys, id: u32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let alive = ptys.sessions.lock().unwrap().contains_key(&id) || ptys.closing.lock().unwrap().contains_key(&id);
+        if !alive {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+#[tauri::command]
+pub async fn pty_wait_closed(app: tauri::AppHandle, id: u32, timeout_ms: u64) -> Result<bool, String> {
+    use tauri::Manager;
+    tauri::async_runtime::spawn_blocking(move || wait_closed(&app.state::<Ptys>(), id, Duration::from_millis(timeout_ms)))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // 유닉스 권한·링크·sh를 쓰는 시험 (Windows 시험은 platform.rs·conpty.rs·fs.rs)
@@ -1247,6 +1274,23 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(before, after, "끝낸 뒤에도 그 폴더의 작업이 계속 씀");
+    }
+
+    // 닫은 터미널이 다 끝날 때까지 기다린다 (세션 다시 시작): SIGHUP을 받고 정리하느라 늦게 끝나는 프로세스도 끝난 뒤에야
+    // true, 그 뒤에는 프로세스가 없다. 닫지 않은 터미널은 시간 안에 끝나지 않아 false
+    #[test]
+    fn wait_closed_returns_after_the_session_ends() {
+        let argv: Vec<String> = ["/bin/sh", "-c", "trap 'sleep 0.2; exit' HUP; while :; do sleep 0.05; done"].iter().map(|a| a.to_string()).collect();
+        let ptys = Ptys::default();
+        ptys.sessions.lock().unwrap().insert(1, spawn("/", Some(&argv), None, false, SIZE, |_| true, |_| ()).unwrap());
+        let pid = ptys.sessions.lock().unwrap()[&1].proc.lock().unwrap().child.process_id().unwrap() as i32;
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!wait_closed(&ptys, 1, Duration::from_millis(200)), "열린 터미널인데 끝났다고 함");
+        close(&ptys, 1);
+        assert!(ptys.closing.lock().unwrap().contains_key(&1), "닫자마자 끝난 것으로 빠짐 (기다림을 시험하지 못함)");
+        assert!(wait_closed(&ptys, 1, Duration::from_secs(5)), "끝나지 않음");
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "끝났다고 했는데 프로세스가 남음");
+        assert!(wait_closed(&ptys, 99, Duration::ZERO), "없는 터미널은 바로 끝난 것");
     }
 
     // 먼저 닫은 터미널(일반 닫기 경로)의 백그라운드 작업도 끝내기가 기다린다 (리뷰 후속 P1: 닫으면 목록에서 바로 빠지고

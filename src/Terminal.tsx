@@ -67,6 +67,8 @@ type Props = {
   onExit: (code: number | null) => void;
   // PTY를 만들지 못함 (오류는 터미널에도 쓴다). 이때는 onExit이 오지 않는다.
   onSpawnError?: () => void;
+  // PTY를 만들었다 (그 번호. 세션 다시 시작이 옛 터미널이 다 끝나기를 기다린다, Workspace.tsx)
+  onPty?: (id: number) => void;
   // 채팅방에 참여할 세션: 프로젝트(원본 폴더), 참여자 이름, 창마다 고정인 키. 인자의 {chat}이 이 창의 MCP 주소로 바뀐다
   // (src-tauri/src/chat.rs)
   chat?: { project: string; name: string; key: string };
@@ -93,7 +95,7 @@ export const isTerminalReply = (data: string) =>
   /^\x1b\][\s\S]*(\x07|\x1b\\)$/.test(data) ||
   /^\x1bP[\s\S]*\x1b\\$/.test(data);
 
-export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, onReveal }: Props) {
+export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat, focused, onFocus, onTitle, onExit, onSpawnError, onPty, onWake, onStatus, onReveal }: Props) {
   const { theme, t } = usePrefs();
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm>(null);
@@ -103,8 +105,8 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
   // 콜백·설정이 바뀔 때마다 터미널을 다시 만들지 않도록 최신 값을 ref로 본다.
-  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, onReveal, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
-  latest.current = { onFocus, onTitle, onExit, onSpawnError, onWake, onStatus, onReveal, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
+  const latest = useRef({ onFocus, onTitle, onExit, onSpawnError, onPty, onWake, onStatus, onReveal, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat });
+  latest.current = { onFocus, onTitle, onExit, onSpawnError, onPty, onWake, onStatus, onReveal, theme, t, command, fallback, vars, shiftEnter, shiftEnterFor, shellAfter, chat };
 
   useEffect(() => {
     const el = ref.current!;
@@ -226,6 +228,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
         }
         id = newId;
         gotId(newId);
+        latest.current.onPty?.(newId);
         if (import.meta.env.DEV) el.dataset.pty = String(newId);
         if (early.has(newId)) wake(early.get(newId)!);
         early.clear();

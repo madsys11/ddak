@@ -193,6 +193,11 @@ export const ko: Messages = {
   "endGroup.kept": "작업그룹을 끝냈습니다. 남긴 브랜치:",
   "endGroup.close": "확인",
 
+  "pane.restart": "세션 다시 시작",
+  "pane.restartConfirm": "{name}을(를) 다시 시작할까요? 이 창에서 도는 프로그램이 끝나고, 작업그룹 설정대로 다시 띄웁니다 (이전 대화를 이어 가고 채팅도 연결됩니다).",
+  "pane.restarting": "이전 프로그램이 끝나기를 기다리는 중…",
+  "pane.restartFailed": "이전 프로그램이 끝나지 않아 세션을 다시 띄우지 않았습니다. ↻로 다시 해 보거나 창을 닫으세요.",
+  "pane.close": "창 닫기",
   "session.readOnly": "읽기 전용",
   "session.setup": "준비",
   "setup.running": "실행 중…",
