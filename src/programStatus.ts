@@ -77,11 +77,23 @@ export function dialogOnScreen(lines: readonly string[]): boolean {
 // 질문: 첫 선택지 위로 가로줄(─)이나 빈 줄 셋을 만나기 전까지의 글 전부 (줄 수를 자르지 않는다: 같은 선택 창인지를 질문
 // 전체로 본다. 리뷰 R2: 8줄로 자르니 위쪽 명령만 다른 두 선택 창이 같게 보였다).
 // complete: 그 경계를 화면 안에서 찾았다. 화면 맨 위까지 올라가도 없으면 질문이 화면 밖으로 잘렸을 수 있어 채팅에서는 답하지 않는다.
+// codex 선택 창(아래에 "Press … to confirm or … to cancel" 안내)은 첫 줄이 정해진 제목이다. 경계 없이 화면 맨 위에 닿았으면 그 사이의
+// 가장 위 제목 줄부터를 질문으로 보고 complete. codex는 선택 창 머리를 위에서부터 그리고 넘치면 아래를 "[… N lines]"로 줄여서
+// 진짜 제목은 늘 화면 안에 있고, 명령 본문에 같은 글이 있어도 그 아래다. 가장 위 것을 쓰므로 질문에서 명령이 빠지지 않는다
+// (리뷰 R1: 처음 만나는 제목에서 멈추니 heredoc 안의 제목에서 멈춰 위의 명령이 빠졌다). 선택 창이 화면 맨 윗줄부터 차거나
+// 위에 가로줄·빈 줄 없이 대화 기록이 붙은 경우다 (2026-10-28 폰에서 답하지 못한 codex 권한 확인).
+// claude의 "Do you want to proceed?"는 명령 아래의 마지막 줄이라 제목이 아니다 (경계로 보면 위의 명령이 빠진다).
 // 상자 테두리(│)와 안내 줄(Esc to cancel 등)은 뺀다. 읽지 못하면 null.
 export type Dialog = { question: string[]; options: string[]; cursor: number; complete: boolean };
 const EDGE = /^\s*[│┃]|[│┃]\s*$/g;
 const RULE = /^[\s─━═╭╮╰╯┌┐└┘╌┄-]{3,}$/;
 const NUMBERED = /^(\s*)([❯›]\s*)?(\d+)\.\s+(.*\S)\s*$/;
+// codex-rs/tui/src/bottom_pane/approval_overlay.rs의 제목들
+const DIALOG_TITLE =
+  /^(Would you like to (run the following command\?|make the following edits\?|grant these permissions\?|send input to (the existing terminal\?|terminal \S+\?))|Do you want to approve network access to ".*"\?)$/;
+// codex 안내 줄 (bottom_pane/popup_consts.rs accept_cancel_hint_line): "Press enter to confirm or esc to cancel".
+// claude의 "Enter to confirm · Esc to cancel"과 구분한다 (재리뷰 R1: confirm·cancel 낱말만 보니 claude 창도 codex로 봤다)
+const CODEX_FOOTER = /^Press \S.* to confirm or \S.* to cancel\b/;
 export function readDialog(screen: readonly string[]): Dialog | null {
   const lines = screen.map((l) => l.replace(EDGE, "").replace(/\s+$/, ""));
   // 아래에서 위로 1번 선택지를 찾고, 거기서 아래로 번호가 이어지는 묶음을 읽는다
@@ -119,6 +131,11 @@ export function readDialog(screen: readonly string[]): Dialog | null {
       }
       blank = 0;
       question.unshift(lines[i].trim());
+    }
+    const end = first + options.length;
+    if (!complete && lines.slice(end).some((l) => CODEX_FOOTER.test(l.trim()))) {
+      const title = question.findIndex((l) => DIALOG_TITLE.test(l));
+      if (title >= 0) return { question: question.slice(title), options, cursor, complete: true };
     }
     return { question, options, cursor, complete };
   }

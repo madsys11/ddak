@@ -2293,6 +2293,35 @@ function testProgramStatusUnit() {
       ]),
     JSON.stringify(read),
   );
+  // codex 선택 창(아래에 confirm·cancel 안내)은 경계 없이 화면 맨 위에 닿으면 가장 위 제목 줄부터가 질문: 화면 맨 윗줄부터 차도,
+  // 위에 경계 없이 대화 기록이 붙어 있어도 답할 수 있다. 명령 본문에 제목과 같은 줄이 있어도 위의 진짜 제목부터라 명령이 빠지지 않고,
+  // 그 위 명령만 다른 두 창은 다르다 (리뷰 R1). codex 안내가 없거나(claude 모양) 제목이 없으면 예전처럼 답하지 않는다
+  const footer = "Press enter to confirm or esc to cancel";
+  const codexTop = ["Would you like to run the following command?", "", "Environment: local", "", "$ node <<'NODE'", "[… 43 lines] ⌃a view all", "› 1. Yes, proceed (y)", "  2. No, and tell Codex what to do differently (esc)", "", footer];
+  const codexHistory = ["› [ddak] New chat message from origin/dev.", "• Ran node <<'NODE'", "Would you like to run the following command?", "", "$ rm -rf build", "› 1. Yes, proceed (y)", "  2. No (esc)", footer];
+  const network = ["• Working", 'Do you want to approve network access to "example.com"?', "", "Reason: fetch", "› 1. Yes", "  2. No", footer];
+  const heredoc = (cmd: string) => ["• Ran ls", "Would you like to run the following command?", "", `$ ${cmd}cat <<'TXT'`, "Would you like to run the following command?", "", "$ echo looks like a header", "TXT", "› 1. Yes, proceed (y)", "  2. No (esc)", footer];
+  const claudeTitled = (cmd: string) => [`  ${cmd}`, "Would you like to run the following command?", "Do you want to proceed?", "❯ 1. Yes", "  2. No", "Enter to confirm · Esc to cancel"];
+  const titled = [codexTop, codexHistory, network, heredoc(""), claudeTitled("rm -rf project"), ["  rm -rf project", "Do you want to proceed?", "❯ 1. Yes", "  2. No", footer]].map(readDialog);
+  check(
+    "선택 창 읽기: codex 창은 경계 없이 화면 맨 위에 닿으면 가장 위 제목부터 (화면 맨 위·대화 기록 아래·본문의 제목 줄), codex 안내나 제목이 없으면 아님",
+    JSON.stringify(titled.map((d) => d && [d.question, d.complete])) ===
+      JSON.stringify([
+        [["Would you like to run the following command?", "Environment: local", "$ node <<'NODE'", "[… 43 lines] ⌃a view all"], true],
+        [["Would you like to run the following command?", "$ rm -rf build"], true],
+        [['Do you want to approve network access to "example.com"?', "Reason: fetch"], true],
+        [["Would you like to run the following command?", "$ cat <<'TXT'", "Would you like to run the following command?", "$ echo looks like a header", "TXT"], true],
+        [["rm -rf project", "Would you like to run the following command?", "Do you want to proceed?"], false],
+        [["rm -rf project", "Do you want to proceed?"], false],
+      ]),
+    JSON.stringify(titled.map((d) => d && [d.question, d.complete])),
+  );
+  const [plainCat, rmCat] = [readDialog(heredoc("")), readDialog(heredoc("rm -rf project; "))];
+  check("선택 창 읽기: 본문에 제목 줄이 있어도 그 위 명령만 다른 두 codex 창은 다름 (리뷰 R1)", !!rmCat?.question.includes("$ rm -rf project; cat <<'TXT'") && !sameDialog(plainCat, rmCat), JSON.stringify(rmCat?.question));
+  // claude 안내("Enter to confirm · Esc to cancel")는 codex 안내가 아니다: 본문에 codex 제목 글이 있어도 위가 잘렸으면 답하지 않고,
+  // 그 위 명령만 다른 두 창을 같게 보지 않는다 (재리뷰 R1)
+  const [claudeLs, claudeRm] = [readDialog(claudeTitled("ls")), readDialog(claudeTitled("rm -rf project"))];
+  check("선택 창 읽기: claude 안내(Enter to confirm · Esc to cancel)인 창은 본문에 codex 제목 글이 있어도 위가 잘렸으면 답하지 않음 (재리뷰 R1)", claudeLs?.complete === false && claudeRm?.complete === false && !sameDialog(claudeLs, claudeRm), JSON.stringify([claudeLs, claudeRm]));
   // 질문이 길어도 줄 수를 자르지 않아 위쪽 명령만 다른 두 선택 창은 다르다 (리뷰 R2)
   const long = (cmd: string) => ["────────", " Bash command", `   ${cmd}`, ...Array.from({ length: 8 }, (_, i) => ` Details ${i}`), " Do you want to proceed?", " ❯ 1. Yes", "   2. No"];
   const [harmless, harmful] = [readDialog(long("echo harmless")), readDialog(long("rm -rf project"))];
