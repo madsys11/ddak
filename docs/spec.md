@@ -431,7 +431,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   - 프론트는 자리표시자를 바꾸지 않고 값(`vars`: session, prompt)을 `pty_spawn`에 넘긴다 (`workspaceState.ts` commandOf).
 - 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt {prompt}`, 권한 확인 훅 `--settings`, 복원은
   `--resume {session}`)
-  + codex(`-s read-only`, `-c developer_instructions={prompt:toml}`, readOnly, 복원은 `resume --last`와 같은 옵션), `shell` = 셸 하나.
+  + codex(`-s read-only`, `-c developer_instructions={prompt:toml}`, `-c check_for_update_on_startup=false`, readOnly, 복원은
+  `resume --last`와 같은 옵션), `shell` = 셸 하나. codex 업데이트 안내를 끄는 이유: 안내에서 업데이트하면 codex가 끝나고, 그
+  창에서 손으로 다시 띄우면 ddak이 준 인자(채팅 주소 등)가 빠진다. 업데이트는 ddak 밖에서 (`brew upgrade --cask codex`).
   `dev-review`의 `rules`는 작업그룹 협업 규약 (아래), 세션의 `role`은 역할별 설명. 문구는 `groups.rs`의 상수(`RULES`,
   `DEV_ROLE`, `REVIEWER_ROLE`)를 기본 설정을 만들 때 넣는다.
   이미 있는 `groups.json`과 저장된 탭은 바뀌지 않는다 (저장된 탭은 저장할 때의 인자와 프롬프트로 복원된다).

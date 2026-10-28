@@ -79,6 +79,8 @@ fn default_shift_enter_for() -> HashMap<String, String> {
 // 채팅방: claude는 --mcp-config(JSON 문자열)와 --allowedTools mcp__ddak(묻지 않고 그 서버의 도구를 씀), codex는
 // mcp_servers.ddak.url과 default_tools_approval_mode="approve" (없으면 도구마다 승인을 요구한다). 두 옵션 모두 값을
 // 여럿 받으므로 바로 뒤에 다른 옵션을 둔다 (docs/reviews/2026-10-24-chat-mcp-experiment.md).
+// codex 업데이트 안내는 끈다 (check_for_update_on_startup=false): 안내에서 업데이트하면 codex가 끝나고, 그 창에서 손으로 다시
+// 띄우면 위 인자(채팅 주소 등)가 빠져 채팅 도구가 없다 (2026-10-28). 업데이트는 ddak 밖에서 (brew upgrade --cask codex).
 // 규약·역할 문구는 아래 상수를 TEMPLATE의 @RULES@·@DEV_ROLE@·@REVIEWER_ROLE@ 자리에 JSON 문자열로 넣는다 (default_config).
 // 인자에서는 {prompt}(claude)·{prompt:toml}(codex의 TOML 값)으로 쓴다.
 const TEMPLATE: &str = r#"{
@@ -102,8 +104,8 @@ const TEMPLATE: &str = r#"{
           "name": "reviewer",
           "role": @REVIEWER_ROLE@,
           "command": "codex",
-          "args": ["-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}"],
-          "resume": ["resume", "--last", "-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}"],
+          "args": ["-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}", "-c", "check_for_update_on_startup=false"],
+          "resume": ["resume", "--last", "-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}", "-c", "check_for_update_on_startup=false"],
           "readOnly": true,
           "shiftEnter": "\u001b\r"
         }
@@ -230,6 +232,8 @@ mod tests {
         }
         for args in [&reviewer.args, reviewer.resume.as_ref().unwrap()] {
             assert!(args.contains(&"developer_instructions={prompt:toml}".to_string()));
+            // codex 업데이트 안내 끄기: 안내에서 업데이트하면 codex가 끝나 채팅 주소 없이 다시 띄우게 된다
+            assert!(args.windows(2).any(|w| w == ["-c", "check_for_update_on_startup=false"]), "{args:?}");
         }
         assert!(["@RULES@", "@DEV_ROLE@", "@REVIEWER_ROLE@"].iter().all(|p| !default_config().contains(p)), "자리표시자가 남음");
         // 코드뿐 아니라 계획·설계 문서도 사용자 승인 전에 리뷰를 받는다 (규약 7번, 리뷰어는 계획을 보는 기준)
