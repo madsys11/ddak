@@ -139,8 +139,10 @@ function App() {
     }
   }
 
+  // 새 프로젝트도 여기서: 폴더 선택 창의 "새 폴더" 버튼으로 만든다. 플러그인(desktop.rs)·rfd 폴더 선택의 기본값도 켜짐이지만
+  // 이 창이 그 버튼에 기대므로 밝혀 둔다
   async function pickProject() {
-    const picked = await open({ directory: true });
+    const picked = await open({ directory: true, canCreateDirectories: true });
     if (typeof picked === "string") await addProject(picked);
   }
 

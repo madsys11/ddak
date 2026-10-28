@@ -403,6 +403,7 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 
 ### 프로젝트 · 저장소
 
+- 추가: macOS 폴더 선택 창으로 고른다. 창에 "새 폴더" 버튼이 있어 새 프로젝트 폴더도 거기서 만든다 (`canCreateDirectories`).
 - 목록은 앱 데이터의 `projects.json` (`projects.rs`). 프론트가 내용을 정하고 Rust는 읽고 쓰기만 한다.
   파일을 못 읽으면 저장하지 않는다 (빈 목록으로 덮어쓰지 않게). `DDAK_DATA_DIR`로 앱 데이터 폴더를 바꾼다.
 - 프로젝트마다 Workspace(탭·분할)가 따로 있다. 처음 열 때 만들고 다른 프로젝트로 가면 숨기기만 한다 (셸 유지).
