@@ -172,6 +172,7 @@ portable-pty 0.9의 ConPTY는 `CreateProcessW`를 `CREATE_SUSPENDED` 없이 부�
 ### 3단계: 배포
 
 기존 "배포 계획 2단계"(updater, GitHub Releases)에 Windows 설치 파일을 더한다. 코드 서명은 그때 정한다.
+지금은 사용자 혼자 쓰므로 미룬다 (2026-10-28 사용자 결정). 그때까지 설치는 Windows CI 산출물(NSIS, 서명 없음)로 한다.
 
 ## 진행 (2026-10-28)
 
@@ -206,10 +207,13 @@ portable-pty 0.9의 ConPTY는 `CreateProcessW`를 `CREATE_SUSPENDED` 없이 부�
   - Tauri IPC 처리기가 끌어 놓기 메시지("ddak-drop:…")를 받아도 문제없는지.
   - claude가 신뢰 키를 어느 꼴로 적는지.
   - claude·codex의 Windows판 상태 알림(OSC 7501)과 깨우기.
+  - 화면 배율: `src/zoom.ts`는 WKWebView처럼 배율이 devicePixelRatio를 바꾸지 않는다고 보고 (실제 값 × 배율)을 돌려준다.
+    WebView2(Chromium)의 ZoomFactor가 devicePixelRatio를 이미 바꾼다면 배율이 두 번 곱해져 1배가 아닐 때 터미널이 번진다.
+    1배가 아닌 배율에서 `window.devicePixelRatio`와 글자가 선명한지 본다.
 - Windows에서 빠진 시험: worktrees의 경합 시험 2개(.sh git 래퍼로 순서를 정함)와 HEAD를 읽지 못할 때 시험(chmod 000)은 유닉스에서만
   돈다. 지키는 동작은 Windows에도 필요하므로 Windows에서 끼어드는 방법(.cmd 래퍼, icacls 등)으로 보완한다.
 - 확인: Windows CI 통과, 사용자의 PC에서 1·2단계 끝 조건.
-- 3단계 (배포): 코드 서명, updater. 사용자 결정이 필요하다.
+- 3단계 (배포): 코드 서명, updater. 다른 사람도 쓰게 될 때 한다 (지금은 미룸).
 
 ## 위험
 
