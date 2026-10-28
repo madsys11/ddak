@@ -278,6 +278,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   - OSC 8 링크(`ls --hyperlink` 등)도 같은 방식으로 연다 (xterm 기본 처리는 http만 받고 confirm·window.open이라 앱에서
     열리지 않았다).
 - 배율: WKWebView는 배율에 devicePixelRatio를 바꾸지 않아서 `src/zoom.ts`가 (실제 값 × 배율)을 돌려준다.
+  xterm은 캔버스 CSS 크기를 정수 px로 반올림해서, 비율이 정수가 아니거나 캔버스 픽셀이 나누어떨어지지 않으면 1~2픽셀
+  늘어나 번졌다. `alignToPixels`가 CSS 크기를 소수 그대로 두고 위치를 화면 픽셀 경계로 옮긴다 (devicePixelContentBoxSize가
+  있는 Chromium은 xterm이 스스로 고치므로 하지 않음). 자체 테스트가 0.5~2배 모든 단계를 본다.
   `.xterm-viewport` 배경은 `--terminal-bg`로 덮는다 (`xterm.css`가 `#000`으로 고정).
 
 ### 탭 · 분할 · 단축키

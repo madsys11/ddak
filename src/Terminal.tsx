@@ -16,6 +16,7 @@ import { THEMES } from "./themes";
 import { TerminalSearch } from "./TerminalSearch";
 import { linkProvider, oscLinkHandler } from "./terminalLinks";
 import { IS_WINDOWS, cmdKey, otherKey } from "./platform";
+import { alignToPixels } from "./zoom";
 
 // xterm이 따로 보내지 않는 키 조합을 셸·CLI가 아는 입력으로 바꾼다.
 // - ⌘⌫ → Ctrl+U (커서 앞 지우기, zsh는 줄 전체). VS Code 터미널과 같은 값.
@@ -417,6 +418,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     // 숨은 탭에서는 크기가 0이라 fit이 아무것도 하지 않고, 다시 보일 때 맞춰진다.
     const observer = new ResizeObserver(() => fit.fit());
     observer.observe(el);
+    const unalign = alignToPixels(term.element!.querySelector<HTMLElement>(".xterm-screen")!);
 
     return () => {
       disposed = true;
@@ -427,6 +429,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       el.removeEventListener("dragover", onDragOver);
       el.removeEventListener("drop", onDrop);
       observer.disconnect();
+      unalign();
       input.dispose();
       programStatus.dispose();
       links.dispose();

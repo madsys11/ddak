@@ -28,6 +28,7 @@ import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
 import { screenPixelRatio } from "./zoom";
+import { ZOOM_LEVELS } from "./prefs";
 
 const log: string[] = [];
 let failed = false;
@@ -1064,12 +1065,17 @@ async function testZoom(term: Terminal) {
     () => check("배율: 확대하면 터미널 글자도 커짐 (칸 수 줄어듦)", true, `${term.cols} < ${cols}`),
     (e) => check("배율: 확대하면 터미널 글자도 커짐 (칸 수 줄어듦)", false, String(e)),
   );
-  // 번짐 방지: 터미널 캔버스 해상도가 (CSS 크기 × 배율 × 화면 픽셀 비율)이어야 늘어나지 않고 그려진다.
+  // 번짐 방지: 화면에 보이는 터미널 캔버스의 크기(CSS 크기 × 배율 × 화면 픽셀 비율)가 캔버스 픽셀 수와 똑같고, 위치가 화면
+  // 픽셀 경계에 있어야 늘어나거나 밀리지 않고 그려진다 (src/zoom.ts alignToPixels. 전에는 1~2픽셀 어긋나도 통과시켰다).
   const sharp = () => {
     const canvas = term.element!.querySelector<HTMLCanvasElement>(".xterm-screen > canvas:not(.xterm-link-layer)");
     if (!canvas) return "WebGL 캔버스 없음";
-    const want = canvas.getBoundingClientRect().width * Number(localStorage.getItem("ddak.zoom") ?? 1) * screenPixelRatio();
-    return Math.abs(canvas.width - want) <= 2 ? "" : `canvas ${canvas.width}px, want ${Math.round(want)}px`;
+    const k = Number(localStorage.getItem("ddak.zoom") ?? 1) * screenPixelRatio();
+    const r = canvas.getBoundingClientRect();
+    const off = (x: number) => Math.abs(x - Math.round(x)) > 0.02;
+    const bad = Math.abs(r.width * k - canvas.width) > 0.02 || Math.abs(r.height * k - canvas.height) > 0.02 || off(r.left * k) || off(r.top * k);
+    const f = (x: number) => (x * k).toFixed(2);
+    return bad ? `canvas ${canvas.width}x${canvas.height}, shown ${f(r.width)}x${f(r.height)} at ${f(r.left)},${f(r.top)}` : "";
   };
   await waitFor("캔버스 해상도", () => sharp() === "", 3000).then(
     () => check("배율: 터미널 캔버스가 배율만큼 높은 해상도로 그려짐 (번지지 않음)", true),
@@ -1112,6 +1118,13 @@ async function testZoom(term: Terminal) {
     () => check("배율: 최소 0.5배에서 멈춤", localStorage.getItem("ddak.zoom") === "0.5"),
     (e) => check("배율: 최소 0.5배에서 멈춤", false, `${String(e)} ${localStorage.getItem("ddak.zoom")}`),
   );
+  // 모든 배율에서 화면 픽셀에 맞음 (배율이 정수가 아니면 xterm이 반올림한 CSS 크기 때문에 어긋났다)
+  const blurry: string[] = [];
+  for (const z of ZOOM_LEVELS) {
+    if (z > 0.5) await clickMenu("View", "Zoom In");
+    await waitFor(`${z}배`, () => zoomed(z) && sharp() === "", 3000).catch(() => blurry.push(`${z}: ${localStorage.getItem("ddak.zoom")} ${sharp()}`));
+  }
+  check("배율: 0.5~2배 모든 단계에서 캔버스가 화면 픽셀에 맞음 (번지지 않음)", blurry.length === 0, blurry.join(" | "));
 
   await clickMenu("View", "Actual Size");
   await waitFor("원래 크기", () => zoomed(1) && term.cols === cols, 3000).then(

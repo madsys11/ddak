@@ -42,3 +42,53 @@ function watchScreen() {
 export function setZoomFactor(zoom: number) {
   factor = zoom;
 }
+
+// 터미널 캔버스를 화면 픽셀에 맞춘다.
+// xterm의 WebGL 렌더러는 캔버스의 CSS 크기를 (캔버스 픽셀 ÷ devicePixelRatio)를 반올림한 정수 px로 둔다. 비율이 정수가
+// 아니거나(배율) 캔버스 픽셀이 비율로 나누어떨어지지 않으면(칸 수) 화면에 보이는 크기가 캔버스 픽셀 수와 1~2픽셀 달라
+// 늘어나서 번진다 (2026-10-28 측정, 레티나: 0.5배만 늘 맞고, 1배는 칸 수가 짝수일 때만, 나머지 배율은 대부분 어긋남).
+// Chromium은 ResizeObserver의 devicePixelContentBoxSize로 xterm이 스스로 고치지만 WebKit에는 그 API가 없다.
+// 그래서 CSS 크기를 나누어떨어지는 소수 그대로 두고, 화면 픽셀 경계에 오도록 위치도 소수점만큼 옮긴다.
+// screen: `.xterm-screen`. 돌려주는 함수로 멈춘다.
+export function alignToPixels(screen: HTMLElement): () => void {
+  if (typeof ResizeObserverEntry !== "undefined" && "devicePixelContentBoxSize" in ResizeObserverEntry.prototype) return () => {};
+  let shift = { x: 0, y: 0 };
+  let frame = 0;
+  const align = () => {
+    frame = 0;
+    if (!screen.isConnected) return;
+    const k = window.devicePixelRatio;
+    for (const canvas of screen.querySelectorAll("canvas")) {
+      const [w, h] = [canvas.width / k, canvas.height / k];
+      if (Math.abs(parseFloat(canvas.style.width) - w) > 0.001) canvas.style.width = `${w}px`;
+      if (Math.abs(parseFloat(canvas.style.height) - h) > 0.001) canvas.style.height = `${h}px`;
+    }
+    // 옮기기 전 위치 (지금 옮겨 둔 만큼 뺀다)
+    const r = screen.getBoundingClientRect();
+    const [left, top] = [r.left - shift.x, r.top - shift.y];
+    const next = { x: (Math.round(left * k) - left * k) / k, y: (Math.round(top * k) - top * k) / k };
+    if (Math.abs(next.x - shift.x) > 0.001 || Math.abs(next.y - shift.y) > 0.001) {
+      shift = next;
+      screen.style.transform = next.x || next.y ? `translate(${next.x}px, ${next.y}px)` : "";
+    }
+  };
+  const schedule = () => {
+    if (!frame) frame = requestAnimationFrame(align);
+  };
+  // xterm이 캔버스 크기를 바꿀 때(칸 수·배율), 캔버스를 새로 만들 때, 터미널 자리가 바뀔 때.
+  // 여기서 옮긴 screen 자신의 style 변경만 뺀다 (캔버스가 붙는 childList는 target이 screen이어도 받는다, 리뷰 R1)
+  const mutations = new MutationObserver((records) => {
+    if (records.some((r) => !(r.type === "attributes" && r.target === screen))) schedule();
+  });
+  mutations.observe(screen, { subtree: true, childList: true, attributes: true, attributeFilter: ["style", "width", "height"] });
+  const resizes = new ResizeObserver(schedule);
+  resizes.observe(screen.parentElement ?? screen);
+  window.addEventListener("resize", schedule);
+  schedule();
+  return () => {
+    cancelAnimationFrame(frame);
+    mutations.disconnect();
+    resizes.disconnect();
+    window.removeEventListener("resize", schedule);
+  };
+}
