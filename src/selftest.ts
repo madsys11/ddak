@@ -31,6 +31,7 @@ import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
 import { screenPixelRatio, setZoomFactor } from "./zoom";
+import { MONO_FONT, monoFaces } from "./monoFont";
 import { ZOOM_LEVELS } from "./prefs";
 
 const log: string[] = [];
@@ -1225,6 +1226,35 @@ async function testMobile(root: string) {
   await waitFor("창 닫힘", () => !dialog(), 3000).catch(() => null);
   // 뒤 단계(채팅 패널)는 방이 비어 있다고 본다 (첫 메시지가 세션의 것)
   await invoke("chat_clear", { project: root });
+}
+
+// 고정폭 글꼴 (src/monoFont.ts): 앱이 넣은 D2Coding 두 면(400·700)이 불러와졌는지 그 FontFace를 직접 본다
+// (document.fonts.check는 맞는 면이 없어도 true라 쓸 수 없다, 리뷰 R4). 그리고 xterm이 그 글꼴로 칸 폭을 쟀는지:
+// xterm은 "W" 폭에 화면 비율을 곱해 내린 값을 칸 폭으로 쓴다 (floor(w·dpr)/dpr). D2Coding은 0.5em(13px에서 6.5px)이라
+// Menlo(약 7.8)·Consolas(약 7.15)와 갈린다. 한글은 영문 두 칸 폭이어야 터미널 칸에 맞는다 (보통·굵게 각각).
+async function testTerminalFont(term: Terminal) {
+  const faces = monoFaces.map((f) => `${f.weight}:${f.status}:${document.fonts.has(f)}`);
+  check("글꼴: 앱이 넣은 D2Coding 보통·굵게를 불러옴", monoFaces.every((f) => f.status === "loaded" && document.fonts.has(f)), faces.join(" "));
+  const ctx = document.createElement("canvas").getContext("2d")!;
+  const width = (text: string, weight: string, family = MONO_FONT) => {
+    ctx.font = `${weight} ${term.options.fontSize}px ${family}`;
+    return ctx.measureText(text).width;
+  };
+  const dpr = window.devicePixelRatio;
+  const cell = (term as unknown as { _core: { _renderService: { dimensions: { css: { cell: { width: number } } } } } })._core._renderService.dimensions.css.cell.width;
+  const w = width("W", "400");
+  const expected = Math.floor(w * dpr) / dpr;
+  check(
+    "글꼴: 터미널 칸 폭이 D2Coding 폭",
+    Math.abs(cell - expected) < 0.01 && Math.abs(w - term.options.fontSize! / 2) < 0.01,
+    `cell=${cell} expected=${expected} W=${w} dpr=${dpr} fallback=${width("W", "400", "Menlo, monospace")}`,
+  );
+  const sizes = ["400", "700"].map((weight) => [width("W", weight), width("한", weight)]);
+  check(
+    "글꼴: 한글은 영문 두 칸 폭 (보통·굵게)",
+    sizes.every(([en, ko]) => Math.abs(en - w) < 0.01 && Math.abs(ko - 2 * w) < 0.01),
+    JSON.stringify(sizes),
+  );
 }
 
 // 터미널 글자 대비 (Terminal.tsx MIN_CONTRAST): Solarized Light의 brightCyan(#93A1A1)은 배경 대비 2.5:1이라 흐렸다.
@@ -5074,6 +5104,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["zoom", () => testZoom(t())],
     ["zoomIme", () => testZoomIme(t())],
     ["terminalContrast", () => testTerminalContrast(t())],
+    ["terminalFont", () => testTerminalFont(t())],
     ["claude", () => testClaude(t())],
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
     ["terminalSearch", () => testTerminalSearch(t())],

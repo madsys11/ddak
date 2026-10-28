@@ -4,12 +4,14 @@ import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import { refuseOutsideDrops } from "./dragPath";
 import { PrefsProvider } from "./prefs";
+import { loadMonoFont } from "./monoFont";
 
 async function main() {
   const selftest = import.meta.env.DEV ? await invoke<{ root: string; scenario: string; only: string[] } | null>("selftest_config") : null;
   // 지난 자체 테스트가 중간에 멈췄어도 기본 언어·테마·배율·패널·알림 소리로 시작한다.
   if (selftest) for (const key of ["ddak.locale", "ddak.theme", "ddak.zoom", "ddak.sidebar", "ddak.sidebarWidth", "ddak.chatWidth", "ddak.notifySound"]) localStorage.removeItem(key);
   refuseOutsideDrops();
+  await loadMonoFont();
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       {/* 자체 테스트의 프로젝트 목록은 scripts/selftest.sh가 DDAK_DATA_DIR로 따로 둔다. */}

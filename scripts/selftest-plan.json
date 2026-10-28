@@ -8,7 +8,7 @@
   },
   "depsWhy": "groupWorktree는 repos가 넣은 저장소에, groupClone·groupEnd는 groupWorktree의 작업그룹 폴더·준비 스크립트에, gitGraph는 groupEnd가 만든 커밋과 그때까지의 작업그룹 번호(test-6)에 기댄다. 나머지 단계는 기본 단계(projectStart, terminalReady)만으로 혼자 돈다.",
   "ignore": {
-    "why": "자체 테스트가 쓰지 않는 파일: 문서, 아이콘, 편집기 설정, 폰 배포(GitHub Pages)·PWA 아이콘·매니페스트(서비스 워커 sw.js는 mobilePushUnit이 실행한다), 설치 스크립트(scripts/test-install.sh로 따로), 폰 빌드 설정(npm run build:mobile로 따로), Windows에서만 컴파일하는 conpty.rs·windrop.rs·winkeys.rs (Windows CI의 cargo test·실기기로 확인)",
+    "why": "자체 테스트가 쓰지 않는 파일: 문서(글꼴 라이선스 OFL.txt 포함), 아이콘, 편집기 설정, 폰 배포(GitHub Pages)·PWA 아이콘·매니페스트(서비스 워커 sw.js는 mobilePushUnit이 실행한다), 설치 스크립트(scripts/test-install.sh로 따로), 폰 빌드 설정(npm run build:mobile로 따로), Windows에서만 컴파일하는 conpty.rs·windrop.rs·winkeys.rs (Windows CI의 cargo test·실기기로 확인)",
     "files": [
       "docs/**",
       "README.md",
@@ -26,7 +26,8 @@
       "vite.mobile.config.ts",
       "src-tauri/src/conpty.rs",
       "src-tauri/src/windrop.rs",
-      "src-tauri/src/winkeys.rs"
+      "src-tauri/src/winkeys.rs",
+      "src/assets/fonts/OFL.txt"
     ]
   },
   "full": {
@@ -46,6 +47,8 @@
       "src/App.css",
       "src/Workspace.tsx",
       "src/Terminal.tsx",
+      "src/monoFont.ts",
+      "src/assets/fonts/*.ttf",
       "src/workspaceState.ts",
       "src/ContextMenu.tsx",
       "src/icons.tsx",

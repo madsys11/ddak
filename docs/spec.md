@@ -514,6 +514,11 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   터미널은 글자색이 배경 대비 4.5:1보다 낮으면 그릴 때 진하게 한다 (xterm `minimumContrastRatio`, VS Code 기본값과 같음.
   `Terminal.tsx` MIN_CONTRAST). Solarized Light는 기본 글자 4.1:1, 강조색 3:1 안팎이라 흐렸다. 흐린 글자(SGR 2)는 보통 글자와
   구분되게 절반(2.25:1)까지만 올리고, 블록·상자 문자는 xterm이 빼고 보정하지 않는다. 자체 테스트 `terminalContrast`가 그려진 픽셀로 본다.
+- 고정폭 글꼴: D2Coding (VER1.4.0, SIL OFL 1.1). 터미널과 화면의 고정폭 글자(`--mono-font`)가 쓴다. 맥·Windows 모양을 같게 하려고
+  앱에 넣는다 (`src/assets/fonts/` TTF 8.4MB. 앱 안에서 압축되어 Windows 실행 파일 +3.7MB, 설치 파일 +3.6MB). 배포된 원본 TTF 그대로다: 저작권·라이선스가 파일 메타데이터에 있고, 형식을
+  바꾸거나 일부만 넣으면 OFL 예약 이름 때문에 따질 것이 생긴다. `src/monoFont.ts`가 첫 화면 전에 보통·굵게를 불러온다
+  (xterm은 터미널을 열 때 글자 폭을 잰다. 개발 빌드에서 약 70ms). 못 불러오면 Menlo·시스템 고정폭으로 뜬다.
+  화면 UI 글꼴과 폰 화면은 그대로다. 자체 테스트 `terminalFont`가 앱이 넣은 면을 불러왔는지와 칸 폭·한글 두 칸을 본다.
 - 배율: 보기 메뉴 ⌘= / ⌘- / ⌘0, 0.5~2배 (`prefs.tsx`의 `ZOOM_LEVELS`), 웹뷰 `setZoom`.
 - 패널 크기: 파일 트리(사이드바) 오른쪽 끝과 채팅 패널 왼쪽 끝을 끌어 가로 크기를 바꾼다 (`Resizer.tsx`). 파일 트리
   160~600(기본 260), 채팅 240~720(기본 340)으로 자른다. 끄는 막대를 더블클릭하면 그 패널만 기본값, 보기 메뉴

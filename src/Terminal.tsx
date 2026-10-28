@@ -17,6 +17,7 @@ import { TerminalSearch } from "./TerminalSearch";
 import { linkProvider, oscLinkHandler } from "./terminalLinks";
 import { IS_WINDOWS, cmdKey, otherKey } from "./platform";
 import { alignToPixels } from "./zoom";
+import { MONO_FONT } from "./monoFont";
 
 // xterm이 따로 보내지 않는 키 조합을 셸·CLI가 아는 입력으로 바꾼다.
 // - ⌘⌫ → Ctrl+U (커서 앞 지우기, zsh는 줄 전체). VS Code 터미널과 같은 값.
@@ -110,7 +111,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     const term = new XTerm({
       allowProposedApi: true, // unicode11 애드온에 필요
       cursorBlink: true,
-      fontFamily: "Menlo, monospace",
+      fontFamily: MONO_FONT,
       fontSize: 13,
       macOptionIsMeta: true,
       // 글자색이 배경 대비 이보다 낮으면 그릴 때 진하게 한다 (VS Code 터미널 기본값). Solarized Light는 기본 글자가 4.1:1,

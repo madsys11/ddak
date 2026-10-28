@@ -1,5 +1,5 @@
 :root {
-  /* 색은 src/themes.ts가 정한다 */
+  /* 색은 src/themes.ts가 정한다. 고정폭 글꼴(--mono-font)은 src/monoFont.ts */
   font-family: -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 13px;
   color: var(--fg);
@@ -528,7 +528,7 @@ button.secondary {
   color: var(--fg-dim);
 }
 .check-name code {
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 12px;
 }
 .check-hint {
@@ -638,7 +638,7 @@ button.secondary {
   gap: 6px;
 }
 .end-row code {
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 12px;
 }
 .end-state {
@@ -686,7 +686,7 @@ button.secondary {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 50%;
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 12px;
   opacity: 0.8;
 }
@@ -828,7 +828,7 @@ button.secondary {
 .prompt-question {
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 11px;
   padding: 4px 6px;
   border-radius: 4px;
@@ -1110,7 +1110,7 @@ button.secondary {
 .git-sha {
   flex: none;
   color: var(--fg-dim);
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 11px;
 }
 .git-ref {
@@ -1148,7 +1148,7 @@ button.secondary {
   border-left: 1px solid var(--border);
 }
 .git-detail-sha {
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 11px;
   word-break: break-all;
 }
@@ -1160,7 +1160,7 @@ button.secondary {
 .git-parent {
   margin-right: 4px;
   padding: 0 4px;
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 11px;
 }
 .git-message {
@@ -1183,7 +1183,7 @@ button.secondary {
 .git-status {
   flex: none;
   width: 12px;
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   color: var(--fg-dim);
 }
 .git-status.s-A {
@@ -1399,7 +1399,7 @@ body.resizing {
   cursor: pointer;
 }
 .doc-body code {
-  font-family: Menlo, monospace;
+  font-family: var(--mono-font);
   font-size: 0.9em;
   padding: 0.1em 0.3em;
   border-radius: 4px;
