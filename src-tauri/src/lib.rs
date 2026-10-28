@@ -24,6 +24,8 @@ mod setup;
 mod watch;
 #[cfg(windows)]
 mod windrop;
+#[cfg(windows)]
+mod winkeys;
 mod workspace;
 mod worktrees;
 
@@ -81,6 +83,7 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window("main") {
                 windrop::install(&window);
+                winkeys::install(&window, app.handle().clone());
             }
             Ok(())
         })

@@ -186,8 +186,9 @@ portable-pty 0.9의 ConPTY는 `CreateProcessW`를 `CREATE_SUSPENDED` 없이 부�
   `AssocIsDangerous`), Git Bash 경로(`/c/…`) 링크, 심볼릭 링크, 메모장으로 설정 열기, 컴퓨터 이름, HOME 대신 USERPROFILE,
   claude 신뢰 키에 `/` 꼴도.
 - 1단계 화면: Ctrl 단축키(`platform.ts` cmdKey), 문구의 키 표시(⌘ → Ctrl), 터미널 Ctrl+C(선택 있을 때 복사)·Ctrl+V, Ctrl+클릭 링크,
-  `\`·드라이브·UNC 경로(문서 탭, 끌기의 상대 경로, 탭 폴더), Windows 메뉴(편집 메뉴 없음: 메뉴 단축키가 웹뷰보다 먼저 잡혀 Ctrl+C를
-  가로챈다. 맥 전용 항목 없음).
+  `\`·드라이브·UNC 경로(문서 탭, 끌기의 상대 경로, 탭 폴더), Windows 메뉴(편집 메뉴·맥 전용 항목 없음),
+  메뉴 단축키(`winkeys.rs`: 웹뷰에 포커스가 있으면 Tauri의 메뉴 단축키 처리에 키가 오지 않아 WebView2 AcceleratorKeyPressed에서
+  메뉴 단축키 표로 실행).
 - 2단계 일부: 준비 도우미(Git Bash로 스크립트·설치 명령, `Scripts\python.exe`), 폴더 복제 후보는 Windows에서 내지 않음.
 
 - 코드 리뷰 통과 (`docs/reviews/2026-10-28-windows-code.md`). 그 뒤:

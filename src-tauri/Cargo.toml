@@ -62,7 +62,7 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 getrandom = "0.3"
 # 이름 바꾸기·휴지통·Job Object·잠자기 막기 등 (docs/windows-plan.md)
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Power", "Win32_System_IO", "Win32_Security", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Console", "Win32_System_Pipes", "Wdk_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Power", "Win32_System_IO", "Win32_Security", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Com", "Win32_System_Console", "Win32_System_Pipes", "Wdk_Storage_FileSystem"] }
 # conpty.rs가 portable-pty의 MasterPty를 구현한다 (그 오류 형식)
 anyhow = "1"
 # 토스트 알림 (notify.rs). tauri가 이미 쓰는 판

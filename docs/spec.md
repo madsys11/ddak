@@ -563,6 +563,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
     닫기는 Job을 끝내고 남은 프로세스 수가 0일 때 끝난 것으로 본다).
   - Windows 메뉴에는 편집 메뉴와 맥 전용 항목(서비스·가리기·전체 화면·알림 소리)이 없다. 터미널은 Ctrl+C를 선택이 있을 때만
     복사로, Ctrl+V를 붙여넣기로 쓴다.
+  - 메뉴 단축키: 웹뷰에 포커스가 있으면 키가 WebView2로 가서 Tauri의 메뉴 단축키 처리(메시지 루프)에 오지 않는다.
+    `winkeys.rs`가 WebView2의 AcceleratorKeyPressed에서 메뉴 단축키 표(`menu.rs` shortcuts)와 맞으면 페이지에 넘기지 않고
+    그 메뉴 항목을 실행한다.
   - Windows CI: `.github/workflows/windows.yml` (main·수동, cargo test와 NSIS 설치 파일).
   - 알림은 토스트 (누르면 그 프로젝트로, 소리는 Windows 기본), 배지는 작업 표시줄 단추의 빨간 점이다. 탐색기에서 끌어 놓은
     파일의 경로는 WebView2가 준다 (`windrop.rs`). 뒤에서 돌리는 git·tailscale은 콘솔 창 없이 띄운다.
