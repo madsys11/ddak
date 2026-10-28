@@ -1170,7 +1170,7 @@ button.secondary {
   color: var(--fg-dim);
 }
 .git-status.s-A {
-  color: var(--graph-3);
+  color: var(--git-added);
 }
 .git-status.s-D {
   color: var(--error);

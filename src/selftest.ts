@@ -519,6 +519,15 @@ async function testPrefs() {
 
   await clickMenu("보기", "언어", "English");
   await waitMenu((m) => m.includes("View/")); // 메뉴가 영어로 다시 만들어진 뒤에 누른다
+  await clickMenu("View", "Theme", "Light");
+  await waitFor("라이트 테마", () => document.documentElement.dataset.theme === "light");
+  await waitFor("터미널 라이트", () => termBg("#FFFFFF"), 3000).catch(() => {});
+  const lMenu = await waitMenu((m) => m.includes("View/Theme/Light [x]"));
+  check(
+    "테마: Light(VS Code Light Modern) 화면·사이드바·터미널 색과 메뉴 체크",
+    bg("html") === "rgb(255, 255, 255)" && bg(".sidebar") === "rgb(248, 248, 248)" && termBg("#FFFFFF") && lMenu.includes("View/Theme/Light [x]") && !lMenu.includes("View/Theme/Solarized Light [x]"),
+    `${bg("html")} / ${bg(".sidebar")} / ${lMenu.filter((x) => x.startsWith("View/Theme/")).join(", ")}`,
+  );
   await clickMenu("View", "Theme", "Dark");
   await waitFor("기본값 복귀", () => document.documentElement.lang === "en" && document.documentElement.dataset.theme === "dark");
   await waitFor("터미널 다크", () => termBg("#1F1F1F"), 3000).catch(() => {});
@@ -2228,7 +2237,7 @@ function tokenRgb(name: string) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-// 상태 글자의 대비: 모든 테마에서 이름표 배경 위 작은 글자 4.5:1 이상 (WCAG AA, 리뷰 R3)
+// 상태·오류·git 추가 글자의 대비: 모든 테마에서 그 바탕 위 작은 글자 4.5:1 이상 (WCAG AA, 리뷰 R3, 라이트 테마 리뷰 R1)
 function testStatusContrastUnit() {
   const lum = (hex: string) => {
     const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
@@ -2244,10 +2253,15 @@ function testStatusContrastUnit() {
       ["working", ui["--status-working"], ui["--sidebar-bg"]],
       ["done", ui["--status-done"], ui["--sidebar-bg"]],
       ["awaiting", ui["--status-awaiting-fg"], ui["--status-awaiting-bg"]],
+      // 오류 글자(이름표의 오류 상태, 메시지)와 Git Graph 파일 목록의 추가·삭제 글자는 화면·사이드바 바탕 위에 쓴다
+      ...(["--bg", "--sidebar-bg"] as const).flatMap((bg): [string, string, string][] => [
+        [`error on ${bg}`, ui["--error"], ui[bg]],
+        [`git-added on ${bg}`, ui["--git-added"], ui[bg]],
+      ]),
     ];
     return pairs.filter(([, fg, bg]) => ratio(fg, bg) < 4.5).map(([what, fg, bg]) => `${name} ${what} ${ratio(fg, bg).toFixed(2)}`);
   });
-  check("상태 표시: 모든 테마에서 상태 글자 대비 4.5:1 이상", low.length === 0, low.join(" | "));
+  check("상태 표시: 모든 테마에서 상태·오류·git 추가 글자 대비 4.5:1 이상", low.length === 0, low.join(" | "));
 }
 
 // 터미널 링크 후보 (src/terminalLinks.ts findLinks): URL, 경로(줄 번호·문장 부호·조사), 경로가 아닌 것

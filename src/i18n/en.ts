@@ -223,6 +223,7 @@ export const en = {
   "terminal.spawnFailed": "Failed to start terminal: {error}",
 
   "theme.dark": "Dark",
+  "theme.light": "Light",
   "theme.solarizedLight": "Solarized Light",
 
   // 모바일 연결 창 (src/MobileDialog.tsx, src-tauri/src/mobile.rs)

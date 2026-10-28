@@ -490,7 +490,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 
 - 기본 언어 영어. 사전은 `src/i18n/` (`en.ts` 기준, 다른 언어는 `Messages` 타입). 네이티브 메뉴 문구도 같은 사전에서
   프론트가 Rust로 보낸다 (`set_menu`).
-- 테마: 다크(VS Code Dark Modern), Solarized Light. `src/themes.ts` (UI 토큰 + 터미널 색).
+- 테마: 다크(VS Code Dark Modern), 라이트(VS Code Light Modern), Solarized Light. `src/themes.ts` (UI 토큰 + 터미널 색).
+  라이트의 버튼은 다크처럼 색을 채우지 않은 보조 버튼 색이고, 상태 색은 링크·git 추가됨·git 수정됨 색이다.
+  라이트·Solarized의 오류·git 추가 색은 작은 글자 대비 때문에 테마 값보다 진하다.
   Solarized 터미널 선택색만 목록 선택색을 반투명으로 쓴다 (테마 값이 배경과 거의 같다).
 - 배율: 보기 메뉴 ⌘= / ⌘- / ⌘0, 0.5~2배 (`prefs.tsx`의 `ZOOM_LEVELS`), 웹뷰 `setZoom`.
 - 패널 크기: 파일 트리(사이드바) 오른쪽 끝과 채팅 패널 왼쪽 끝을 끌어 가로 크기를 바꾼다 (`Resizer.tsx`). 파일 트리
@@ -675,6 +677,7 @@ ddak 앱
     테두리 칩(깨우기 대기·준비 배지)과 섞이지 않게 상태는 색 점 + 글자다: 작업 중(`--status-working`, 점이 깜빡임), 완료
     (`--status-done`), 오류(`--error`). 기다림만 색을 채운 칩(`--status-awaiting-bg`·`-fg`)이라 가장 눈에 띈다.
     새 상태 색은 모든 테마에서 이름표 배경(칩은 칩 배경) 위 대비 4.5:1 이상 (자체 테스트 statusContrastUnit).
+    오류(`--error`)와 Git Graph 파일 목록의 추가 글자(`--git-added`)도 화면·사이드바 바탕 위 4.5:1 이상을 같은 검사가 본다.
   - 프론트에는 `chat-wake` 이벤트(`{ pty, pending, seq }`)로 알린다. seq는 대기 상태가 바뀔 때마다 잠금 안에서 매기고,
     터미널은 더 오래된 seq를 버린다. 터미널은 이 이벤트의 등록이 끝난 뒤에 띄운다 (등록 전의 상태를 놓치지 않게).
   - 한계: 화면 판단은 claude·codex의 선택 창 모양에 맞췄다. 다른 모양의 창이 상태도 알리지 않으면 깨우기가 끼어들 수 있다.

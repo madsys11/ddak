@@ -223,6 +223,7 @@ export const ko: Messages = {
   "terminal.spawnFailed": "터미널 실행 실패: {error}",
 
   "theme.dark": "다크",
+  "theme.light": "라이트",
   "theme.solarizedLight": "Solarized Light",
 
   // 모바일 연결 창 (src/MobileDialog.tsx, src-tauri/src/mobile.rs)

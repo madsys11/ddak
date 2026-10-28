@@ -35,6 +35,7 @@ const dark: Theme = {
     "--icon-project": "#4DAAFC",
     "--icon-repo": "#E2C08D",
     "--icon-worktree": "#81B88B",
+    "--git-added": "#81B88B", // Git Graph 파일 목록의 추가(A) 글자. gitDecoration.addedResourceForeground
     "--tree-link": "#9D9D9D",
     // Git Graph 레인 (VS Code Git Graph 확장의 기본 색)
     "--graph-1": "#0085D9",
@@ -87,6 +88,81 @@ const dark: Theme = {
   },
 };
 
+const light: Theme = {
+  // Light Modern. 테마 파일에 없는 색(목록 호버·비활성 선택, git 장식, 검색, 선택, ANSI)은 VS Code 라이트 기본값이다.
+  name: "theme.light",
+  scheme: "light",
+  ui: {
+    "--bg": "#FFFFFF",
+    "--sidebar-bg": "#F8F8F8",
+    "--tabbar-bg": "#F8F8F8",
+    "--tab-inactive-bg": "#F8F8F8",
+    "--border": "#E5E5E5",
+    "--fg": "#3B3B3B",
+    "--fg-dim": "#616161", // tab.inactiveForeground (descriptionForeground는 --fg와 같다)
+    "--hover": "#F2F2F2",
+    "--error": "#A1260D", // errorForeground의 VS Code 라이트 기본값. Light Modern의 #F85149는 작은 글자 대비 3.2:1
+    "--accent": "#005FB8",
+    "--accent-dim": "#005FB866",
+    // 다크처럼 색을 채우지 않은 버튼 (button.secondary*)
+    "--button-bg": "#E5E5E5",
+    "--button-fg": "#3B3B3B",
+    "--button-border": "#CECECE",
+    "--button-hover": "#CCCCCC",
+    "--row-active": "#E4E6F1", // list.inactiveSelectionBackground
+    "--icon-project": "#005FB8",
+    "--icon-repo": "#895503",
+    "--icon-worktree": "#587C0C",
+    "--git-added": "#587C0C",
+    "--tree-link": "#616161",
+    "--graph-1": "#0085D9",
+    "--graph-2": "#D9008F",
+    "--graph-3": "#00D90A",
+    "--graph-4": "#D98500",
+    "--graph-5": "#A300D9",
+    "--graph-6": "#FF0000",
+    "--overlay": "#00000033",
+    "--widget-bg": "#F8F8F8",
+    "--qr-fg": "#000000",
+    "--qr-bg": "#FFFFFF",
+    "--input-bg": "#FFFFFF",
+    "--input-border": "#CECECE",
+    "--focus-border": "#005FB8",
+    "--menu-hover-bg": "#005FB8",
+    "--menu-hover-fg": "#FFFFFF",
+    // editor.findMatchHighlightBackground(#EA5C0055)를 흰 배경에 섞은 색, editor.findMatchBackground
+    "--search-match": "#F8C9AA",
+    "--search-match-active": "#A8AC94",
+    // 이름표 배경(--sidebar-bg) 위 대비 4.5:1 이상. 링크·git 추가됨·git 수정됨 색
+    "--status-working": "#005FB8",
+    "--status-done": "#587C0C",
+    "--status-awaiting-bg": "#895503",
+    "--status-awaiting-fg": "#FFFFFF",
+  },
+  terminal: {
+    background: "#FFFFFF",
+    foreground: "#3B3B3B",
+    cursor: "#005FB8",
+    selectionBackground: "#ADD6FF",
+    black: "#000000",
+    red: "#CD3131",
+    green: "#107C10",
+    yellow: "#949800",
+    blue: "#0451A5",
+    magenta: "#BC05BC",
+    cyan: "#0598BC",
+    white: "#555555",
+    brightBlack: "#666666",
+    brightRed: "#F14C4C",
+    brightGreen: "#14CE14",
+    brightYellow: "#B5BA00",
+    brightBlue: "#3B8EEA",
+    brightMagenta: "#D670D6",
+    brightCyan: "#29B8DB",
+    brightWhite: "#A5A5A5",
+  },
+};
+
 const solarizedLight: Theme = {
   name: "theme.solarizedLight",
   scheme: "light",
@@ -99,7 +175,7 @@ const solarizedLight: Theme = {
     "--fg": "#586E75",
     "--fg-dim": "#839496",
     "--hover": "#DFCA8844",
-    "--error": "#DC322F",
+    "--error": "#B02825", // #DC322F는 바탕 위 작은 글자 대비 4.5:1 미만이라 진하게
     "--accent": "#B49471",
     "--accent-dim": "#B4947188",
     "--button-bg": "#AC9D57",
@@ -110,6 +186,7 @@ const solarizedLight: Theme = {
     "--icon-project": "#268BD2",
     "--icon-repo": "#B58900",
     "--icon-worktree": "#859900",
+    "--git-added": "#566300", // #859900은 바탕 위 대비 3:1이라 진하게 (--status-done과 같음)
     "--tree-link": "#93A1A1",
     // Git Graph 레인 (Solarized 강조색)
     "--graph-1": "#268BD2",
@@ -162,7 +239,7 @@ const solarizedLight: Theme = {
 };
 
 // 테마를 추가하려면 여기에 한 줄 넣고 이름 문구를 i18n 사전에 넣는다.
-export const THEMES = { dark, "solarized-light": solarizedLight } satisfies Record<string, Theme>;
+export const THEMES = { dark, light, "solarized-light": solarizedLight } satisfies Record<string, Theme>;
 export type ThemeId = keyof typeof THEMES;
 export const DEFAULT_THEME: ThemeId = "dark";
 export const isThemeId = (v: unknown): v is ThemeId => typeof v === "string" && v in THEMES;
