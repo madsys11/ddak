@@ -149,7 +149,7 @@ export const ko: Messages = {
   "prompt.send": "보내기",
   "prompt.sending": "보내는 중…",
   "prompt.closed": "닫힌 선택 창",
-  "prompt.incomplete": "질문이 화면보다 길어 맥에서 답해야 합니다",
+  "prompt.incomplete": "질문 전체를 읽지 못해 맥에서 답해야 합니다",
   "prompt.error": "보내지 못함: {detail}",
   "prompt.err.closed": "선택 창이 닫혔거나 바뀌었습니다",
   "prompt.err.busy": "이미 답을 보내는 중입니다",

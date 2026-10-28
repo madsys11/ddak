@@ -7,6 +7,8 @@
 // - 화면: OSC 7501을 보내지 않는 선택 창이 있다 (claude의 폴더 신뢰 창). 화면 아래쪽에 선택 창 안내가 보이면 기다린다고 본다
 //   (orca src/main/runtime/claude-open-dialog-hold.ts). 대화에 같은 글이 남아 깨우기가 계속 막히지 않게 DIALOG_CAP 뒤에는 풀린다.
 
+import type { Terminal } from "@xterm/xterm";
+
 export const PROGRAM_STATES = ["idle", "working", "done", "blocked", "error"] as const;
 export const PROGRAM_KINDS = ["permission", "question", "auth"] as const;
 export type ProgramState = (typeof PROGRAM_STATES)[number];
@@ -76,7 +78,10 @@ export function dialogOnScreen(lines: readonly string[]): boolean {
 // 선택지: 1부터 이어지는 번호 줄 (커서 ❯·› 가 하나에 붙음). 긴 선택지가 다음 줄로 넘어가면 이어 붙인다.
 // 질문: 첫 선택지 위로 가로줄(─)이나 빈 줄 셋을 만나기 전까지의 글 전부 (줄 수를 자르지 않는다: 같은 선택 창인지를 질문
 // 전체로 본다. 리뷰 R2: 8줄로 자르니 위쪽 명령만 다른 두 선택 창이 같게 보였다).
-// complete: 그 경계를 화면 안에서 찾았다. 화면 맨 위까지 올라가도 없으면 질문이 화면 밖으로 잘렸을 수 있어 채팅에서는 답하지 않는다.
+// 화면 위로 넘어가면 above(화면 위의 줄, 일반 화면의 스크롤 기록)로 이어 올라간다. start: above의 맨 위가 터미널 내용의
+// 처음이라 그 위에 잘린 것이 없다 (Terminal.tsx dialogNow: 대체 화면에서 지운 뒤로 위로 밀려난 줄이 없을 때만).
+// complete: 그 경계를 찾았거나 처음까지 다 읽었다. 그래도 위가 남았으면 질문이 잘렸을 수 있어 채팅에서는 답하지 않는다
+// (2026-10-28 codex 업데이트 안내: 두 줄 질문이 대체 화면 맨 윗줄부터 그려져 답하지 못했다).
 // codex 선택 창(아래에 "Press … to confirm or … to cancel" 안내)은 첫 줄이 정해진 제목이다. 경계 없이 화면 맨 위에 닿았으면 그 사이의
 // 가장 위 제목 줄부터를 질문으로 보고 complete. codex는 선택 창 머리를 위에서부터 그리고 넘치면 아래를 "[… N lines]"로 줄여서
 // 진짜 제목은 늘 화면 안에 있고, 명령 본문에 같은 글이 있어도 그 아래다. 가장 위 것을 쓰므로 질문에서 명령이 빠지지 않는다
@@ -94,10 +99,10 @@ const DIALOG_TITLE =
 // codex 안내 줄 (bottom_pane/popup_consts.rs accept_cancel_hint_line): "Press enter to confirm or esc to cancel".
 // claude의 "Enter to confirm · Esc to cancel"과 구분한다 (재리뷰 R1: confirm·cancel 낱말만 보니 claude 창도 codex로 봤다)
 const CODEX_FOOTER = /^Press \S.* to confirm or \S.* to cancel\b/;
-export function readDialog(screen: readonly string[]): Dialog | null {
-  const lines = screen.map((l) => l.replace(EDGE, "").replace(/\s+$/, ""));
-  // 아래에서 위로 1번 선택지를 찾고, 거기서 아래로 번호가 이어지는 묶음을 읽는다
-  for (let first = lines.length - 1; first >= 0; first--) {
+export function readDialog(screen: readonly string[], above: readonly string[] = [], start = false): Dialog | null {
+  const lines = [...above, ...screen].map((l) => l.replace(EDGE, "").replace(/\s+$/, ""));
+  // 아래에서 위로 1번 선택지를 찾고 (화면 안에서), 거기서 아래로 번호가 이어지는 묶음을 읽는다
+  for (let first = lines.length - 1; first >= above.length; first--) {
     const m = NUMBERED.exec(lines[first]);
     if (!m || m[3] !== "1") continue;
     const options: string[] = [];
@@ -116,15 +121,15 @@ export function readDialog(screen: readonly string[]): Dialog | null {
     if (options.length < 2 || cursor < 0) continue;
     const question: string[] = [];
     let blank = 0;
-    let complete = false;
+    let bounded = false;
     for (let i = first - 1; i >= 0; i--) {
       if (RULE.test(lines[i])) {
-        complete = true;
+        bounded = true;
         break;
       }
       if (!lines[i].trim()) {
         if (++blank >= 3) {
-          complete = true;
+          bounded = true;
           break;
         }
         continue;
@@ -133,13 +138,41 @@ export function readDialog(screen: readonly string[]): Dialog | null {
       question.unshift(lines[i].trim());
     }
     const end = first + options.length;
-    if (!complete && lines.slice(end).some((l) => CODEX_FOOTER.test(l.trim()))) {
+    if (!bounded && lines.slice(end).some((l) => CODEX_FOOTER.test(l.trim()))) {
       const title = question.findIndex((l) => DIALOG_TITLE.test(l));
       if (title >= 0) return { question: question.slice(title), options, cursor, complete: true };
     }
-    return { question, options, cursor, complete };
+    return { question, options, cursor, complete: bounded || start };
   }
   return null;
+}
+
+// 대체 화면(기록 없음)에서 화면 위가 사라졌는지 따라간다 (Terminal.tsx dialogNow: 사라진 적이 없을 때만 맨 윗줄을 질문의 처음으로
+// 본다). 사라짐으로 보는 것: 줄바꿈으로 밀림(스크롤 영역 안 포함, onScroll), 위로 밀기(CSI S), 줄 지우기(CSI M), 화면 크기 바꾸기
+// (줄 수를 줄이면 위가 잘리고 폭을 줄이면 오른쪽이 잘린다. 대체 화면은 다시 감지 않는다). 처음으로 되돌리는 것: 화면 전체 지우기
+// (CSI 2 J, 맨 앞에서 CSI 0 J)와 화면 바꾸기. CSI 3 J는 화면을 지우지 않으므로 아니다 (재리뷰 R1). 모르는 길로 사라지면 막지 못하므로
+// 사라짐 쪽으로 넉넉히 본다 (답하지 못할 뿐 잘못 답하지는 않는다).
+export function watchAltLoss(term: Pick<Terminal, "buffer" | "parser" | "onScroll" | "onResize">) {
+  let lost = false;
+  const alt = () => term.buffer.active.type === "alternate";
+  const lose = () => {
+    if (alt()) lost = true;
+    return false;
+  };
+  const subs = [
+    term.onScroll(lose),
+    term.onResize(lose),
+    term.parser.registerCsiHandler({ final: "S" }, lose),
+    term.parser.registerCsiHandler({ final: "M" }, lose),
+    term.buffer.onBufferChange(() => (lost = false)),
+    term.parser.registerCsiHandler({ final: "J" }, (params) => {
+      const buf = term.buffer.active;
+      const mode = params[0] ?? 0;
+      if (mode === 2 || (mode === 0 && buf.cursorX === 0 && buf.cursorY === 0)) lost = false;
+      return false;
+    }),
+  ];
+  return { lost: () => alt() && lost, dispose: () => subs.forEach((d) => d.dispose()) };
 }
 
 export const sameDialog = (a: Dialog | null, b: Dialog | null) =>

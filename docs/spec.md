@@ -723,8 +723,11 @@ ddak 앱
 - 읽기 (`src/programStatus.ts` readDialog): 터미널이 사용자를 기다리는 동안 보이는 화면에서 1부터 이어지는 번호
   선택지(둘 이상, 커서 `❯`·`›`가 정확히 하나)를 찾는다. 상자 테두리(`│`)와 안내 줄(Esc to cancel 등)은 빼고, 다음 줄로 넘친
   선택지는 이어 붙인다. 질문은 첫 선택지 위로 가로줄이나 빈 줄 셋을 만나기 전까지의 글 전부 (줄 수를 자르지 않는다: 같은
-  선택 창인지를 질문 전체로 본다). 경계를 화면 안에서 못 찾으면 질문이 잘렸을 수 있어 `complete: false` (올리되 채팅에서는
-  답하지 않고 "맥에서 답해야 함"). 다만 codex 선택 창(선택지 아래 codex 안내 `Press … to confirm or … to cancel`. claude의 `Enter to confirm · Esc to cancel`은 아님)이면 그 사이의 가장 위
+  선택 창인지를 질문 전체로 본다). 화면 위로 넘어가면 일반 화면은 스크롤 기록에서 이어 읽는다 (500줄까지, 경계를 찾아야 함.
+  기록의 처음은 처음으로 보지 않는다). 대체 화면(codex 등, 기록 없음)은 지운 뒤로 위로 밀려난 줄이 없을 때만 맨 윗줄을 질문의
+  처음으로 본다 (`programStatus.ts` watchAltLoss: 줄바꿈 밀림(onScroll)·CSI S·CSI M·크기 바꾸기는 사라짐, 화면 전체
+  지우기(CSI 2 J, 맨 앞 CSI J)·화면 바꾸기에서 처음으로. CSI 3 J는 화면을 지우지 않아 아님). 그래도 위가 남으면 질문이 잘렸을 수 있어 `complete: false`
+  (올리되 채팅에서는 답하지 않고 "질문 전체를 읽지 못해 맥에서 답해야 함"). 다만 경계 없이 위에 닿은 codex 선택 창(선택지 아래 codex 안내 `Press … to confirm or … to cancel`. claude의 `Enter to confirm · Esc to cancel`은 아님)이면 그 사이의 가장 위
   codex 제목 줄(`Would you like to run the following command?` 등 `approval_overlay.rs`의 제목)부터를 질문으로 보고 답할 수 있다.
   codex는 선택 창 머리를 위에서부터 그리고 넘치면 아래를 `[… N lines]`로 줄이므로 진짜 제목은 늘 화면 안에 있다. 명령 본문에 같은
   글이 있어도 그 아래라, 가장 위 것을 쓰면 명령이 질문에서 빠지지 않는다. claude의 `Do you want to proceed?`는 명령 아래 마지막

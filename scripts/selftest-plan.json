@@ -110,7 +110,7 @@
     },
     {
       "files": ["src/PromptChoices.tsx", "src/programStatus.ts", "src-tauri/src/prompts.rs"],
-      "steps": ["programStatusUnit", "promptAnswerUnit", "statusContrastUnit", "programStatus", "addSession"]
+      "steps": ["programStatusUnit", "promptAnswerUnit", "altLossUnit", "statusContrastUnit", "programStatus", "addSession"]
     },
     { "files": ["src/notifyClick.ts"], "steps": ["notifyClickUnit", "addSession"] },
     {

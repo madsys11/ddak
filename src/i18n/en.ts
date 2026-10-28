@@ -149,7 +149,7 @@ export const en = {
   "prompt.send": "Send",
   "prompt.sending": "Sending…",
   "prompt.closed": "This prompt is no longer open",
-  "prompt.incomplete": "The question is longer than the screen. Answer on the Mac.",
+  "prompt.incomplete": "Could not read the whole question. Answer on the Mac.",
   "prompt.error": "Could not send: {detail}",
   "prompt.err.closed": "The prompt has closed or changed",
   "prompt.err.busy": "An answer is already being sent",

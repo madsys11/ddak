@@ -10,7 +10,7 @@ import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, type Dialog } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, watchAltLoss, type Dialog } from "./programStatus";
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
 import { renderMarkdown, resolveHref } from "./docs";
 import { baseName as platformBaseName, dirName as platformDirName, fileUrlPath, keyLabels, normalizePath, relativeTo, trimTrailingSep } from "./platform";
@@ -2338,7 +2338,7 @@ function testProgramStatusUnit() {
   const network = ["• Working", 'Do you want to approve network access to "example.com"?', "", "Reason: fetch", "› 1. Yes", "  2. No", footer];
   const heredoc = (cmd: string) => ["• Ran ls", "Would you like to run the following command?", "", `$ ${cmd}cat <<'TXT'`, "Would you like to run the following command?", "", "$ echo looks like a header", "TXT", "› 1. Yes, proceed (y)", "  2. No (esc)", footer];
   const claudeTitled = (cmd: string) => [`  ${cmd}`, "Would you like to run the following command?", "Do you want to proceed?", "❯ 1. Yes", "  2. No", "Enter to confirm · Esc to cancel"];
-  const titled = [codexTop, codexHistory, network, heredoc(""), claudeTitled("rm -rf project"), ["  rm -rf project", "Do you want to proceed?", "❯ 1. Yes", "  2. No", footer]].map(readDialog);
+  const titled = [codexTop, codexHistory, network, heredoc(""), claudeTitled("rm -rf project"), ["  rm -rf project", "Do you want to proceed?", "❯ 1. Yes", "  2. No", footer]].map((l) => readDialog(l));
   check(
     "선택 창 읽기: codex 창은 경계 없이 화면 맨 위에 닿으면 가장 위 제목부터 (화면 맨 위·대화 기록 아래·본문의 제목 줄), codex 안내나 제목이 없으면 아님",
     JSON.stringify(titled.map((d) => d && [d.question, d.complete])) ===
@@ -2351,6 +2351,30 @@ function testProgramStatusUnit() {
         [["rm -rf project", "Do you want to proceed?"], false],
       ]),
     JSON.stringify(titled.map((d) => d && [d.question, d.complete])),
+  );
+  // 화면 위의 줄(above, 일반 화면의 스크롤 기록)로 이어 올라간다. 처음(start)까지 경계 없이 다 읽으면 잘린 것이 없다 (대체 화면은
+  // 맨 윗줄이 처음). 처음이 아니면 예전처럼 답하지 않는다. 선택지는 화면 안에서만 찾는다
+  const update = ["Update available · 0.164.0 → 0.165.0", "", "Release notes: https://example.com", "", "› 1. Update now", "  2. Skip", "  3. Skip until next version", "", "Press enter to continue"];
+  const above = [
+    readDialog(cut, ["earlier output", "────────", " Bash command"]),
+    readDialog(cut, ["earlier output", " Bash command"]),
+    readDialog(cut, [" Bash command"], true),
+    readDialog(update, [], true),
+    readDialog(update),
+    readDialog(["$ ls"], ["› 1. Yes", "  2. No"]),
+  ];
+  check(
+    "선택 창 읽기: 질문이 화면 위로 넘치면 위의 줄에서 이어 읽고, 처음까지 다 읽거나(대체 화면 맨 윗줄 포함) 경계를 찾으면 답할 수 있음",
+    JSON.stringify(above.map((d) => d && [d.question, d.complete])) ===
+      JSON.stringify([
+        [["Bash command", "rm -rf project", "Do you want to proceed?"], true],
+        [["earlier output", "Bash command", "rm -rf project", "Do you want to proceed?"], false],
+        [["Bash command", "rm -rf project", "Do you want to proceed?"], true],
+        [["Update available · 0.164.0 → 0.165.0", "Release notes: https://example.com"], true],
+        [["Update available · 0.164.0 → 0.165.0", "Release notes: https://example.com"], false],
+        null,
+      ]),
+    JSON.stringify(above.map((d) => d && [d.question, d.complete])),
   );
   const [plainCat, rmCat] = [readDialog(heredoc("")), readDialog(heredoc("rm -rf project; "))];
   check("선택 창 읽기: 본문에 제목 줄이 있어도 그 위 명령만 다른 두 codex 창은 다름 (리뷰 R1)", !!rmCat?.question.includes("$ rm -rf project; cat <<'TXT'") && !sameDialog(plainCat, rmCat), JSON.stringify(rmCat?.question));
@@ -2817,6 +2841,43 @@ async function testDocView(root: string, term: Terminal) {
 
 // 채팅에서 고른 답 넣기 (src/programStatus.ts driveAnswer): 가짜 선택 창에 화살표를 하나씩 보내 커서가 따라온 뒤에만 Enter.
 // 화면이 바뀌거나 커서가 따라오지 않으면 Enter 없이 끝난다
+// 대체 화면의 위 사라짐 따라가기 (programStatus.ts watchAltLoss): 화면에 붙이지 않은 실제 xterm에 써 본다.
+// 넘침·위로 밀기(CSI S)·줄 지우기(CSI M)·크기 바꾸기는 사라짐, 화면 지우기(CSI 2 J, 맨 앞 CSI J)·화면 바꾸기는 처음부터,
+// CSI 3 J는 화면을 지우지 않으므로 그대로 (재리뷰 R1). 일반 화면에서는 늘 아님
+async function testAltLossUnit() {
+  const term = new Terminal({ cols: 40, rows: 10, allowProposedApi: true });
+  const loss = watchAltLoss(term);
+  const w = (data: string) => new Promise<void>((r) => term.write(data, r));
+  const ten = Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\r\n");
+  const seen: string[] = [];
+  const note = (what: string) => seen.push(`${what}=${loss.lost()}`);
+  await w("\x1b[?1049h\x1b[2J\x1b[H" + ten);
+  note("fit");
+  await w("\r\nmore");
+  note("overflow");
+  await w("\x1b[2J\x1b[H" + ten);
+  note("ED2");
+  await w("\r\nx\x1b[3J");
+  note("ED3");
+  await w("\x1b[2J\x1b[H" + ten + "\x1b[S");
+  note("SU");
+  await w("\x1b[H\x1b[J" + ten);
+  note("ED0home");
+  await w("\x1b[H\x1b[M");
+  note("DL");
+  await w("\x1b[2J\x1b[H" + ten);
+  term.resize(40, 8);
+  note("resize");
+  await w("\x1b[?1049l");
+  note("normal");
+  await w("\x1b[?1049h");
+  note("reenter");
+  loss.dispose();
+  term.dispose();
+  const expected = "fit=false,overflow=true,ED2=false,ED3=true,SU=true,ED0home=false,DL=true,resize=true,normal=false,reenter=false";
+  check("선택 창 읽기: 대체 화면의 위 사라짐 (넘침·CSI S·CSI M·크기 바꾸기) / 지우기·화면 바꾸기는 처음부터, CSI 3 J는 아님", seen.join() === expected, seen.join());
+}
+
 export async function testPromptAnswerUnit(ok: (name: string, pass: boolean, detail?: string) => void = check) {
   // 가짜 선택 창. 키를 쓰면 커서가 움직인다 (stuck이면 안 움직임). changeAfter: 그만큼 쓴 뒤 질문이 바뀜.
   // queueChange: 그 번째 키가 쓰는 차례를 기다리는 동안 질문이 바뀜 (리뷰 R1). cancelAfter: 그만큼 쓴 뒤 취소 (새 답이 옴, 리뷰 R3).
@@ -3750,12 +3811,15 @@ async function testChatPrompt(root: string, first: Terminal, openAdd: (how: "men
 R = [["Bash command", "", "  npm test", "", "Do you want to proceed?"], ["Yes", "Yes, always", "No"]]
 S = [["Second?"], ["Allow", "Deny"]]
 X = [["Changed?"], ["Allow", "Deny"]]
-def ask(d):
+L = [["Long question %d" % i for i in range(1, 61)], ["Allow", "Deny"]]
+V = [["Alt long %d" % i for i in range(1, 81)], ["Allow", "Deny"]]
+U = [["Update available 1 -> 2", "", "Release notes: none"], ["Update now", "Skip", "Skip until next version"]]
+def ask(d, alt=False):
     c = 0
     while True:
         q, o = d
         w = sys.stdout.write
-        w("\x1b[2J\x1b[H" + "\u2500" * 20 + "\r\n" + "\r\n".join(q) + "\r\n")
+        w(("\x1b[?1049h\x1b[2J\x1b[H" if alt else "\x1b[2J\x1b[H" + "\u2500" * 20 + "\r\n") + "\r\n".join(q) + "\r\n")
         for i, x in enumerate(o):
             w(("❯ " if i == c else "  ") + str(i + 1) + ". " + x + "\r\n")
         w("Enter to confirm · Esc to cancel\r\n")
@@ -3772,7 +3836,10 @@ def ask(d):
 tty.setraw(0)
 a = ask(R)
 b = ask(S)
-sys.stdout.write("\x1b[2J\x1b[HCHOSE:" + a + "|" + b + "\r\n")
+l = ask(L)
+v = ask(V, True)
+u = ask(U, True)
+sys.stdout.write("\x1b[?1049l\x1b[2J\x1b[HCHOSE:" + a + "|" + b + "|" + l + "|" + v + "|" + u + "\r\n")
 sys.stdout.flush()
 time.sleep(60)`;
   await run(first, `: > "${root}/picker.py"`);
@@ -3783,7 +3850,7 @@ time.sleep(60)`;
   const shown = () => !!ws().querySelector(".chat-panel") && panel().style.display !== "none";
   if (!shown()) ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
   await waitFor("채팅 패널", shown, 3000);
-  type Stored = { id: number; from: string; to: string[]; prompt?: { id: string; question: string[]; options: { label: string; confirm: boolean }[] }; answer?: { prompt: string; option: number; result: string } };
+  type Stored = { id: number; from: string; to: string[]; prompt?: { id: string; question: string[]; options: { label: string; confirm: boolean }[]; answerable?: boolean }; answer?: { prompt: string; option: number; result: string } };
   const stored = () => invoke<Stored[]>("chat_messages", { project: root });
   const promptAsking = async (q: string) => (await stored()).find((m) => m.prompt?.question.includes(q));
   const card = (id: string) => panel().querySelector<HTMLElement>(`[data-prompt="${id}"]`);
@@ -3853,7 +3920,29 @@ time.sleep(60)`;
   const thirdId = thirdAsk?.prompt?.id ?? "";
   await waitFor("세 번째 버튼", () => !!option(thirdId, 1) && !option(thirdId, 1)!.disabled, 3000).catch(() => null);
   option(thirdId, 1)?.click();
-  const done = await waitFor("고름", () => pickerScreen().includes("CHOSE:Yes, always|Deny"), 8000).then(() => true, () => false);
+
+  // 질문이 화면 위로 넘어가도 답할 수 있다: 일반 화면은 스크롤 기록에서 이어 읽고 (가로줄까지 60줄), 대체 화면은 맨 윗줄이
+  // 처음이다 (codex 업데이트 안내처럼 경계 없이 맨 윗줄부터 그린 짧은 질문. 2026-10-28 폰에서 답하지 못했다)
+  const longAsk = await waitAsync("긴 질문", () => promptAsking("Long question 60"), 8000).catch(() => undefined);
+  const longOk = await invoke("chat_answer", { project: root, prompt: longAsk?.prompt?.id ?? "", option: 1 }).then(() => true, (e) => String(e));
+  // 대체 화면도 화면보다 긴 출력은 위가 사라진다: 맨 윗줄을 처음으로 보지 않고 답하지 않는다 (리뷰 R1). 맥에서 Enter로 넘긴다
+  const lostAsk = await waitAsync("대체 화면에서 넘친 질문", () => promptAsking("Alt long 80"), 8000).catch(() => undefined);
+  const lostRefused = await invoke("chat_answer", { project: root, prompt: lostAsk?.prompt?.id ?? "", option: 1 }).then(() => "accepted", (e) => String(e));
+  pickerPane.term.input("\r");
+  const altAsk = await waitAsync("대체 화면 질문", () => promptAsking("Update available 1 -> 2"), 8000).catch(() => undefined);
+  const altOk = await invoke("chat_answer", { project: root, prompt: altAsk?.prompt?.id ?? "", option: 1 }).then(() => true, (e) => String(e));
+  check(
+    "선택 창 답하기: 화면 위로 넘친 긴 질문(스크롤 기록에서 이어 읽음)과 대체 화면 맨 윗줄부터의 질문도 답할 수 있음",
+    longAsk?.prompt?.question.length === 60 && longAsk.prompt.question[0] === "Long question 1" && longOk === true &&
+      altAsk?.prompt?.question.join("|") === "Update available 1 -> 2|Release notes: none" && altOk === true,
+    `${JSON.stringify(longAsk?.prompt?.question.slice(0, 2))} ${longAsk?.prompt?.question.length} ${longOk} ${JSON.stringify(altAsk?.prompt?.question)} ${altOk}`,
+  );
+  check(
+    "선택 창 답하기: 대체 화면에서 화면보다 길어 위가 밀려난 질문은 답하지 않음 (리뷰 R1)",
+    !!lostAsk && lostAsk.prompt?.answerable === false && lostRefused !== "accepted" && !lostAsk.prompt.question.includes("Alt long 1"),
+    `${!!lostAsk} ${lostAsk?.prompt?.answerable} ${lostRefused} ${JSON.stringify(lostAsk?.prompt?.question.slice(0, 2))}`,
+  );
+  const done = await waitFor("고름", () => pickerScreen().includes("CHOSE:Yes, always|Deny|Deny|Allow|Skip"), 8000).then(() => true, () => false);
   const closed = await waitAsync("열린 선택 창 없음", async () => (await invoke<string[]>("chat_prompts", { project: root })).length === 0, 3000).then(() => true, () => false);
   check("선택 창 답하기: 거절 쪽은 확인 없이 보냄, 끝나면 열린 선택 창 없음", done && closed, `${done} ${closed} ${pickerScreen().slice(0, 120)}`);
 
@@ -4942,6 +5031,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["docView", () => testDocView(root, t())],
     ["programStatusUnit", testProgramStatusUnit],
     ["promptAnswerUnit", () => testPromptAnswerUnit()],
+    ["altLossUnit", testAltLossUnit],
     ["notifyClickUnit", testNotifyClickUnit],
     ["programStatus", () => testProgramStatus(root, t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],

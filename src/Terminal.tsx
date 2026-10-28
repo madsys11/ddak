@@ -10,7 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
 import { draggedPath, droppedFiles, isFileDrag, isPathDrag, noteFileDrag, shellQuote } from "./dragPath";
 import { fixImeInput, passesImeKey } from "./hangul";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, AnswerRuns, type Dialog, type ProgramStatus, type SendKey } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, watchAltLoss, driveAnswer, AnswerRuns, type Dialog, type ProgramStatus, type SendKey } from "./programStatus";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 import { TerminalSearch } from "./TerminalSearch";
@@ -74,6 +74,9 @@ type Props = {
   // 이 터미널이 낸 알림을 눌렀다: 이 창을 보이고 고른다 (src-tauri/src/notify.rs "notification-click")
   onReveal?: () => void;
 };
+
+// 선택 창의 질문을 화면 위 스크롤 기록에서 이어 읽을 때 최대 줄 수 (Terminal 안의 dialogNow)
+const ABOVE_MAX = 500;
 
 // xterm이 프로그램의 질의에 스스로 보내는 응답 (xterm 6.0 InputHandler·CoreBrowserTerminal의 triggerDataEvent 전부):
 // 장치 속성 CSI ? … c / CSI > … c, 상태 CSI 0 n, 커서 위치 CSI 행;열 R / CSI ? 행;열 R, 창 정보 CSI 8|4|6;…;… t,
@@ -339,12 +342,25 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       for (let y = buf.baseY; y < buf.baseY + term.rows; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
       return lines;
     };
+    // 화면의 선택 창 (src/programStatus.ts readDialog). 질문이 화면 위로 넘어가면 일반 화면은 스크롤 기록에서 ABOVE_MAX줄까지
+    // 이어 읽는다 (경계를 찾아야 답할 수 있다. 기록의 처음은 처음으로 보지 않는다: 기록이 한도로 버려졌는지 지금 길이로는 알 수
+    // 없다, 리뷰 R2 — 창을 넓히면 줄이 다시 감겨 짧아진다).
+    // 대체 화면은 기록이 없어서, 지운 뒤로 화면 위가 사라진 적이 없을 때만 맨 윗줄을 처음으로 본다 (리뷰 R1: 화면보다 긴
+    // 출력은 대체 화면에서도 위가 사라진다. programStatus.ts watchAltLoss)
+    const altLoss = watchAltLoss(term);
+    const dialogNow = (lines = screenLines()) => {
+      const buf = term.buffer.active;
+      if (buf.type === "alternate") return readDialog(lines, [], !altLoss.lost());
+      const above: string[] = [];
+      for (let y = Math.max(0, buf.baseY - ABOVE_MAX); y < buf.baseY; y++) above.push(buf.getLine(y)?.translateToString(true) ?? "");
+      return readDialog(lines, above);
+    };
     // 기다리는 동안 화면의 선택 창 (채팅에서 답하기, src-tauri/src/prompts.rs). 바뀔 때마다 차례(seq)를 붙여 알린다
     let dialogSeq = 0;
     let sentDialog: Dialog | null = null;
     let sentKind = "";
     const reportDialog = (lines: string[]) => {
-      const d = awaiting ? readDialog(lines) : null;
+      const d = awaiting ? dialogNow(lines) : null;
       const kind = awaitKind();
       if (JSON.stringify(d) === JSON.stringify(sentDialog) && (!d || kind === sentKind)) return;
       sentDialog = d;
@@ -365,7 +381,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
         // 쓰는 차례가 오면 그때의 화면으로 확인하고 쓴다. 다른 입력의 줄은 실패해도 이어 간다
         const send: SendKey = (data, ok) => {
           const p = sending.then(async () => {
-            if (run.cancelled || disposed || !ok(readDialog(screenLines()))) return "skipped" as const;
+            if (run.cancelled || disposed || !ok(dialogNow())) return "skipped" as const;
             try {
               await invoke("prompt_write", { id: target, prompt, request, data });
               return "sent" as const;
@@ -377,7 +393,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
           return p;
         };
         const cancelled = () => run.cancelled || disposed;
-        return result(await driveAnswer({ option, expected: sentDialog, read: () => readDialog(screenLines()), send, appCursor: () => term.modes.applicationCursorKeysMode, cancelled }));
+        return result(await driveAnswer({ option, expected: sentDialog, read: () => dialogNow(), send, appCursor: () => term.modes.applicationCursorKeysMode, cancelled }));
       } finally {
         runs.end(run);
       }
@@ -434,6 +450,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       programStatus.dispose();
       links.dispose();
       parsed.dispose();
+      altLoss.dispose();
       clearTimeout(dialogCheck);
       clearTimeout(dialogCap);
       unfixIme();
