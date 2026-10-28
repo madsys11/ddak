@@ -43,6 +43,8 @@ export function clipboardKey(ev: KeyboardEvent, hasSelection: boolean, windows =
 export const isShiftEnter = (ev: KeyboardEvent) =>
   ev.key === "Enter" && ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.isComposing && ev.keyCode !== 229;
 
+export const MIN_CONTRAST = 4.5;
+
 type Props = {
   cwd: string;
   // 작업그룹 세션의 명령과 인자. 없으면 그냥 셸. 처음 띄울 때만 쓴다.
@@ -111,6 +113,9 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       fontFamily: "Menlo, monospace",
       fontSize: 13,
       macOptionIsMeta: true,
+      // 글자색이 배경 대비 이보다 낮으면 그릴 때 진하게 한다 (VS Code 터미널 기본값). Solarized Light는 기본 글자가 4.1:1,
+      // 강조색이 3:1 안팎이라 흐렸다. 테마 색표는 그대로 두고 그리는 색만 바뀐다.
+      minimumContrastRatio: MIN_CONTRAST,
       theme: THEMES[latest.current.theme].terminal,
     });
     termRef.current = term;

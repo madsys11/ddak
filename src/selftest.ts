@@ -14,7 +14,7 @@ import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, pars
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
 import { renderMarkdown, resolveHref } from "./docs";
 import { baseName as platformBaseName, dirName as platformDirName, fileUrlPath, keyLabels, normalizePath, relativeTo, trimTrailingSep } from "./platform";
-import { clipboardKey } from "./Terminal";
+import { MIN_CONTRAST, clipboardKey } from "./Terminal";
 import { insertAt } from "./dragPath";
 import selftestPlan from "../scripts/selftest-plan.json";
 import { gitDecorations } from "./gitStatus";
@@ -1225,6 +1225,59 @@ async function testMobile(root: string) {
   await waitFor("창 닫힘", () => !dialog(), 3000).catch(() => null);
   // 뒤 단계(채팅 패널)는 방이 비어 있다고 본다 (첫 메시지가 세션의 것)
   await invoke("chat_clear", { project: root });
+}
+
+// 터미널 글자 대비 (Terminal.tsx MIN_CONTRAST): Solarized Light의 brightCyan(#93A1A1)은 배경 대비 2.5:1이라 흐렸다.
+// 그 색으로 글자를 써서 실제로 그려진 가장 진한 픽셀이 배경 대비 얼마인지 본다. 블록 문자(█)는 xterm이 대비 보정에서
+// 빼서 쓸 수 없다. 글자 픽셀은 안티앨리어싱으로 실제 색보다 연하게 나와 기준을 4.5보다 낮게(3.5) 두되, 보정 전(2.48)과는
+// 확실히 갈린다. 메뉴 클릭(맥 전용) 없이 터미널 색만 잠시 바꾼다.
+async function testTerminalContrast(term: Terminal) {
+  const before = term.options.theme;
+  const theme = THEMES["solarized-light"].terminal;
+  const luminance = (rgb: number[]) => {
+    const c = rgb.map((v) => v / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const hex = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const ratio = (a: number[], b: number[]) => {
+    const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05);
+  };
+  try {
+    term.options.theme = theme;
+    term.write("\x1b[2J\x1b[H\x1b[96m" + "MWMWMW" + "\x1b[0m\r\n");
+    await sleep(300);
+    // WebGL 캔버스는 그린 직후(같은 작업 안)에만 읽힌다
+    const pixel = await new Promise<number[]>((resolve) => {
+      const d = term.onRender(() => {
+        d.dispose();
+        const canvas = term.element!.querySelector<HTMLCanvasElement>(".xterm-screen > canvas:not(.xterm-link-layer)")!;
+        const copy = document.createElement("canvas");
+        [copy.width, copy.height] = [canvas.width, canvas.height];
+        const ctx = copy.getContext("2d")!;
+        ctx.drawImage(canvas, 0, 0);
+        // 첫 줄 앞 여섯 칸에서 가장 진한 픽셀
+        const data = ctx.getImageData(0, 0, Math.ceil((canvas.width / term.cols) * 6), Math.floor(canvas.height / term.rows)).data;
+        let darkest = [255, 255, 255];
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] < 255) continue; // 투명한 곳(그리지 않은 칸)은 0,0,0으로 읽힌다
+          const px = [data[i], data[i + 1], data[i + 2]];
+          if (luminance(px) < luminance(darkest)) darkest = px;
+        }
+        resolve(darkest);
+      });
+      term.refresh(0, term.rows - 1);
+    });
+    const got = ratio(pixel, hex(theme.background!));
+    check(
+      "터미널 대비: 흐린 색(Solarized brightCyan 2.5:1)도 진하게 그림",
+      term.options.minimumContrastRatio === MIN_CONTRAST && got >= 3.5,
+      `pixel=rgb(${pixel}) ratio=${got.toFixed(2)} option=${term.options.minimumContrastRatio}`,
+    );
+  } finally {
+    term.options.theme = before;
+    term.write("\x1b[2J\x1b[H");
+  }
 }
 
 // 배율과 한글 조합 박스 (src/zoom.ts): xterm이 아는 칸 폭이 캔버스에 실제로 그려진 칸 폭과 같아야 조합 박스(.composition-view,
@@ -5020,6 +5073,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
     ["zoomIme", () => testZoomIme(t())],
+    ["terminalContrast", () => testTerminalContrast(t())],
     ["claude", () => testClaude(t())],
     ["shiftEnterProgram", () => testProgramShiftEnter(t())],
     ["terminalSearch", () => testTerminalSearch(t())],
