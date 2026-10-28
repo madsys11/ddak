@@ -17,6 +17,7 @@ import { baseName as platformBaseName, dirName as platformDirName, fileUrlPath, 
 import { clipboardKey } from "./Terminal";
 import { insertAt } from "./dragPath";
 import selftestPlan from "../scripts/selftest-plan.json";
+import { gitDecorations } from "./gitStatus";
 import { THEMES } from "./themes";
 import { LOCALES } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
@@ -141,6 +142,69 @@ async function testTree() {
   aDir.click();
   await waitFor("폴더 접기", () => !rowNames().includes("inner.txt"));
   check("트리: 다시 클릭하면 접힘", true);
+}
+
+// 파일 트리의 git 표시 (src/gitStatus.ts, git.rs git_status): 저장소를 펼치면 파일은 글자(M 수정, A 스테이징, U 추적 안 함),
+// 바뀐 것이 든 폴더는 점. 추적 안 하는 폴더 안은 무시한 파일만 빼고 U. 내용만 바뀐 것(폴더 감시에 안 잡힘)과 커밋도 몇 초 안에
+// 반영된다. 분해형(NFD) 한글 이름도 git의 합성형 경로와 맞춘다. 펼쳐 둔 폴더에서 git init 하면 표시가 생긴다.
+async function testTreeGit(term: Terminal) {
+  const ident = "-c user.name=t -c user.email=t@example.com";
+  // 분해형 "한" (맥 파일 시스템은 만든 그대로 둔다)
+  const nfd = "\u1112\u1161\u11AB";
+  await run(term, `git init -q gst && cd gst && mkdir lib && echo a > mod.txt && echo l > lib/x.txt && echo k > keep.txt && printf '*.log\\n' > .gitignore && git add . && git ${ident} commit -qm base; cd ..`);
+  await run(term, `cd gst && N=$(printf '\\341\\204\\222\\341\\205\\241\\341\\206\\253') && mkdir "$N" && echo h > "$N/in.txt" && git add . && git ${ident} commit -qm nfd && echo m >> "$N/in.txt" && touch "$N.txt"; cd ..`);
+  await run(term, "cd gst && echo m >> mod.txt && echo m >> lib/x.txt && echo s > staged.txt && git add staged.txt && mkdir -p fresh/deep && touch fresh/deep/f fresh/debug.log loose.txt; cd ..");
+  const status = (name: string) => {
+    const row = fileRow(name);
+    return row ? `${row.dataset.gitStatus ?? "-"}${row.querySelector(".tree-git")?.textContent ?? ""}${row.querySelector(".tree-name.git-modified") ? "~" : ""}` : "없음";
+  };
+  const all = (names: string[]) => names.map((n) => `${n}=${status(n)}`).join(" ");
+  await waitFor("저장소 표시", () => fileRow("gst")?.dataset.git === "repo", 3000);
+  fileRow("gst")!.click();
+  const names = ["gst", "fresh", "lib", nfd, "keep.txt", "loose.txt", "mod.txt", "staged.txt", `${nfd}.txt`];
+  const want = `gst=- fresh=U• lib=M•~ ${nfd}=M•~ keep.txt=- loose.txt=UU mod.txt=MM~ staged.txt=AA ${nfd}.txt=UU`;
+  await waitFor("git 표시", () => all(names) === want, 5000).catch(() => {});
+  check("파일 트리 git: 수정 M·스테이징 A·추적 안 함 U, 바뀐 것이 든 폴더는 점, 저장소 행 자체는 표시 없음, 분해형 한글 이름도", all(names) === want, all(names));
+  fileRow(nfd)!.click();
+  await waitFor("분해형 폴더 안", () => status("in.txt") === "MM~", 3000).catch(() => {});
+  check("파일 트리 git: 분해형 한글 폴더 안의 수정도 M", status("in.txt") === "MM~", status("in.txt"));
+  fileRow("fresh")!.click();
+  await waitFor("추적 안 하는 폴더 안", () => status("deep") === "U•" && status("debug.log") === "-", 3000).catch(() => {});
+  check("파일 트리 git: 추적 안 하는 폴더 안도 U, 그 안의 무시한 파일은 표시 없음", status("deep") === "U•" && status("debug.log") === "-", all(["deep", "debug.log"]));
+  await run(term, "echo k >> gst/keep.txt");
+  await waitFor("내용만 바뀜", () => status("keep.txt") === "MM~", 3000 + 3000).catch(() => {});
+  check("파일 트리 git: 내용만 바뀐 파일도 몇 초 안에 M", status("keep.txt") === "MM~", status("keep.txt"));
+  await run(term, `git -C gst add -A && git -C gst ${ident} commit -qm all`);
+  const clean = names.map((n) => `${n}=-`).join(" ");
+  await waitFor("커밋 뒤", () => all(names) === clean, 3000 + 3000).catch(() => {});
+  check("파일 트리 git: 커밋하면 표시가 사라짐", all(names) === clean, all(names));
+  fileRow("gst")!.click();
+  await waitFor("접기", () => !fileRow("mod.txt"));
+  await run(term, "rm -rf gst && mkdir gnew && touch gnew/one.txt");
+
+  // 저장소가 아닌 폴더를 펼쳐 둔 채 git init
+  await waitFor("새 폴더", () => fileRow("gnew"), 3000);
+  fileRow("gnew")!.click();
+  await waitFor("새 폴더 펼침", () => fileRow("one.txt"), 3000);
+  check("파일 트리 git: 저장소가 아닌 폴더는 표시 없음", status("one.txt") === "-", status("one.txt"));
+  await run(term, "git init -q gnew");
+  await waitFor("git init 뒤", () => status("one.txt") === "UU", 3000 + 3000).catch(() => {});
+  check("파일 트리 git: 펼쳐 둔 폴더에서 git init 하면 표시가 생김", status("one.txt") === "UU", status("one.txt"));
+  fileRow("gnew")!.click();
+  await waitFor("접기", () => !fileRow("one.txt"));
+  await run(term, "rm -rf gnew");
+  await waitFor("지움", () => !fileRow("gnew"), 3000);
+
+  // 정규형: 맥은 합성형·분해형을 같은 이름으로, Windows는 다른 이름으로 (리뷰 R3)
+  const nfc = nfd.normalize("NFC");
+  const mac = gitDecorations("", [[`${nfc}/a.txt`, "M"], [`${nfc}.txt`, "U"]], false);
+  const win = gitDecorations("", [[`${nfc}/a.txt`, "M"], [`${nfc}.txt`, "U"]], true);
+  const inside = gitDecorations(`${nfd}/`, [[`${nfc}/a.txt`, "M"]], false);
+  check(
+    "파일 트리 git: 맥은 NFC 경로와 NFD 이름·위치를 맞추고, Windows는 정규형이 다른 이름을 합치지 않음",
+    mac(nfd) === "M" && mac(`${nfd}.txt`) === "U" && inside("a.txt") === "M" && win(nfd) === undefined && win(nfc) === "M",
+    `${mac(nfd)} ${mac(`${nfd}.txt`)} ${inside("a.txt")} ${win(nfd)} ${win(nfc)}`,
+  );
 }
 
 // 명령을 보내고 앞뒤에 찍은 표시 사이의 출력을 돌려준다.
@@ -2237,7 +2301,7 @@ function tokenRgb(name: string) {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-// 상태·오류·git 추가 글자의 대비: 모든 테마에서 그 바탕 위 작은 글자 4.5:1 이상 (WCAG AA, 리뷰 R3, 라이트 테마 리뷰 R1)
+// 상태·오류·git 추가·수정 글자의 대비: 모든 테마에서 그 바탕 위 작은 글자 4.5:1 이상 (WCAG AA, 리뷰 R3, 라이트 테마 리뷰 R1)
 function testStatusContrastUnit() {
   const lum = (hex: string) => {
     const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
@@ -2253,15 +2317,16 @@ function testStatusContrastUnit() {
       ["working", ui["--status-working"], ui["--sidebar-bg"]],
       ["done", ui["--status-done"], ui["--sidebar-bg"]],
       ["awaiting", ui["--status-awaiting-fg"], ui["--status-awaiting-bg"]],
-      // 오류 글자(이름표의 오류 상태, 메시지)와 Git Graph 파일 목록의 추가·삭제 글자는 화면·사이드바 바탕 위에 쓴다
+      // 오류 글자(이름표의 오류 상태, 메시지), Git Graph 파일 목록의 추가·삭제 글자, 파일 트리의 git 표시는 화면·사이드바 바탕 위에 쓴다
       ...(["--bg", "--sidebar-bg"] as const).flatMap((bg): [string, string, string][] => [
         [`error on ${bg}`, ui["--error"], ui[bg]],
         [`git-added on ${bg}`, ui["--git-added"], ui[bg]],
+        [`git-modified on ${bg}`, ui["--git-modified"], ui[bg]],
       ]),
     ];
     return pairs.filter(([, fg, bg]) => ratio(fg, bg) < 4.5).map(([what, fg, bg]) => `${name} ${what} ${ratio(fg, bg).toFixed(2)}`);
   });
-  check("상태 표시: 모든 테마에서 상태·오류·git 추가 글자 대비 4.5:1 이상", low.length === 0, low.join(" | "));
+  check("상태 표시: 모든 테마에서 상태·오류·git 추가·수정 글자 대비 4.5:1 이상", low.length === 0, low.join(" | "));
 }
 
 // 터미널 링크 후보 (src/terminalLinks.ts findLinks): URL, 경로(줄 번호·문장 부호·조사), 경로가 아닌 것
@@ -4671,6 +4736,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["terminalReady", async () => (first = await openFirstTerminal())],
     ["terminal", () => testTerminal(root, t())],
     ["watch", () => testWatch(root, t())],
+    ["treeGit", () => testTreeGit(t())],
     ["repos", () => testRepos(root, t())],
     ["create", () => testCreate(root, t())],
     ["rename", () => testRename(root, t())],

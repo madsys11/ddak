@@ -35,7 +35,8 @@ const dark: Theme = {
     "--icon-project": "#4DAAFC",
     "--icon-repo": "#E2C08D",
     "--icon-worktree": "#81B88B",
-    "--git-added": "#81B88B", // Git Graph 파일 목록의 추가(A) 글자. gitDecoration.addedResourceForeground
+    "--git-added": "#81B88B", // Git Graph 파일 목록의 추가(A) 글자, 파일 트리의 추가·추적 안 함. gitDecoration.addedResourceForeground
+    "--git-modified": "#E2C08D", // 파일 트리의 수정. gitDecoration.modifiedResourceForeground
     "--tree-link": "#9D9D9D",
     // Git Graph 레인 (VS Code Git Graph 확장의 기본 색)
     "--graph-1": "#0085D9",
@@ -114,6 +115,7 @@ const light: Theme = {
     "--icon-repo": "#895503",
     "--icon-worktree": "#587C0C",
     "--git-added": "#587C0C",
+    "--git-modified": "#895503",
     "--tree-link": "#616161",
     "--graph-1": "#0085D9",
     "--graph-2": "#D9008F",
@@ -187,6 +189,7 @@ const solarizedLight: Theme = {
     "--icon-repo": "#B58900",
     "--icon-worktree": "#859900",
     "--git-added": "#566300", // #859900은 바탕 위 대비 3:1이라 진하게 (--status-done과 같음)
+    "--git-modified": "#7D5F00", // 같은 이유로 #B58900보다 진하게
     "--tree-link": "#93A1A1",
     // Git Graph 레인 (Solarized 강조색)
     "--graph-1": "#268BD2",

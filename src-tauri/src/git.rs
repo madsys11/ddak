@@ -343,6 +343,72 @@ pub async fn git_fingerprint(repo: String) -> Result<String, CodeError> {
     tauri::async_runtime::spawn_blocking(move || fingerprint(Path::new(&repo))).await.map_err(|e| code_err("io", e))?
 }
 
+// 파일 트리의 git 표시 (docs/spec.md "사이드바 · 파일 트리"): 폴더가 든 저장소의 최상위 폴더와 그 안에서 이 폴더의 위치
+// ("a/b/", 최상위면 ""). 저장소 밖(.git 폴더 안 포함)이면 None.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct Place {
+    root: String,
+    prefix: String,
+}
+
+fn place(dir: &Path) -> Option<Place> {
+    let out = git(dir, &["rev-parse", "--show-toplevel", "--show-prefix"]).ok()?;
+    let mut lines = out.lines();
+    let root = lines.next().filter(|r| !r.is_empty())?.to_string();
+    Some(Place { root, prefix: lines.next().unwrap_or_default().to_string() })
+}
+
+// 작업 트리의 바뀐 파일: (최상위 기준 경로, 표시). 표시는 M 수정, A 추가(스테이징), U 추적 안 함, D 삭제, R 이름 바뀜,
+// ! 충돌. 추적 안 하는 폴더는 안을 펼치지 않고 "폴더/"로 한 줄이다 (--untracked-files=normal). 무시한 파일은 없다.
+// open: 트리에서 펼친 폴더의 위치("a/b/"). 그중 추적 안 하는 폴더 안의 것은 그 폴더 아래 추적 안 하는 파일(무시한 것 빼고)을
+// 따로 읽어 더한다. 안 그러면 그 안의 무시한 파일까지 U로 보인다 (리뷰 R1).
+// 몇 초마다 부르므로 index를 고쳐 쓰지 않게 한다 (--no-optional-locks. 아니면 index.lock을 잡아 사용자의 git 명령과 부딪친다).
+fn status(root: &Path, open: &[String]) -> Result<Vec<(String, &'static str)>, CodeError> {
+    let out = raw(root, &["--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal"], None)?;
+    let mut files = parse_status(&out)?;
+    let mut untracked: Vec<String> = files.iter().filter(|(p, c)| *c == "U" && p.ends_with('/') && open.iter().any(|o| o.starts_with(p.as_str()))).map(|(p, _)| p.clone()).collect();
+    untracked.dedup();
+    for dir in untracked {
+        let out = raw(root, &["--no-optional-locks", "--literal-pathspecs", "ls-files", "--others", "--exclude-standard", "-z", "--", &dir], None)?;
+        files.extend(out.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|p| (String::from_utf8_lossy(p).into_owned(), "U")));
+    }
+    Ok(files)
+}
+
+// `git status --porcelain=v1 -z` 한 줄: "XY 경로". X(index)나 Y(작업 트리)가 R·C면 다음 칸이 원래 이름이다
+// (Y의 R은 git add -N 한 뒤 이름을 바꾼 경우. 리뷰 R4)
+fn parse_status(out: &[u8]) -> Result<Vec<(String, &'static str)>, CodeError> {
+    let mut items = out.split(|&b| b == 0).filter(|s| !s.is_empty());
+    let mut files = Vec::new();
+    while let Some(item) = items.next() {
+        let [x, y, b' ', ..] = *item else { return Err(unexpected("status")) };
+        if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
+            items.next();
+        }
+        let code = match (x, y) {
+            (b'?', b'?') => "U",
+            (b'!', b'!') => continue,
+            (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => "!",
+            (b'R', _) | (_, b'R') => "R",
+            (b'A' | b'C', _) | (_, b'C') => "A",
+            (b'D', _) | (_, b'D') => "D",
+            _ => "M",
+        };
+        files.push((String::from_utf8_lossy(&item[3..]).into_owned(), code));
+    }
+    Ok(files)
+}
+
+#[tauri::command]
+pub async fn git_place(dir: String) -> Result<Option<Place>, CodeError> {
+    tauri::async_runtime::spawn_blocking(move || place(Path::new(&dir))).await.map_err(|e| code_err("io", e))
+}
+
+#[tauri::command]
+pub async fn git_status(repo: String, open: Vec<String>) -> Result<Vec<(String, &'static str)>, CodeError> {
+    tauri::async_runtime::spawn_blocking(move || status(Path::new(&repo), &open)).await.map_err(|e| code_err("io", e))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,4 +551,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // 작업 트리 쪽 이름 바뀜(Y가 R)도 원래 이름 칸을 건너뛰고, 뒤의 정상 줄을 그대로 읽는다 (리뷰 R4)
+    #[test]
+    fn status_worktree_rename() {
+        let got = parse_status(b" R new.txt\0old.txt\0 M a.txt\0RM moved.txt\0from.txt\0?? x/\0 C copy.txt\0src.txt\0").unwrap();
+        assert_eq!(got.iter().map(|(p, c)| (p.as_str(), *c)).collect::<Vec<_>>(), [("new.txt", "R"), ("a.txt", "M"), ("moved.txt", "R"), ("x/", "U"), ("copy.txt", "A")]);
+        assert!(parse_status(b"bad\0").is_err());
+    }
+
+    // 파일 트리 표시: 저장소 안 위치, 수정·스테이징·추적 안 함(폴더는 한 줄)·삭제·이름 바뀜·충돌, 무시한 파일은 빼고,
+    // 한글·공백 이름은 그대로. 저장소 밖과 .git 안은 None
+    #[test]
+    fn status_for_tree() {
+        let tmp = std::env::temp_dir().join(format!("ddak-git-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("r");
+        std::fs::create_dir_all(repo.join("lib")).unwrap();
+        let ident = "-c user.name=t -c user.email=t@example.com";
+        sh(&repo, "git init -q -b main && echo a > a.txt && echo g > gone.txt && echo o > old.txt && echo l > lib/x.txt && echo c > c.txt && printf 'ignored.txt\\n' > .gitignore && git add .");
+        sh(&repo, &format!("git {ident} commit -qm base && git checkout -q -b side && echo side > c.txt && git {ident} commit -qam side && git checkout -q main && echo main > c.txt && git {ident} commit -qam main"));
+        sh(&repo, &format!("git {ident} merge -q side || true"));
+        sh(&repo, "echo more >> a.txt && echo more >> lib/x.txt && rm gone.txt && git mv old.txt new.txt && echo s > '한글 이름.txt' && git add '한글 이름.txt'");
+        sh(&repo, "mkdir -p fresh/deep && touch fresh/deep/f loose.txt ignored.txt");
+
+        let mut got = status(&repo, &[]).unwrap();
+        got.sort();
+        let want = [("a.txt", "M"), ("c.txt", "!"), ("fresh/", "U"), ("gone.txt", "D"), ("lib/x.txt", "M"), ("loose.txt", "U"), ("new.txt", "R"), ("한글 이름.txt", "A")];
+        assert_eq!(got.iter().map(|(p, c)| (p.as_str(), *c)).collect::<Vec<_>>(), want);
+        assert!(!repo.join(".git/index.lock").exists());
+
+        // 펼친 추적 안 하는 폴더 안: 무시한 파일(*.log)은 빼고 추적 안 하는 파일만 더한다 (리뷰 R1)
+        sh(&repo, "printf '*.log\\n' >> .gitignore && touch fresh/deep/debug.log fresh/top.txt");
+        let mut got = status(&repo, &["fresh/deep/".into()]).unwrap();
+        got.retain(|(p, _)| p.starts_with("fresh"));
+        got.sort();
+        assert_eq!(got.iter().map(|(p, c)| (p.as_str(), *c)).collect::<Vec<_>>(), [("fresh/", "U"), ("fresh/deep/f", "U"), ("fresh/top.txt", "U")]);
+
+        let root = place(&repo).unwrap().root;
+        assert_eq!(place(&repo.join("lib")), Some(Place { root: root.clone(), prefix: "lib/".into() }));
+        assert_eq!(place(&repo).unwrap().prefix, "");
+        assert_eq!(place(&repo.join(".git")), None);
+        assert_eq!(place(&tmp), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

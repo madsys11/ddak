@@ -129,6 +129,8 @@ pub fn run() {
             git::git_graph,
             git::git_commit,
             git::git_fingerprint,
+            git::git_place,
+            git::git_status,
             worktrees::group_status,
             worktrees::group_end,
             workspace::workspace_load,

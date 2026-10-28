@@ -40,6 +40,13 @@ export const en = {
   "tree.repo": "Git repository",
   "tree.worktree": "Git worktree",
   "tree.link": "{path}\nLink to {target}",
+  "tree.git.modified": "Modified",
+  "tree.git.added": "Added (staged)",
+  "tree.git.untracked": "Untracked",
+  "tree.git.deleted": "Deleted",
+  "tree.git.renamed": "Renamed",
+  "tree.git.conflict": "Conflict",
+  "tree.git.folder": "Contains changes",
 
   "repo.add": "Add Repository",
   "repo.addMenu": "Add Repository…",

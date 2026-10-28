@@ -5,7 +5,9 @@ import { devHooks } from "./devHooks";
 import { isDocPath, requestOpenDoc } from "./docs";
 import { setDraggedPath } from "./dragPath";
 import { codeError } from "./errors";
+import { refreshGitStatus, useGitStatus, type GitCode } from "./gitStatus";
 import { ChevronIcon, RepoIcon, WorktreeIcon } from "./icons";
+import type { MessageKey } from "./i18n";
 import { useT } from "./prefs";
 import { openLink } from "./terminalLinks";
 import { watchDir } from "./watchDir";
@@ -58,7 +60,10 @@ function useEntries(path: string) {
         (e) => alive && setError(String(e)),
       );
     load();
-    const unwatch = watchDir(path, load);
+    const unwatch = watchDir(path, () => {
+      load();
+      refreshGitStatus(path);
+    });
     return () => {
       alive = false;
       unwatch();
@@ -70,6 +75,7 @@ function useEntries(path: string) {
 // 폴더 하나의 내용. 프로젝트 목록(Sidebar)이 프로젝트 아래에 이것을 놓는다. root: 트리 루트 (끌어 놓을 때 상대 경로의 기준).
 export function Children({ path, depth, root = path }: { path: string; depth: number; root?: string }) {
   const { entries, error } = useEntries(path);
+  const gitStatus = useGitStatus(path);
   const { creating } = useTree();
   if (error) return <div className="tree-error" style={{ paddingLeft: indent(depth) }}>{error}</div>;
   if (!entries) return null;
@@ -77,7 +83,8 @@ export function Children({ path, depth, root = path }: { path: string; depth: nu
     <>
       {creating?.dir === path && <NewEntry dir={path} kind={creating.kind} depth={depth} />}
       {entries.map((e) => (
-        <Node key={e.path} entry={e} dir={path} depth={depth} root={root} />
+        // 안에 든 저장소·worktree는 자기 상태를 따로 보이므로 바깥 저장소의 "추적 안 함"을 붙이지 않는다
+        <Node key={e.path} entry={e} dir={path} depth={depth} root={root} git={e.git ? undefined : gitStatus(e.name)} />
       ))}
     </>
   );
@@ -166,7 +173,18 @@ function RenameInput({ entry }: { entry: Entry }) {
   );
 }
 
-function Node({ entry, dir, depth, root }: { entry: Entry; dir: string; depth: number; root: string }) {
+// git 표시의 색 묶음 (App.css .git-*)과 설명 문구
+const GIT_KIND: Record<GitCode, string> = { M: "modified", R: "modified", D: "modified", A: "added", U: "added", "!": "conflict" };
+const GIT_TITLE: Record<GitCode, MessageKey> = {
+  M: "tree.git.modified",
+  A: "tree.git.added",
+  U: "tree.git.untracked",
+  D: "tree.git.deleted",
+  R: "tree.git.renamed",
+  "!": "tree.git.conflict",
+};
+
+function Node({ entry, dir, depth, root, git }: { entry: Entry; dir: string; depth: number; root: string; git?: GitCode }) {
   const t = useT();
   const tree = useTree();
   const folderMenu = useFolderMenu();
@@ -208,13 +226,20 @@ function Node({ entry, dir, depth, root }: { entry: Entry; dir: string; depth: n
         }
         title={entry.link ? t("tree.link", { path: entry.path, target: entry.link }) : entry.path}
         data-git={entry.git ?? undefined}
+        data-git-status={git}
         data-link={entry.link ?? undefined}
       >
         <Twisty open={entry.is_dir ? open : null} />
         {entry.git === "repo" && <RepoIcon title={t("tree.repo")} />}
         {entry.git === "worktree" && <WorktreeIcon title={t("tree.worktree")} />}
-        {tree.renaming === entry.path ? <RenameInput entry={entry} /> : <span className="tree-name">{entry.name}</span>}
+        {tree.renaming === entry.path ? <RenameInput entry={entry} /> : <span className={`tree-name${git ? ` git-${GIT_KIND[git]}` : ""}`}>{entry.name}</span>}
         {entry.link && <span className="tree-link">↗</span>}
+        {/* VS Code처럼 파일은 글자, 폴더는 안에 바뀐 것이 있다는 점 */}
+        {git && (
+          <span className={`tree-git git-${GIT_KIND[git]}`} title={entry.is_dir && git !== "U" ? t("tree.git.folder") : t(GIT_TITLE[git])}>
+            {entry.is_dir ? "•" : git}
+          </span>
+        )}
       </div>
       {nameError(trashError, depth)}
       {/* 펼칠 때 처음으로 읽는다. 큰 폴더(node_modules 등)를 미리 읽지 않기 위해서다. */}

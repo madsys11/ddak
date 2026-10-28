@@ -404,6 +404,23 @@ button:hover {
   font-size: 11px;
   color: var(--tree-link);
 }
+/* git 표시 (FileTree.tsx, VS Code처럼): 이름 색과 오른쪽 끝의 글자(폴더는 점) */
+.tree-git {
+  flex-shrink: 0;
+  min-width: 10px;
+  padding-right: 8px;
+  font-size: 11px;
+  text-align: center;
+}
+.git-modified {
+  color: var(--git-modified);
+}
+.git-added {
+  color: var(--git-added);
+}
+.git-conflict {
+  color: var(--error);
+}
 
 button:disabled {
   opacity: 0.5;

@@ -74,12 +74,16 @@
   },
   "rules": [
     {
+      "files": ["src/gitStatus.ts"],
+      "steps": ["treeGit"]
+    },
+    {
       "files": ["src/FileTree.tsx", "src/Sidebar.tsx"],
-      "steps": ["tree", "watch", "repos", "create", "rename", "trashDrag", "docView", "projects", "groupWorktree", "addSession"]
+      "steps": ["tree", "watch", "treeGit", "repos", "create", "rename", "trashDrag", "docView", "projects", "groupWorktree", "addSession"]
     },
     {
       "files": ["src/watchDir.ts", "src-tauri/src/watch.rs"],
-      "steps": ["tree", "watch", "create", "rename", "docView"]
+      "steps": ["tree", "watch", "treeGit", "create", "rename", "docView"]
     },
     {
       "files": ["src-tauri/src/fs.rs"],
@@ -115,7 +119,7 @@
     },
     {
       "files": ["src/GitGraph.tsx", "src-tauri/src/git.rs"],
-      "steps": ["tree", "repos", "gitGraph"]
+      "steps": ["tree", "treeGit", "repos", "gitGraph"]
     },
     {
       "files": ["src/AddRepoDialog.tsx", "src-tauri/src/repos.rs"],

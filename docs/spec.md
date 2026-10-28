@@ -358,6 +358,17 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 - 링크는 이름 뒤 ↗, 마우스를 올리면 가리키는 경로. 폴더가 사라진 프로젝트는 취소선, 열지 않는다 (빼기만 가능).
 - 트리 루트가 바뀌면 이전 항목·입력란·오른쪽 클릭 메뉴를 바로 버린다 (`<Children key={루트}>`).
 - 자동 갱신: 펼쳐진 폴더만 하위 제외로 감시 (`watch.rs`, FSEvents). 이벤트의 실제 경로를 트리 경로로 바꾼다.
+- git 표시 (VS Code처럼): 저장소 안의 파일은 이름 색과 오른쪽 끝 글자 — M 수정·이름 바뀜(`--git-modified`),
+  A 스테이징·U 추적 안 함(`--git-added`), ! 충돌(`--error`). 바뀐 것이 든 폴더는 가장 눈에 띌 것의 색과 점
+  (충돌 > 수정·삭제 > 추가). 추적 안 하는 폴더는 U이고, 펼치면 그 안도 무시한 파일만 빼고 U. 안에 든 저장소·worktree 행에는
+  바깥 저장소의 표시를 붙이지 않는다 (펼치면 자기 저장소 표시). 무시한 파일은 표시 없음.
+  맥은 파일 이름(만든 그대로, 한글은 흔히 NFD)과 git 경로(NFC)를 NFC로 맞춰 비교한다. Windows는 그대로.
+  - 읽기: `git.rs` `git_place`(폴더 → 저장소 최상위와 그 안 위치), `git_status`(`git --no-optional-locks status
+    --porcelain=v1 -z --untracked-files=normal`. 몇 초마다 부르므로 index.lock을 잡지 않는다). 펼친 폴더가 추적 안 하는
+    폴더 안이면 그 폴더 아래를 `ls-files --others --exclude-standard`로 더 읽는다.
+  - 저장소마다 한 번 읽어 펼친 폴더들이 함께 쓰고 (`gitStatus.ts`), 펼친 폴더가 있는 동안 3초마다 다시 읽는다. 내용 수정·
+    git add·commit은 폴더 감시에 안 잡히기 때문이다. 폴더 감시 이벤트가 오면 그 폴더와 그 아래 펼친 폴더만 저장소 위치를
+    다시 찾고(git init·.git 삭제) 그 저장소를 바로 다시 읽는다. 다른 저장소는 건드리지 않는다.
 - 오른쪽 클릭 메뉴는 화면 안에 그린다 (`ContextMenu.tsx`, 자체 테스트가 누를 수 있게).
   새 파일·새 폴더·이름 바꾸기는 VS Code처럼 그 자리 입력란 (`useNameInput`). Enter 확정, Esc·다른 곳 클릭 취소.
   이름 검사는 `fs.rs`의 `child_path` (빈 이름, `/`, `.`, `..`, 이미 있음). 중간 폴더 만들기는 없다.

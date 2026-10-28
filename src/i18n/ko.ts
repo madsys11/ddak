@@ -40,6 +40,13 @@ export const ko: Messages = {
   "tree.repo": "Git 저장소",
   "tree.worktree": "Git worktree",
   "tree.link": "{path}\n링크 → {target}",
+  "tree.git.modified": "수정됨",
+  "tree.git.added": "추가됨 (스테이징)",
+  "tree.git.untracked": "추적 안 함",
+  "tree.git.deleted": "삭제됨",
+  "tree.git.renamed": "이름 바뀜",
+  "tree.git.conflict": "충돌",
+  "tree.git.folder": "안에 바뀐 파일 있음",
 
   "repo.add": "저장소 추가",
   "repo.addMenu": "저장소 추가…",
