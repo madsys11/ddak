@@ -302,6 +302,26 @@ textarea:focus {
   font-size: calc(14px * var(--font-scale, 1));
   border-radius: 14px;
 }
+/* 참여자 칩과 그 권한 모드 (src/ModePicker.tsx) */
+.chip-pair {
+  display: inline-flex;
+  gap: 2px;
+}
+.mode-chip {
+  color: var(--fg-dim);
+}
+.mode-chip.picking {
+  border-color: var(--accent);
+}
+.mode-picker {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.mode-title {
+  font-weight: 600;
+}
 .chip.waiting {
   border-color: var(--accent);
 }

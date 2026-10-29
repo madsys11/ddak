@@ -11,6 +11,7 @@ mod groups;
 mod links;
 mod menu;
 mod mobile;
+mod modes;
 mod notify;
 mod platform;
 mod prepare;
@@ -72,6 +73,7 @@ pub fn run() {
         .manage(pty::Ptys::default())
         .manage(watch::Watches::default())
         .manage(prompts::Prompts::default())
+        .manage(modes::Modes::default())
         .setup(|app| {
             menu::install(app.handle());
             notify::init(app.handle());
@@ -109,6 +111,10 @@ pub fn run() {
             prompts::chat_answer,
             prompts::prompt_result,
             prompts::prompt_write,
+            modes::chat_set_mode,
+            modes::mode_write,
+            modes::mode_result,
+            modes::selftest_chat_modes,
             links::open_link,
             links::selftest_opened_links,
             fs::list_dir,
@@ -173,6 +179,7 @@ pub fn run() {
             pty::selftest_pty_awaiting,
             pty::selftest_pty_awaiting_kind,
             pty::pty_working,
+            pty::pty_mode,
             pty::selftest_keep_awake,
             pty::pty_resize,
             pty::pty_kill,

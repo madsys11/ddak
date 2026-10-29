@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tauri::{Emitter, Manager, State};
 
-use crate::chat::{Answer, Chats, ChatsState, Prompt, PromptOption, USER};
+use crate::chat::{Answer, Chats, ChatsState, Prompt, PromptOption, Record, USER};
 
 // 화면에서 읽은 선택 창 (src/programStatus.ts Dialog)
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -251,7 +251,7 @@ pub fn pty_dialog(app: tauri::AppHandle, ptys: State<'_, crate::pty::Ptys>, prom
         Report::None => {}
         Report::Changed(projects) => changed(&app, &projects),
         Report::New { project, member, prompt, text, closed } => {
-            if let Err(e) = chats.post_note(&project, &member, &text, vec![USER.to_string()], Some(prompt), None, None) {
+            if let Err(e) = chats.post_note(&project, &member, &text, vec![USER.to_string()], Record::Prompt(prompt), None) {
                 eprintln!("선택 창을 채팅에 올리지 못함: {e}");
             }
             changed(&app, &closed);
@@ -309,7 +309,7 @@ pub fn prompt_result(app: tauri::AppHandle, prompts: State<'_, Prompts>, prompt:
     let Some((project, answer, via)) = prompts.finish(&prompt, request, option, &result) else { return };
     if let Some(chats) = chats(&app) {
         let text = format!("{}: {} — {}", answer.member, answer.label, answer.result);
-        if let Err(e) = chats.post_note(&project, USER, &text, Vec::new(), None, Some(answer), via.as_deref()) {
+        if let Err(e) = chats.post_note(&project, USER, &text, Vec::new(), Record::Answer(answer), via.as_deref()) {
             eprintln!("선택 창의 답을 기록하지 못함: {e}");
         }
     }

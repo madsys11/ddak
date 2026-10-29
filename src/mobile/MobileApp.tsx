@@ -7,6 +7,7 @@ import { changeKey, confirmed, enablePush, keyProblem, onKeyProblem, pushState, 
 import { FONT_SCALES, applySettings, loadSettings, resolveLocale, saveSettings, type PhoneSettings } from "./settings";
 import { MessageView, ReadMark, readTarget } from "./sync";
 import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
+import { ModePicker, modeLabel, modeText } from "../ModePicker";
 
 const USER = "user";
 // src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
@@ -454,6 +455,8 @@ export function Chat({ computer, project }: { computer: Computer; project: strin
   const [sending, setSending] = useState(false);
   // "맥에서 열기"를 보냈다 (맥이 열면 참여자가 바뀌어 안내가 사라진다)
   const [opening, setOpening] = useState(false);
+  // 권한 모드를 고르는 참여자 (참여자 칩 옆 모드를 누름)
+  const [picking, setPicking] = useState<string | null>(null);
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const atBottom = useRef(true);
@@ -661,6 +664,8 @@ export function Chat({ computer, project }: { computer: Computer; project: strin
                   />
                 ) : m.answer ? (
                   <div className={`text answer ${m.answer.result}`}>{answerText(m.answer, t)}</div>
+                ) : m.mode ? (
+                  <div className={`text answer ${m.mode.result}`}>{modeText(m.mode, t)}</div>
                 ) : (
                   <div className="text">{m.text}</div>
                 )}
@@ -673,6 +678,9 @@ export function Chat({ computer, project }: { computer: Computer; project: strin
               <button onClick={() => api.resume(computer, project, g).then(loadMembers, (e) => setError(errorText(e, computer.name)))}>{t("chat.resume")}</button>
             </div>
           ))}
+          {picking && members.modes?.[picking] && (
+            <ModePicker member={picking} mode={members.modes[picking]} t={t} onPick={(mode) => api.setMode(computer, project, picking, mode)} onClose={() => setPicking(null)} />
+          )}
           <div className="chips">
             {/* 모두에게는 @all을 골라야 한다 (멘션이 없으면 보내지 않는다) */}
             {members.members.length > 1 && (
@@ -685,12 +693,20 @@ export function Chat({ computer, project }: { computer: Computer; project: strin
               .map((m) => {
                 const status = members.status?.[m];
                 const look = status === "working" ? " working" : status ? " awaiting" : members.waiting.includes(m) ? " waiting" : "";
+                const mode = members.modes?.[m];
                 return (
-                  <button key={m} className={`chip${look}`} onClick={() => mention(m)}>
-                    {m}
-                    {status && STATUS[status] && <span className="chip-note">{t(STATUS[status])}</span>}
-                    {members.waiting.includes(m) && <span className="chip-note">{t("chat.waiting")}</span>}
-                  </button>
+                  <span key={m} className="chip-pair">
+                    <button className={`chip${look}`} onClick={() => mention(m)}>
+                      {m}
+                      {status && STATUS[status] && <span className="chip-note">{t(STATUS[status])}</span>}
+                      {members.waiting.includes(m) && <span className="chip-note">{t("chat.waiting")}</span>}
+                    </button>
+                    {mode && (
+                      <button className={`chip mode-chip${picking === m ? " picking" : ""}`} data-mode-of={m} onClick={() => setPicking(picking === m ? null : m)}>
+                        {modeLabel(mode, t)}
+                      </button>
+                    )}
+                  </span>
                 );
               })}
             {members.members.length <= 1 && <span className="hint">{t("chat.noMembers")}</span>}

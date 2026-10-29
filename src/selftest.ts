@@ -10,7 +10,7 @@ import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, watchAltLoss, type Dialog } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, watchAltLoss, readMode, driveMode, type Dialog, type PermissionMode } from "./programStatus";
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
 import { renderMarkdown, resolveHref } from "./docs";
 import { baseName as platformBaseName, dirName as platformDirName, fileUrlPath, keyLabels, normalizePath, relativeTo, trimTrailingSep } from "./platform";
@@ -24,9 +24,9 @@ import mobileCss from "./mobile/mobile.css?raw";
 import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
 import { Chat, KeyProblem, Settings as PhoneSettingsView } from "./mobile/MobileApp";
-import { locale as phoneLocale } from "./mobile/i18n";
+import { locale as phoneLocale, t as phoneT } from "./mobile/i18n";
 import { DEFAULT_SETTINGS as DEFAULT_PHONE_SETTINGS, parseSettings as parsePhoneSettings, resolveLocale as resolvePhoneLocale, resolveTheme as resolvePhoneTheme, type PhoneSettings } from "./mobile/settings";
-import { API_VERSION as PHONE_API, api as phoneApi } from "./mobile/api";
+import { API_VERSION as PHONE_API, ApiError as PhoneApiError, api as phoneApi } from "./mobile/api";
 import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { fromSaved } from "./workspaceState";
@@ -743,13 +743,19 @@ async function testMobileChatUnit() {
   const doc = frame.contentDocument!;
   const saved = { ...phoneApi };
   const reads: number[] = [];
+  const modeSets: string[] = [];
   const message = (id: number) => ({ id, time: 0, from: id % 2 ? "origin/dev" : "user", text: `m${id}`, to: ["user"] });
   Object.assign(phoneApi, {
     info: async () => ({ id: "c", name: "Mac", version: "", api: PHONE_API }),
     messages: async () => ({ name: "proj", messages: Array.from({ length: 100 }, (_, i) => message(i + 1)), more: false }),
-    members: async () => ({ members: ["user", "origin/dev"], waiting: [], paused: [], open: true }),
+    members: async () => ({ members: ["user", "origin/dev", "origin/rev"], waiting: [], paused: [], modes: { "origin/dev": "auto" }, open: true }),
     read: async (_c: unknown, _p: unknown, id: number) => void reads.push(id),
     post: async (_c: unknown, _p: unknown, text: string) => ({ id: 102, time: 0, from: "user", text, to: ["origin/dev"] }),
+    setMode: async (_c: unknown, _p: unknown, member: string, mode: string) => {
+      modeSets.push(`${member}:${mode}`);
+      if (modeSets.length === 1) throw new PhoneApiError(409, "awaiting");
+      if (modeSets.length === 2) throw new PhoneApiError(409, "bypass");
+    },
   });
   const root = createRoot(doc.getElementById("root")!);
   try {
@@ -768,6 +774,26 @@ async function testMobileChatUnit() {
     doc.querySelector<HTMLElement>(".composer button.primary")!.click();
     await waitFor("보낸 뒤 읽음", () => reads.length > 1, 3000).catch(() => null);
     check("폰 채팅: 위쪽을 보다가 보내면 맨 아래로 가며 읽음을 알림 (처음 읽음 100, 보낸 뒤 102)", first === "100" && reads.join(",") === "100,102", `${first} / ${reads}`);
+
+    // 권한 모드 (src/ModePicker.tsx): 모드를 읽은 참여자만 칩 옆에 모드, 누르면 고르는 창 (지금 모드는 못 누름). 맥이 거절하면
+    // 이유를 보이고 다시 고를 수 있고, 받으면 닫힌다
+    const modeChip = doc.querySelector<HTMLElement>("[data-mode-of='origin/dev']");
+    const onlyDev = !!modeChip && !doc.querySelector("[data-mode-of='origin/rev']") && modeChip.textContent === phoneT("mode.auto");
+    modeChip?.click();
+    const picker = await waitFor("모드 고르기", () => doc.querySelector<HTMLElement>("[data-mode-picker='origin/dev']"), 2000).catch(() => null);
+    const currentOff = !!picker?.querySelector<HTMLButtonElement>("[data-mode=auto]")?.disabled;
+    picker?.querySelector<HTMLElement>("[data-mode=manual]")?.click();
+    const refused = await waitFor("거절 이유", () => doc.querySelector(".mode-picker .prompt-error")?.textContent, 2000).catch(() => "");
+    doc.querySelector<HTMLElement>(".mode-picker [data-mode=manual]")?.click();
+    const bypassText = phoneT("mode.err.bypass");
+    const refusedBypass = await waitFor("bypass 거절 이유", () => doc.querySelector(".mode-picker .prompt-error")?.textContent === bypassText, 2000).then(() => true, () => false);
+    doc.querySelector<HTMLElement>(".mode-picker [data-mode=manual]")?.click();
+    const closed = await waitFor("고르는 창 닫힘", () => !doc.querySelector(".mode-picker"), 2000).then(() => true, () => false);
+    check(
+      "폰 채팅: 모드를 읽은 참여자만 칩 옆에 권한 모드, 누르면 고르는 창(지금 모드는 못 누름), 맥이 거절하면 이유를 보이고 다시 고르면 보내고 닫힘",
+      onlyDev && currentOff && refused === phoneT("mode.err.awaiting") && refusedBypass && modeSets.join(",") === "origin/dev:manual,origin/dev:manual,origin/dev:manual" && closed,
+      `${onlyDev} ${modeChip?.textContent} ${currentOff} ${refused} ${refusedBypass} ${modeSets} ${closed}`,
+    );
   } finally {
     root.unmount();
     Object.assign(phoneApi, saved);
@@ -2932,6 +2958,78 @@ async function testDocView(root: string, term: Terminal) {
 // 대체 화면의 위 사라짐 따라가기 (programStatus.ts watchAltLoss): 화면에 붙이지 않은 실제 xterm에 써 본다.
 // 넘침·위로 밀기(CSI S)·줄 지우기(CSI M)·크기 바꾸기는 사라짐, 화면 지우기(CSI 2 J, 맨 앞 CSI J)·화면 바꾸기는 처음부터,
 // CSI 3 J는 화면을 지우지 않으므로 그대로 (재리뷰 R1). 일반 화면에서는 늘 아님
+// 권한 모드 (src/programStatus.ts readMode·driveMode): 맨 아래 모드 줄만 읽고 (대화 중의 같은 글은 아님), Shift+Tab을 하나씩 보내
+// 모드 줄이 바뀌는 것을 확인하며 고른 모드까지. 바뀌지 않거나 지난 모드로 돌아오거나 줄이 사라지거나 쓰는 차례에 줄이 바뀌면 멈춘다
+async function testPermissionModeUnit() {
+  const read = [
+    readMode(["hi", "", "  ⏵⏵ auto mode on (shift+tab to cycle)", ""]),
+    readMode(["  ⏸ manual mode on · ? for shortcuts"]),
+    readMode(["x", "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt"]),
+    readMode(["  ⏸ plan mode on (shift+tab to cycle)", "  ⚠ some notice"]),
+    readMode(["  ⏵⏵ bypass permissions on"]),
+    readMode(["  ⏸ plan mode on (shift+tab to cycle)", "a", "b"]),
+    readMode(["> tell me about ⏵⏵ auto mode on", ""]),
+    readMode(["? for shortcuts"]),
+  ];
+  check(
+    "권한 모드: 맨 아래 두 줄의 모드 줄만 읽음 (자동·수동·편집 허용·계획·bypass, 그 위나 대화 안의 글은 아님)",
+    JSON.stringify(read) === JSON.stringify(["auto", "manual", "acceptEdits", "plan", "bypass", null, null, null]),
+    JSON.stringify(read),
+  );
+  const CYCLE: PermissionMode[] = ["auto", "manual", "acceptEdits", "plan"];
+  // stuck: 키에 모드가 바뀌지 않음, back: 이 번째 키에 첫 모드로 돌아감, blink: 이 번째 키 뒤 한 번만 모드 줄이 사라졌다 돌아옴,
+  // queueChange: 이 번째 키가 쓰는 차례를 기다리는 동안 모드가 바뀜, failAt: 이 번째 쓰기가 실패, cycle: 실제로 도는 순서
+  const run = async (o: { from: PermissionMode; target: PermissionMode; stuck?: boolean; back?: number; blink?: number; queueChange?: number; failAt?: number; cycle?: PermissionMode[] }) => {
+    const cycle = o.cycle ?? CYCLE;
+    let mode: PermissionMode = o.from;
+    let hidden = false;
+    let tries = 0;
+    let keys = 0;
+    let clock = 0;
+    const result = await driveMode({
+      target: o.target,
+      read: () => {
+        if (!hidden) return mode;
+        hidden = false;
+        return null;
+      },
+      send: async (data, ok) => {
+        tries++;
+        if (tries === o.queueChange) mode = "plan";
+        if (!ok(mode)) return "skipped";
+        if (tries === o.failAt) return "error";
+        keys++;
+        if (data !== "\x1b[Z" || o.stuck) return "sent";
+        mode = keys === o.back ? o.from : cycle[(cycle.indexOf(mode) + 1) % cycle.length];
+        hidden = keys === o.blink;
+        return "sent";
+      },
+      sleep: async () => void (clock += 100),
+      now: () => clock,
+    });
+    return `${result}:${keys}:${mode}`;
+  };
+  const got = [
+    await run({ from: "auto", target: "manual" }),
+    await run({ from: "auto", target: "plan" }),
+    await run({ from: "manual", target: "auto" }),
+    await run({ from: "plan", target: "plan" }),
+    await run({ from: "auto", target: "manual", stuck: true }),
+    await run({ from: "auto", target: "plan", back: 2 }),
+    await run({ from: "auto", target: "plan", blink: 1 }),
+    await run({ from: "auto", target: "acceptEdits", queueChange: 2 }),
+    await run({ from: "auto", target: "manual", failAt: 1 }),
+    await run({ from: "auto", target: "acceptEdits", cycle: ["auto", "plan", "bypass", "acceptEdits", "manual"] }),
+    await run({ from: "bypass", target: "manual" }),
+  ];
+  const want = ["sent:1:manual", "sent:3:plan", "sent:3:auto", "sent:0:plan", "failed:1:auto", "failed:2:auto", "changed:1:manual", "changed:1:plan", "failed:0:auto", "failed:1:plan", "failed:0:bypass"];
+  check(
+    "권한 모드: Shift+Tab을 하나씩 보내 순서의 바로 다음 모드로 바뀐 것을 확인하며 고른 모드까지 (이미 그 모드면 보내지 않음). 바뀌지 않음·다음이 아닌 모드·순서에 없는 모드에서 시작·쓰기 실패는 failed, 모드 줄이 한 번이라도 사라지거나 쓰는 차례에 바뀌면 changed (리뷰 R2)",
+    JSON.stringify(got) === JSON.stringify(want),
+    JSON.stringify(got),
+  );
+}
+
 async function testAltLossUnit() {
   const term = new Terminal({ cols: 40, rows: 10, allowProposedApi: true });
   const loss = watchAltLoss(term);
@@ -3819,7 +3917,9 @@ async function testAddSession(root: string, first: Terminal) {
   const lateposter = `{"name":"lateposter","command":"sh","args":["-c","sleep 2; curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"","{chat}","${rpc}"],"readOnly":true}`;
   // picker: 선택 창 흉내 (testChatPrompt가 picker.py를 만든다)
   const picker = `{"name":"picker","command":"python3","args":["${root}/picker.py"],"readOnly":true}`;
-  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter},${attn},${asker},${hookfirst},${twice},${lateposter},${picker}`;
+  // moder: claude 모드 줄 흉내 (testChatMode가 moder.py를 만든다)
+  const moder = `{"name":"moder","command":"python3","args":["${root}/moder.py"],"readOnly":true}`;
+  const pick = `{"name":"writer","command":"echo","args":["WRITER-UP"]},{"name":"reviewer","command":"echo","args":["REVIEWER-UP"],"readOnly":true},${poster},${listener},${chatter},${prompter},${attn},${asker},${hookfirst},${twice},${lateposter},${picker},${moder}`;
   // 터미널에 보내는 명령은 900바이트까지라 (run) 500자씩 나눠 붙인 뒤 옮긴다 (쓰는 도중의 반쪽 파일을 읽지 않게)
   const content = TEST_GROUPS.replace(/]}$/, `,{"id":"pick","name":"Pick","rules":"S2","sessions":[${pick}]}]}`);
   await run(first, `: > "${file}.part"`);
@@ -3852,7 +3952,7 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("쓰는 세션 실행", () => screen(writer.term).some((l) => l.includes("WRITER-UP")), 10000);
   check(
     "세션 추가: 메뉴에서 설정의 세션을 골라 지금 탭 오른쪽 창으로 띄움, 포커스",
-    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter,pick/attn,pick/asker,pick/hookfirst,pick/twice,pick/lateposter,pick/picker" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
+    listed === "test/shell,pick/writer,pick/reviewer,pick/poster,pick/listener,pick/chatter,pick/prompter,pick/attn,pick/asker,pick/hookfirst,pick/twice,pick/lateposter,pick/picker,pick/moder" && labels() === "-,writer" && writer.el.contains(document.activeElement) && writer.rect.left > visiblePanes()[0].rect.left,
     `${listed} | ${labels()}`,
   );
 
@@ -3938,6 +4038,7 @@ async function testAddSession(root: string, first: Terminal) {
 
   await testChatPanel(root, open, choose);
   await testChatPrompt(root, first, open, choose);
+  await testChatMode(root, first, open, choose);
 
   // 경고에서 새 작업그룹을 고르면 별도 worktree의 작업그룹을 연다 (기본 그룹)
   await open("menu");
@@ -4208,6 +4309,135 @@ time.sleep(60)`;
   ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
   await waitFor("채팅 닫기", () => !shown(), 2000).catch(() => null);
   await run(first, `rm -f "${root}/picker.py"`);
+}
+
+// 권한 모드 바꾸기 (src-tauri/src/modes.rs, Terminal.tsx setMode, programStatus.ts readMode·driveMode): 화면 맨 아래 claude 모드
+// 줄을 읽어 참여자의 모드로 알리고, 고르면 Shift+Tab을 하나씩 보내 모드 줄이 따라오는 것을 확인하며 그 모드까지 간다. 결과는
+// 사용자 이름의 기록. moder.py: Shift+Tab마다 자동 → 수동 → 편집 허용 → 계획으로 돌고, 받은 Shift+Tab 수를 화면에 쓴다.
+// d: 선택 창을 띄움 (Enter로 닫음), p: 다음 Shift+Tab에 모드를 바꾸며 선택 창도 띄움, s: 이 뒤로 Shift+Tab에 모드가 바뀌지 않음
+async function testChatMode(root: string, first: Terminal, openAdd: (how: "menu" | "tab") => Promise<void>, choose: (id: string) => void) {
+  const script = String.raw`import os, sys, tty
+M = [("⏵⏵", "auto mode"), ("⏸", "manual mode"), ("⏵⏵", "accept edits"), ("⏸", "plan mode")]
+i = 0
+n = 0
+stuck = False
+dialog = False
+pop = False
+def draw():
+    w = sys.stdout.write
+    w("\x1b[2J\x1b[HKEYS:%d\r\n" % n)
+    if dialog:
+        w("Allow?\r\n❯ 1. Yes\r\n  2. No\r\nEnter to confirm · Esc to cancel\r\n")
+    else:
+        w("\r\n❯ \r\n\r\n  %s %s on (shift+tab to cycle)" % M[i])
+    sys.stdout.flush()
+tty.setraw(0)
+draw()
+while True:
+    k = os.read(0, 16)
+    if k == b"\x1b[Z":
+        n += 1
+        if not stuck and not dialog:
+            i = (i + 1) % len(M)
+            dialog = pop
+            pop = False
+    elif k == b"p":
+        pop = True
+    elif k == b"s":
+        stuck = True
+    elif k == b"d":
+        dialog = True
+    elif k == b"\r":
+        dialog = False
+    draw()`;
+  await run(first, `: > "${root}/moder.py"`);
+  for (const line of script.split("\n")) await run(first, `printf '%s\\n' '${line}' >> "${root}/moder.py"`);
+  const ws = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const panel = () => ws().querySelector<HTMLElement>(".chat-panel");
+  const tabsBefore = tabCount();
+  await menu("new_tab");
+  await waitFor("moder 탭", () => tabCount() === tabsBefore + 1 && paneEls().length === 1, 5000);
+  const panesBefore = paneEls().length;
+  await openAdd("menu");
+  choose("pick/moder");
+  await waitFor("moder 창", () => paneEls().length === panesBefore + 1, 5000);
+  const pane = visiblePanes().find((p) => p.el.querySelector(".pane-label")?.textContent?.startsWith("moder"))!;
+  const text = () => screen(pane.term).join("\n");
+  const modes = () => invoke<[string, string][]>("selftest_chat_modes", { project: root });
+  const modeIs = (m: string) => waitAsync(`모드 ${m}`, async () => (await modes()).some(([n, x]) => n === "origin/moder" && x === m), 5000).then(() => true, () => false);
+  type Stored = { id: number; from: string; to: string[]; mode?: { member: string; mode: string; result: string } };
+  const records = async () => (await invoke<Stored[]>("chat_messages", { project: root })).filter((m) => m.mode);
+  const set = (mode: string) => invoke("chat_set_mode", { project: root, member: "origin/moder", mode }).then(() => "ok", (e) => String(e));
+  const nextRecord = async (count: number) => waitAsync("모드 기록", async () => (await records()).length > count && (await records())[count], 8000).catch(() => undefined);
+
+  const auto = await modeIs("auto");
+  // 수동으로: 한 번 눌러 바뀜. 계획으로: 두 번 (수동 → 편집 허용 → 계획)
+  let count = (await records()).length;
+  const toManual = await set("manual");
+  const manualRecord = await nextRecord(count);
+  const manualShown = (await modeIs("manual")) && text().includes("KEYS:1") && text().includes("manual mode on");
+  count++;
+  const toPlan = await set("plan");
+  const planRecord = await nextRecord(count);
+  const planShown = (await modeIs("plan")) && text().includes("KEYS:3") && text().includes("plan mode on");
+  count++;
+  check(
+    "권한 모드: 화면 맨 아래 모드 줄을 참여자의 모드로 알리고, 고르면 Shift+Tab을 하나씩 보내 그 모드까지 (수동 1번, 계획 2번), 사용자 이름으로 기록",
+    auto && toManual === "ok" && manualRecord?.mode?.result === "sent" && manualRecord.mode.mode === "manual" && manualRecord.from === "user" && manualRecord.to.length === 0 && manualShown &&
+      toPlan === "ok" && planRecord?.mode?.result === "sent" && planShown,
+    `${auto} ${toManual} ${JSON.stringify(manualRecord)} ${manualShown} ${toPlan} ${JSON.stringify(planRecord)} ${planShown} ${JSON.stringify(await modes())} ${JSON.stringify(text())}`,
+  );
+  // 권한 확인을 모두 끄는 모드는 고를 수 없고, 선택 창이 떠 있는 동안은 바꾸지 않는다 (모드는 지난 것 그대로 보인다)
+  const bypass = await set("bypass");
+  pane.term.input("d");
+  await waitFor("선택 창", () => text().includes("Enter to confirm"), 3000).catch(() => null);
+  await sleep(500);
+  const whileDialog = await set("auto");
+  const keptMode = await modeIs("plan");
+  const noKey = text().includes("KEYS:3");
+  pane.term.input("\r");
+  await waitFor("선택 창 닫힘", () => text().includes("plan mode on"), 3000).catch(() => null);
+  check(
+    "권한 모드: bypass는 고를 수 없음, 선택 창이 떠 있으면 바꾸지 않고 (키를 보내지 않음) 모드는 그대로 보임",
+    bypass === "mode" && whileDialog === "awaiting" && keptMode && noKey && (await records()).length === count,
+    `${bypass} ${whileDialog} ${keptMode} ${noKey} ${JSON.stringify(text())}`,
+  );
+  // bypass를 켤 수 있는 세션(여기서는 작업 폴더의 claude 설정)은 바꾸지 않는다 (리뷰 R1)
+  await run(first, `mkdir -p "${root}/.claude" && printf '%s' '{"permissions":{"defaultMode":"bypassPermissions"}}' > "${root}/.claude/settings.local.json"`);
+  const bypassable = await set("manual");
+  await run(first, `rm -f "${root}/.claude/settings.local.json"; rmdir "${root}/.claude" 2>/dev/null; true`);
+  // 바꾸는 중에 선택 창이 뜨면 (모드 줄이 사라짐) 더 누르지 않고 멈춘다 (리뷰 R2): 계획 → 자동에서 선택 창, 수동까지 가지 않음
+  pane.term.input("p");
+  await sleep(300);
+  const toManualAgain = await set("manual");
+  const popRecord = await nextRecord(count);
+  const popKeys = text().includes("KEYS:4") && text().includes("Enter to confirm");
+  pane.term.input("\r");
+  const popMode = await modeIs("auto");
+  count = (await records()).length;
+  check(
+    "권한 모드: bypass를 켤 수 있는 세션은 바꾸지 않음, 바꾸는 중 선택 창이 뜨면 더 누르지 않고 화면이 바뀜으로 기록 (리뷰 R1·R2)",
+    bypassable === "bypass" && toManualAgain === "ok" && popRecord?.mode?.result === "changed" && popKeys && popMode,
+    `${bypassable} ${toManualAgain} ${JSON.stringify(popRecord)} ${popKeys} ${popMode} ${JSON.stringify(text())}`,
+  );
+  // 모드 줄이 따라오지 않으면 한 번만 누르고 멈춰 실패로 기록
+  pane.term.input("s");
+  await sleep(300);
+  const toPlanStuck = await set("plan");
+  const stuckRecord = await nextRecord(count);
+  check(
+    "권한 모드: Shift+Tab에 모드 줄이 바뀌지 않으면 더 누르지 않고 바꾸지 못함으로 기록",
+    toPlanStuck === "ok" && stuckRecord?.mode?.result === "failed" && text().includes("KEYS:5") && text().includes("auto mode on"),
+    `${toPlanStuck} ${JSON.stringify(stuckRecord)} ${JSON.stringify(text())}`,
+  );
+
+  pane.term.focus();
+  await menu("close_pane");
+  await waitFor("moder 닫힘", () => paneEls().length === panesBefore, 5000).catch(() => null);
+  await menu("close_pane");
+  await waitFor("moder 탭 닫힘", () => tabCount() === tabsBefore, 5000).catch(() => null);
+  if (panel() && panel()!.style.display !== "none") ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  await run(first, `rm -f "${root}/moder.py"`);
 }
 
 // 채팅 패널 (src/ChatPanel.tsx): 탭 바 버튼으로 연다. 세션이 보낸 메시지와 참여자를 보이고, 참여자를 누르면 멘션을
@@ -5294,6 +5524,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["programStatusUnit", testProgramStatusUnit],
     ["promptAnswerUnit", () => testPromptAnswerUnit()],
     ["altLossUnit", testAltLossUnit],
+    ["permissionModeUnit", testPermissionModeUnit],
     ["notifyClickUnit", testNotifyClickUnit],
     ["programStatus", () => testProgramStatus(root, t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],

@@ -73,6 +73,10 @@ struct Session {
     hook_attention: Option<Instant>,
     // 앞에서 도는 프로그램이 작업 중이다 (OSC 7501 working, 프론트가 알린다). 하나라도 있으면 잠자기를 막는다 (keep_awake)
     working: bool,
+    // 화면 아래 claude 모드 줄에서 읽은 권한 모드 (auto·manual·acceptEdits·plan·bypass. 프론트가 알린다, pty_mode. 폰의 참여자 칩)
+    mode: Option<String>,
+    // 띄운 명령과 인자 (이어서 하기가 실패하면 쓸 것까지. 모드 바꾸기가 bypass를 켤 수 있는 세션인지 본다, modes.rs)
+    argv: Vec<String>,
 }
 
 // 알림을 쓴 뒤 보낼 Enter. at: 알림을 쓴 때, before: 그때의 사용자 입력, force: 바로 깨우기(사용자가 누름)라 기다려도 보냄,
@@ -284,6 +288,7 @@ fn spawn(
         return Err(format!("{cwd}: no such folder"));
     }
     let real = crate::platform::canonical(cwd).map_err(|e| e.to_string())?;
+    let argv: Vec<String> = command.into_iter().chain(fallback).flatten().cloned().collect();
     let (master, proc) = open_and_spawn(shell_command(cwd, command, fallback, shell_after)?, size)?;
     #[cfg(unix)]
     let pid = proc.child.process_id();
@@ -318,7 +323,7 @@ fn spawn(
         let _ = output_ended.recv_timeout(Duration::from_millis(500));
         exited(code);
     });
-    Ok(Session { master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_kind: String::new(), awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None, working: false })
+    Ok(Session { master, writer, proc, cwd: real, leave: None, chat_token: None, input: Input::NONE, awaiting: false, awaiting_kind: String::new(), awaiting_changed: None, awaiting_changes: 0, enter: None, hook_attention: None, working: false, mode: None, argv })
 }
 
 // 이 세션(setsid로 만든 세션, ID = 자식 PID)에 남은 프로세스. 좀비는 아무것도 못 하니 뺀다.
@@ -829,6 +834,16 @@ pub fn pty_working(app: tauri::AppHandle, ptys: State<'_, Ptys>, id: u32, workin
     crate::mobile::publish(&app, None, "status", serde_json::json!({}));
 }
 
+// 앞에서 도는 claude의 권한 모드 (프론트 src/Terminal.tsx: 화면 아래 모드 줄, 없으면 None). 바뀔 때만 온다: 폰은 참여자를
+// 다시 읽는다 (mobile.rs)
+#[tauri::command]
+pub fn pty_mode(app: tauri::AppHandle, ptys: State<'_, Ptys>, id: u32, mode: Option<String>) {
+    if let Some(s) = ptys.sessions.lock().unwrap().get_mut(&id) {
+        s.mode = mode;
+    }
+    crate::mobile::publish(&app, None, "status", serde_json::json!({}));
+}
+
 // 자체 테스트: 잠자기를 막고 있는지 (caffeinate가 떠 있는지)
 #[tauri::command]
 pub fn selftest_keep_awake(ptys: State<'_, Ptys>) -> bool {
@@ -971,6 +986,17 @@ impl Ptys {
                 Some((s.chat_token.clone()?, status))
             })
             .collect()
+    }
+
+    // 띄운 명령과 인자, 작업 폴더 (modes.rs)
+    pub fn launch(&self, id: u32) -> Option<(Vec<String>, PathBuf)> {
+        self.sessions.lock().unwrap().get(&id).map(|s| (s.argv.clone(), s.cwd.clone()))
+    }
+
+    // 채팅에 참여한 터미널의 권한 모드: (터미널, 토큰, 모드, 사용자를 기다리는지). 모드 줄을 읽은 것만 (modes.rs)
+    pub fn modes(&self) -> Vec<(u32, String, String, bool)> {
+        let sessions = self.sessions.lock().unwrap();
+        sessions.iter().filter_map(|(id, s)| Some((*id, s.chat_token.clone()?, s.mode.clone()?, s.awaiting))).collect()
     }
 
     // 깨우기를 기다리는 터미널의 채팅 토큰 (채팅 패널의 대기 표시, chat.rs chat_waiting)

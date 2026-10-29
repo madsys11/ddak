@@ -256,3 +256,61 @@ export async function driveAnswer(o: {
 export function awaitingUser(status: ProgramStatus | undefined, dialogSince: number | undefined, now: number): boolean {
   return status?.state === "blocked" || (dialogSince !== undefined && now - dialogSince < DIALOG_CAP_MS);
 }
+
+// claude의 권한 모드 (docs/spec.md "권한 모드 바꾸기", src-tauri/src/modes.rs). 화면 맨 아래 모드 줄에서 읽는다 (claude 2.1.312:
+// `⏵⏵ auto mode on (shift+tab to cycle)`, `⏸ manual mode on · ? for shortcuts`, `⏵⏵ accept edits on …`, `⏸ plan mode on …`).
+// 자동 모드를 쓸 수 없는 claude의 기본 모드는 줄에 모드가 없어 읽지 못한다 (그 세션은 바꾸지 않는다).
+export type PermissionMode = "auto" | "manual" | "acceptEdits" | "plan" | "bypass";
+const MODE_LINE = /^\s*(?:⏵⏵|⏸)\s+(auto mode|manual mode|accept edits|plan mode|bypass permissions) on\b/;
+const MODE_OF: Record<string, PermissionMode> = { "auto mode": "auto", "manual mode": "manual", "accept edits": "acceptEdits", "plan mode": "plan", "bypass permissions": "bypass" };
+// 모드 줄을 찾는 곳: 빈 줄을 뺀 맨 아래 몇 줄 (대화 중의 같은 글은 보지 않는다)
+const MODE_LINES = 2;
+export function readMode(lines: readonly string[]): PermissionMode | null {
+  for (const l of lines.filter((l) => l.trim() !== "").slice(-MODE_LINES)) {
+    const m = MODE_LINE.exec(l);
+    if (m) return MODE_OF[m[1]];
+  }
+  return null;
+}
+
+// Shift+Tab (claude가 모드를 다음으로 돌린다)
+export const MODE_KEY = "\x1b[Z";
+// claude 2.1.312에서 Shift+Tab이 도는 순서. bypass를 켤 수 있는 세션은 Rust가 받지 않는다 (modes.rs bypass_possible)
+export const MODE_CYCLE: readonly PermissionMode[] = ["auto", "manual", "acceptEdits", "plan"];
+// 고른 모드로 바꾼다 (Terminal.tsx): Shift+Tab을 하나씩 보내고, 모드 줄이 MODE_CYCLE의 바로 다음 모드로 바뀐 것을 확인하며 고른
+// 모드까지 간다. 키마다 보내기 직전에 모드 줄을 다시 본다 (ok). 처음부터 그 모드면 보내지 않고 "sent".
+// read가 null(모드 줄이 사라짐, 선택 창이 뜸)이거나 취소되면 바로 "changed" (리뷰 R2: 다시 보여도 이어 가지 않는다).
+// 한 번에 SETTLE_MS 안에 바뀌지 않거나, 다음이 아닌 모드로 바뀌거나 (리뷰 R2), 순서에 없는 모드에서 시작하거나, 쓰지 못하면 "failed"
+export async function driveMode(o: {
+  target: PermissionMode;
+  read: () => PermissionMode | null;
+  send: (data: string, ok: (now: PermissionMode | null) => boolean) => Promise<"sent" | "skipped" | "error">;
+  cancelled?: () => boolean;
+  sleep?: (ms: number) => Promise<unknown>;
+  now?: () => number;
+}): Promise<"sent" | "changed" | "failed"> {
+  const sleep = o.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  const now = o.now ?? (() => performance.now());
+  const cancelled = o.cancelled ?? (() => false);
+  const start = o.read();
+  if (!start || cancelled()) return "changed";
+  if (start === o.target) return "sent";
+  if (!MODE_CYCLE.includes(start) || !MODE_CYCLE.includes(o.target)) return "failed";
+  let mode: PermissionMode = start;
+  while (mode !== o.target) {
+    const from: PermissionMode = mode;
+    const next = MODE_CYCLE[(MODE_CYCLE.indexOf(from) + 1) % MODE_CYCLE.length];
+    const r = await o.send(MODE_KEY, (m) => !cancelled() && m === from);
+    if (r !== "sent") return r === "skipped" ? "changed" : "failed";
+    const deadline = now() + SETTLE_MS;
+    for (;;) {
+      const m = o.read();
+      if (cancelled() || m === null) return "changed";
+      if (m === next) break;
+      if (m !== from || now() > deadline) return "failed";
+      await sleep(50);
+    }
+    mode = next;
+  }
+  return "sent";
+}

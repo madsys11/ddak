@@ -43,6 +43,9 @@ pub struct Message {
     // 선택 창에 보낸 답의 기록 (prompts.rs)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Answer>,
+    // 세션의 권한 모드를 바꾼 기록 (modes.rs)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModeChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -76,6 +79,23 @@ pub struct Answer {
     pub label: String,
     // sent: 보냄. changed: 화면의 선택 창이 바뀌거나 닫혀 보내지 않음. failed: 커서를 옮기지 못하는 등으로 보내지 않음
     pub result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModeChange {
+    // 모드를 바꾼 세션 (참여자 이름)
+    pub member: String,
+    // 고른 모드 (auto·manual·acceptEdits·plan)
+    pub mode: String,
+    // sent: 바뀜. changed: 화면이 바뀌거나(선택 창이 뜸 등) 취소돼 멈춤. failed: 모드 줄이 따라오지 않거나 쓰지 못해 멈춤
+    pub result: String,
+}
+
+// 기록 메시지에 붙는 것 (post_note)
+pub enum Record {
+    Prompt(Prompt),
+    Answer(Answer),
+    Mode(ModeChange),
 }
 
 struct Member {
@@ -412,9 +432,15 @@ impl Chats {
         self.inner.lock().unwrap().members.get(token).map(|m| (m.project.clone(), m.name.clone()))
     }
 
-    // 기록을 붙인다: 받는 사람(to)을 정해서, 멘션·자동 깨우기 셈 없이 (선택 창과 그 답, prompts.rs). 받는 사람이 세션이 아니면
+    // 기록을 붙인다: 받는 사람(to)을 정해서, 멘션·자동 깨우기 셈 없이 (선택 창과 그 답 prompts.rs, 모드 바꾸기 modes.rs). 받는 사람이 세션이 아니면
     // 아무도 깨우지 않는다. 알림은 on_message가 메시지를 보고 정한다
-    pub fn post_note(&self, project: &Path, from: &str, text: &str, to: Vec<String>, prompt: Option<Prompt>, answer: Option<Answer>, via: Option<&str>) -> Result<Message, String> {
+    pub fn post_note(&self, project: &Path, from: &str, text: &str, to: Vec<String>, record: Record, via: Option<&str>) -> Result<Message, String> {
+        let (mut prompt, mut answer, mut mode) = (None, None, None);
+        match record {
+            Record::Prompt(p) => prompt = Some(p),
+            Record::Answer(a) => answer = Some(a),
+            Record::Mode(m) => mode = Some(m),
+        }
         let message = {
             let mut inner = self.inner.lock().unwrap();
             let file = self.file(project);
@@ -422,7 +448,7 @@ impl Chats {
             let floor = inner.floors.get(project).copied().unwrap_or(0);
             let room = inner.rooms.get_mut(project).unwrap();
             let id = room.iter().map(|m| m.id).max().unwrap_or(0).max(floor) + 1;
-            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held: false, via: via.map(str::to_string), prompt, answer };
+            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held: false, via: via.map(str::to_string), prompt, answer, mode };
             let line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&self.dir).and_then(|()| append_line(&file, &line)).map_err(|e| e.to_string())?;
             room.push(message.clone());
@@ -465,7 +491,7 @@ impl Chats {
             let floor = inner.floors.get(project).copied().unwrap_or(0);
             let room = inner.rooms.get_mut(project).unwrap();
             let id = room.iter().map(|m| m.id).max().unwrap_or(0).max(floor) + 1;
-            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held, via: via.map(str::to_string), prompt: None, answer: None };
+            let message = Message { id, time: now_ms(), from: from.to_string(), text: text.to_string(), to, held, via: via.map(str::to_string), prompt: None, answer: None, mode: None };
             let line = serde_json::to_string(&message).map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&self.dir).and_then(|()| append_line(&file, &line)).map_err(|e| e.to_string())?;
             room.push(message.clone());
@@ -1203,7 +1229,7 @@ mod tests {
         let dir = temp("broken");
         let p = Path::new("/p/b");
         let chats = Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
-        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![], held: false, via: None, prompt: None, answer: None }).unwrap();
+        let line = |id: u64| serde_json::to_string(&Message { id, time: 0, from: USER.into(), text: format!("m{id}"), to: vec![], held: false, via: None, prompt: None, answer: None, mode: None }).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let mut bytes = format!("{}\n", line(1)).into_bytes();
         bytes.extend(b"\xff\xfe broken\n");

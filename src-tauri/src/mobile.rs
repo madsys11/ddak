@@ -98,6 +98,10 @@ pub struct Ctx {
     pub prompts: Box<dyn Fn(&Path) -> Vec<String> + Send + Sync>,
     // 선택 창에 답한다: (프로젝트, 선택 창 id, 선택지, 기기 이름) (prompts.rs answer)
     pub answer: Box<dyn Fn(&Path, &str, usize, &str) -> Result<(), String> + Send + Sync>,
+    // 그 프로젝트 참여자의 권한 모드: (이름, 모드) (modes.rs modes_in)
+    pub modes: Box<dyn Fn(&Path) -> Vec<(String, String)> + Send + Sync>,
+    // 참여자의 권한 모드를 바꾼다: (프로젝트, 참여자, 모드, 기기 이름) (modes.rs set_mode)
+    pub set_mode: Box<dyn Fn(&Path, &str, &str, &str) -> Result<(), String> + Send + Sync>,
     // 프론트에 그 프로젝트(등록된 경로)를 열게 한다 ("맥에서 열기", 활성 프로젝트는 그대로)
     pub open: Box<dyn Fn(&Path) + Send + Sync>,
     // 앱 데이터 mobile 폴더
@@ -666,8 +670,9 @@ impl Mobile {
                     }
                 }
                 let prompts = (self.ctx.prompts)(&project);
+                let modes: serde_json::Map<String, Value> = (self.ctx.modes)(&project).into_iter().map(|(n, m)| (n, json!(m))).collect();
                 let open = self.is_open(&project);
-                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "prompts": prompts, "open": open }))
+                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "prompts": prompts, "modes": modes, "open": open }))
             }
             // 맥에서 연다 (프론트가 열면 set_opened로 알려 와 목록·참여자가 바뀐다)
             (Post, "open") => {
@@ -694,6 +699,14 @@ impl Mobile {
             // 선택 창에 답한다 (화면이 확인을 받은 뒤). 넣은 결과는 채팅 기록으로 온다
             (Post, "answer") => match (body.get("prompt").and_then(Value::as_str), body.get("option").and_then(Value::as_u64)) {
                 (Some(prompt), Some(option)) => match (self.ctx.answer)(&project, prompt, option as usize, &device.name) {
+                    Ok(()) => (200, json!({})),
+                    Err(e) => (409, json!({ "error": e })),
+                },
+                _ => (400, json!({ "error": "body" })),
+            },
+            // 참여자의 권한 모드를 바꾼다 (화면이 고른 뒤). 바꾼 결과는 채팅 기록으로 온다
+            (Post, "mode") => match (body.get("member").and_then(Value::as_str), body.get("mode").and_then(Value::as_str)) {
+                (Some(member), Some(mode)) => match (self.ctx.set_mode)(&project, member, mode, &device.name) {
                     Ok(()) => (200, json!({})),
                     Err(e) => (409, json!({ "error": e })),
                 },
@@ -852,7 +865,7 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             return MobileState(None);
         }
     };
-    let (a, b, c, d, e, f) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
+    let (a, b, c, d, e, f, g, h) = (app.clone(), app.clone(), app.clone(), app.clone(), app.clone(), app.clone(), app.clone(), app.clone());
     let members = chats.clone();
     let ctx = Ctx {
         chats: chats.clone(),
@@ -874,6 +887,8 @@ pub fn install(app: &tauri::AppHandle, chats: Option<Arc<Chats>>) -> MobileState
             d.state::<crate::prompts::Prompts>().open_in(project, |pty| ptys.exists(pty))
         }),
         answer: Box::new(move |project, prompt, option, device| crate::prompts::answer(&e, project, prompt, option, Some(device))),
+        modes: Box::new(move |project| crate::modes::modes_in(&g, project)),
+        set_mode: Box::new(move |project, member, mode, device| crate::modes::set_mode(&h, project, member, mode, Some(device))),
         open: Box::new(move |project| {
             use tauri::Emitter;
             let _ = f.emit("mobile-open", project.to_string_lossy());
@@ -1067,6 +1082,16 @@ mod tests {
         Ok(())
     }
 
+    // 모드 바꾸기 대역: "dev"만 바꿀 수 있다. 받은 것을 남긴다
+    static MODE_SETS: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+    fn mode_stub(_: &Path, member: &str, mode: &str, device: &str) -> Result<(), String> {
+        if member != "dev" {
+            return Err("none".into());
+        }
+        MODE_SETS.lock().unwrap().push((member.to_string(), mode.to_string(), device.to_string()));
+        Ok(())
+    }
+
     fn fixture_with(name: &str, status: Box<dyn Fn(&Path) -> Vec<(String, String)> + Send + Sync>) -> Fixture {
         let dir = std::env::temp_dir().join(format!("ddak-mobile-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1078,7 +1103,7 @@ mod tests {
         let opened = Arc::new(Mutex::new(Vec::new()));
         let record = opened.clone();
         let open = Box::new(move |p: &Path| record.lock().unwrap().push(p.to_path_buf()));
-        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status, prompts: Box::new(|_| vec!["p1".into()]), answer: Box::new(answer_stub), open, dir: dir.join("mobile") };
+        let ctx = Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status, prompts: Box::new(|_| vec!["p1".into()]), answer: Box::new(answer_stub), modes: Box::new(|_| vec![("dev".into(), "auto".into())]), set_mode: Box::new(mode_stub), open, dir: dir.join("mobile") };
         let mobile = Mobile::new(ctx);
         {
             let mut st = mobile.state.lock().unwrap();
@@ -1294,7 +1319,7 @@ mod tests {
         f.mobile.forget(&id_a).unwrap();
         let p = f.project.clone();
         let chats = Chats::new(f.dir.join("chats"), Box::new(|_, _| {}), 0);
-        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status: Box::new(|_| vec![]), prompts: Box::new(|_| vec![]), answer: Box::new(answer_stub), open: Box::new(|_| {}), dir: f.dir.join("mobile") });
+        let again = Mobile::new(Ctx { chats, projects: Box::new(move || vec![p.clone()]), waiting: Box::new(|_| vec![]), status: Box::new(|_| vec![]), prompts: Box::new(|_| vec![]), answer: Box::new(answer_stub), modes: Box::new(|_| vec![]), set_mode: Box::new(mode_stub), open: Box::new(|_| {}), dir: f.dir.join("mobile") });
         assert!(again.device(&a, LOGIN).is_none());
         assert!(again.device(&b, LOGIN).is_some());
     }
@@ -1407,6 +1432,15 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].0.as_str(), got[0].1), ("p1", 1));
         assert!(!got[0].2.is_empty(), "기기 이름");
+        // 권한 모드와 바꾸기 (기기 이름이 넘어간다, 바꿀 수 없으면 409)
+        assert_eq!(members["modes"], json!({ "dev": "auto" }));
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/mode"), &h, r#"{"member":"dev","mode":"manual"}"#).0, 200);
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/mode"), &h, r#"{"member":"rev","mode":"manual"}"#).0, 409);
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/mode"), &h, r#"{"member":"dev"}"#).0, 400);
+        let sets = MODE_SETS.lock().unwrap().clone();
+        assert_eq!(sets.len(), 1);
+        assert_eq!((sets[0].0.as_str(), sets[0].1.as_str()), ("dev", "manual"));
+        assert!(!sets[0].2.is_empty(), "기기 이름");
         let (_, body) = http(f.port, "GET", "/api/projects", &h, "");
         assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["projects"][0]["awaiting"], 2);
     }

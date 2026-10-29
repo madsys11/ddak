@@ -10,7 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
 import { draggedPath, droppedFiles, isFileDrag, isPathDrag, noteFileDrag, shellQuote } from "./dragPath";
 import { fixImeInput, passesImeKey } from "./hangul";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, watchAltLoss, driveAnswer, AnswerRuns, type Dialog, type ProgramStatus, type SendKey } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, readMode, watchAltLoss, driveAnswer, driveMode, AnswerRuns, type Dialog, type PermissionMode, type ProgramStatus, type SendKey } from "./programStatus";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 import { TerminalSearch } from "./TerminalSearch";
@@ -301,7 +301,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     // 상태는 보낸 순서대로 도착해야 한다 (invoke는 호출마다 따로 가서 순서가 보장되지 않는다. 늦게 온 오래된 값이 남으면 잠자기
     // 막기가 반대로 굳는다, 리뷰 R3). 한 줄로 세우고, PTY가 생기기 전에 바뀐 것은 생길 때까지 기다렸다 보낸다
     let statusSends: Promise<unknown> = Promise.resolve();
-    const sendStatus = (cmd: "pty_awaiting" | "pty_working" | "pty_dialog", args: Record<string, unknown>) => {
+    const sendStatus = (cmd: "pty_awaiting" | "pty_working" | "pty_dialog" | "pty_mode", args: Record<string, unknown>) => {
       statusSends = statusSends
         .then(() => idReady)
         .then(async (target) => {
@@ -410,6 +410,52 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
     const answers = listen<{ pty: number; seq: number; prompt: string; option: number; request: number }>("prompt-answer", ({ payload }) => {
       if (!disposed && id !== undefined && payload.pty === id) answerPrompt(payload);
     });
+    // claude의 권한 모드 (화면 맨 아래 모드 줄, src/programStatus.ts readMode). 바뀌면 알린다 (폰의 참여자 칩, src-tauri/src/modes.rs).
+    // 선택 창이 떠 있는 동안은 모드 줄이 가려지므로 지난 모드를 그대로 둔다
+    let sentMode: PermissionMode | null = null;
+    const reportMode = (lines: string[]) => {
+      const mode = readMode(lines);
+      if (mode === sentMode || (mode === null && awaiting)) return;
+      sentMode = mode;
+      sendStatus("pty_mode", { mode });
+    };
+    // 채팅(폰)에서 고른 모드로 바꾼다 (src/programStatus.ts driveMode). 한 번에 하나, 더 새 요청만 받는다. 키는 mode_write로 써서
+    // Rust가 지금 요청인지 다시 본다. 쓰는 차례가 오면 그때 화면에 선택 창이 없고 모드 줄이 그대로인지 보고 쓴다
+    const modeRuns = new AnswerRuns();
+    const setMode = async ({ mode, request }: { mode: PermissionMode; request: number }) => {
+      const run = modeRuns.start(request);
+      if (!run) return;
+      const target = id!;
+      const result = (r: "sent" | "changed" | "failed") => invoke("mode_result", { id: target, request, result: r }).catch(() => {});
+      try {
+        const send = (data: string, ok: (now: PermissionMode | null) => boolean) => {
+          const p = sending.then(async () => {
+            const lines = screenLines();
+            if (run.cancelled || disposed || awaiting || dialogOnScreen(lines) || !ok(readMode(lines))) return "skipped" as const;
+            try {
+              await invoke("mode_write", { id: target, request, data });
+              return "sent" as const;
+            } catch (e) {
+              return String(e) === "stale" ? ("skipped" as const) : ("error" as const);
+            }
+          });
+          sending = p.catch(() => {});
+          return p;
+        };
+        const cancelled = () => run.cancelled || disposed;
+        // 선택 창이 뜨거나 사용자를 기다리게 되면 모드 줄이 사라진 것과 같다 (리뷰 R2: 멈춘다)
+        const read = () => {
+          const lines = screenLines();
+          return awaiting || dialogOnScreen(lines) ? null : readMode(lines);
+        };
+        return result(await driveMode({ target: mode, read, send, cancelled }));
+      } finally {
+        modeRuns.end(run);
+      }
+    };
+    const modeSets = listen<{ pty: number; mode: PermissionMode; request: number }>("mode-set", ({ payload }) => {
+      if (!disposed && id !== undefined && payload.pty === id) setMode(payload);
+    });
     // 화면 아래쪽의 선택 창 (출력을 그린 뒤 잠시 모아서 본다)
     let dialogCheck: ReturnType<typeof setTimeout> | undefined;
     const checkDialog = () => {
@@ -424,6 +470,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       }
       report();
       reportDialog(lines);
+      reportMode(lines);
     };
     const parsed = term.onWriteParsed(() => {
       if (dialogCheck === undefined) dialogCheck = setTimeout(checkDialog, 100);
@@ -450,6 +497,7 @@ export function Terminal({ cwd, command, fallback, vars, shiftEnter, shiftEnterF
       wakes.then((f) => f(), () => {});
       clicks.then((f) => f(), () => {});
       answers.then((f) => f(), () => {});
+      modeSets.then((f) => f(), () => {});
       userEvents.forEach((e) => term.textarea?.removeEventListener(e, userEvent, true));
       el.removeEventListener("dragover", onDragOver);
       el.removeEventListener("drop", onDrop);

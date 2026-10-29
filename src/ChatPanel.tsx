@@ -5,12 +5,13 @@ import { devHooks } from "./devHooks";
 import { draggedPath, droppedFiles, insertAt, isFileDrag, isPathDrag, noteFileDrag } from "./dragPath";
 import { PANEL_SIZES, usePrefs } from "./prefs";
 import { PromptChoices, answerText, lastAnswers, type Answer, type Prompt } from "./PromptChoices";
+import { modeText, type ModeChange } from "./ModePicker";
 import { Resizer } from "./Resizer";
 
 // src-tauri/src/chat.rs Message
 // held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음. via: 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
-// prompt: 세션이 띄운 선택 창, answer: 그 답의 기록 (prompts.rs)
-export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string; prompt?: Prompt; answer?: Answer };
+// prompt: 세션이 띄운 선택 창, answer: 그 답의 기록 (prompts.rs), mode: 권한 모드를 바꾼 기록 (modes.rs)
+export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string; prompt?: Prompt; answer?: Answer; mode?: ModeChange };
 
 // src-tauri/src/chat.rs WAKE_LIMIT
 const WAKE_LIMIT = 6;
@@ -250,6 +251,10 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
             ) : m.answer ? (
               <div className={`chat-text chat-answer ${m.answer.result}`} data-answer={m.answer.result}>
                 {answerText(m.answer, t)}
+              </div>
+            ) : m.mode ? (
+              <div className={`chat-text chat-answer ${m.mode.result}`} data-mode-result={m.mode.result}>
+                {modeText(m.mode, t)}
               </div>
             ) : (
               <div className="chat-text">{m.text}</div>

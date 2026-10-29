@@ -7,15 +7,16 @@ export const API_VERSION = 1;
 export type Computer = { id: string; name: string; api: string; token: string };
 
 import type { Answer, Prompt } from "../PromptChoices";
+import type { ModeChange } from "../ModePicker";
 
-// src-tauri/src/chat.rs Message (prompt: 세션이 띄운 선택 창, answer: 그 답의 기록. 예전 ddak에는 없다)
-export type Message = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string; prompt?: Prompt; answer?: Answer };
+// src-tauri/src/chat.rs Message (prompt: 세션이 띄운 선택 창, answer: 그 답의 기록, mode: 권한 모드를 바꾼 기록. 예전 ddak에는 없다)
+export type Message = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string; prompt?: Prompt; answer?: Answer; mode?: ModeChange };
 // awaiting: 사용자를 기다리는 세션 수 (예전 ddak에는 없다)
 // open: 맥에서 열려 있는지 (아니면 세션이 없다), unread: 사용자에게 온 안 읽은 메시지 수 (예전 ddak에는 없다)
 export type Project = { id: string; name: string; sessions: number; awaiting?: number; paused: string[]; open?: boolean; unread?: number };
 // status: 참여자마다 "working"이나 기다리는 종류 (permission·question·auth·dialog·blocked). 없으면 쉬는 중
-// prompts: 맥에 열려 있는 선택 창 id (예전 ddak에는 없다)
-export type Members = { members: string[]; waiting: string[]; status?: Record<string, string>; paused: string[]; prompts?: string[]; open?: boolean };
+// prompts: 맥에 열려 있는 선택 창 id, modes: 참여자마다 claude 권한 모드 (모드 줄을 읽은 것만. 둘 다 예전 ddak에는 없다)
+export type Members = { members: string[]; waiting: string[]; status?: Record<string, string>; paused: string[]; prompts?: string[]; modes?: Record<string, string>; open?: boolean };
 // 맥이 가진 이 폰의 푸시 구독 주소와, 푸시 서비스가 없앴다고 답한 주소 (푸시를 모르는 ddak에는 없다)
 export type PushInfo = { endpoint: string | null; gone: string | null };
 export type Info = { id: string; name: string; version: string; api: number; push?: PushInfo };
@@ -78,6 +79,8 @@ export const api = {
   post: (c: Computer, project: string, text: string) => request<Message>(c.api, `/api/projects/${encodeURIComponent(project)}/messages`, c.token, { text }),
   // 선택 창에 답한다 (넣은 결과는 채팅의 답 기록으로 온다)
   answer: (c: Computer, project: string, prompt: string, option: number) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/answer`, c.token, { prompt, option }),
+  // 참여자의 권한 모드를 바꾼다 (바꾼 결과는 채팅의 기록으로 온다)
+  setMode: (c: Computer, project: string, member: string, mode: string) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/mode`, c.token, { member, mode }),
   // 맥에서 연다 ("맥에서 열기"), 여기까지 읽었다
   open: (c: Computer, project: string) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/open`, c.token, {}),
   read: (c: Computer, project: string, id: number) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/read`, c.token, { id }),
