@@ -1676,7 +1676,8 @@ async function testProjects(root: string, first: Terminal) {
   const noRepos = [...document.querySelectorAll(".sidebar-error")].some((e) => e.textContent?.includes("no git repository"));
   check("프로젝트: 저장한 상태를 읽는 동안 새 작업그룹은 만들지 않음", !noRepos);
   await waitFor("두 번째 프로젝트 활성", () => projectRow(other)?.classList.contains("active"));
-  check("프로젝트: 추가 순서대로 목록", projectRows().map((el) => el.dataset.project).join(",") === `${root},${other}`);
+  // other를 나중에 넣었지만 이름순이라 앞이다
+  check("프로젝트: 이름순 목록", projectRows().map((el) => el.dataset.project).join(",") === `${other},${root}`, projectRows().map((el) => el.dataset.project).join(","));
   check("프로젝트: 이전 프로젝트는 활성 해제", !projectRow(root)!.classList.contains("active"));
   const [o] = await waitFor("두 번째 프로젝트 터미널", () => visiblePanes().length === 1 && visiblePanes()[0].term !== first && visiblePanes());
   await ready(o.term);
@@ -1712,7 +1713,17 @@ async function testProjects(root: string, first: Terminal) {
   await devHooks.addProject!(root);
   check("프로젝트: 같은 폴더는 다시 추가되지 않음", projectRows().length === 2);
   const store = await waitStore((s) => s.projects.length === 2 && s.active === root);
-  check("프로젝트: 목록과 활성 프로젝트 저장", store.projects.map((p) => p.path).join(",") === `${root},${other}` && store.active === root, JSON.stringify(store));
+  check("프로젝트: 목록과 활성 프로젝트 저장", store.projects.map((p) => p.path).join(",") === `${other},${root}` && store.active === root, JSON.stringify(store));
+
+  // 대소문자 무시: 대문자로 시작하는 Zeta도 소문자 이름들 뒤 (글자 코드 순이면 맨 앞)
+  const zeta = root.replace(/\/proj$/, "/Zeta");
+  await run(first, `mkdir -p '${zeta}'`);
+  await devHooks.addProject!(zeta, false);
+  await waitFor("Zeta 추가", () => projectRow(zeta));
+  check("프로젝트: 이름순은 대소문자 무시", projectRows().map((el) => el.dataset.project).join(",") === `${other},${root},${zeta}`, projectRows().map((el) => el.dataset.project).join(","));
+  projectRow(zeta)!.querySelector<HTMLElement>("[data-action=remove]")!.click();
+  await waitFor("Zeta 빼기", () => !projectRow(zeta));
+  await waitStore((s) => s.projects.length === 2);
 
   // 화살표는 접고 펼치기만, 활성 프로젝트는 그대로
   // other는 빈 폴더라 펼쳐도 행이 없다. 화살표 모양으로 본다.
@@ -5269,7 +5280,11 @@ async function testGroupStart(root: string) {
 async function testRestart(root: string) {
   const gone = root.replace(/\/proj$/, "/gone");
   const row = await waitFor("저장된 목록", () => projectRow(gone));
-  check("다시 켜기: 저장된 목록을 불러옴", projectRows().map((el) => el.dataset.project).join(",") === `${root},${gone}`);
+  // 저장된 순서는 proj, gone이지만 이름순으로 보이고 그 순서로 다시 저장한다 (폰 목록도 이 순서)
+  check("다시 켜기: 저장된 목록을 이름순으로 불러옴", projectRows().map((el) => el.dataset.project).join(",") === `${gone},${root}`, projectRows().map((el) => el.dataset.project).join(","));
+  const order = (s: Store) => s.projects.map((p) => p.path).join(",");
+  const resorted = await waitStore((s) => order(s) === `${gone},${root}`);
+  check("다시 켜기: 이름순으로 다시 저장", order(resorted) === `${gone},${root}`, JSON.stringify(resorted));
   check("다시 켜기: 없는 폴더는 취소선 표시", row.classList.contains("missing") && row.title === `Folder not found: ${gone}`, row.title);
   check("다시 켜기: 없는 폴더가 활성이었으면 다른 프로젝트로", projectRow(root)!.classList.contains("active") && !row.classList.contains("active"));
   await testGroupStart(root);

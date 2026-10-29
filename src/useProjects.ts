@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type Project = { path: string; missing: boolean };
 type Store = { projects: { path: string }[]; active: string | null };
 
-import { trimTrailingSep } from "./platform";
+import { baseName, trimTrailingSep } from "./platform";
 export { baseName } from "./platform";
 
 const exists = (path: string) => invoke("list_dir", { path }).then(() => true, () => false);
@@ -16,6 +16,13 @@ const normalize = (path: string) => trimTrailingSep(path);
 // 목록 파일을 못 읽었을 때. 이 상태에서는 목록을 바꾸지 않는다 (바꿔도 저장할 수 없고,
 // 저장하면 읽지 못한 원래 목록을 빈 목록으로 덮어쓴다).
 export class StoreBroken extends Error {}
+
+// 목록은 늘 폴더 이름순 (파일 트리처럼 대소문자 무시). 이름이 같으면 경로순.
+// 맥 폴더 이름은 한글이 NFD일 수 있어 NFC로 맞춰 비교한다.
+// 정렬한 채로 저장하므로 폰 목록(projects.json의 순서)도 같은 순서다.
+const key = (p: Project) => baseName(p.path).normalize("NFC").toLowerCase();
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+const sorted = (list: Project[]) => [...list].sort((a, b) => cmp(key(a), key(b)) || cmp(a.path, b.path));
 
 export function useProjects() {
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -31,7 +38,7 @@ export function useProjects() {
     let alive = true;
     (async () => {
       const store = await invoke<Store>("projects_load");
-      const list = await Promise.all(store.projects.map(async (p) => ({ path: p.path, missing: !(await exists(p.path)) })));
+      const list = sorted(await Promise.all(store.projects.map(async (p) => ({ path: p.path, missing: !(await exists(p.path)) }))));
       if (!alive) return;
       const usable = list.filter((p) => !p.missing);
       setProjects(list);
@@ -59,7 +66,7 @@ export function useProjects() {
       if (!loaded) throw new StoreBroken();
       const path = normalize(raw);
       if (!(await exists(path))) throw new Error(path);
-      setProjects((list) => (list?.some((p) => p.path === path) ? list : [...(list ?? []), { path, missing: false }]));
+      setProjects((list) => (list?.some((p) => p.path === path) ? list : sorted([...(list ?? []), { path, missing: false }])));
       if (activate) setActive(path);
     },
     [loaded],
