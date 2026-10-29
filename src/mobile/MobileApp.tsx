@@ -228,14 +228,20 @@ const SettingsButton = () => (
   </button>
 );
 
+// 선 아이콘 (글자 크기를 따르고 색은 버튼 글자색)
+const Icon = ({ paths }: { paths: string[] }) => (
+  <svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {paths.map((d) => (
+      <path key={d} d={d} />
+    ))}
+  </svg>
+);
+
 // 처음(컴퓨터 목록)으로 한 번에. 컴퓨터가 여럿일 때 채팅 막대에 둔다 (여러 프로젝트를 다니면 뒤로 가기로는 멀다.
 // 하나면 처음이 프로젝트 목록이라 ‹와 같다)
 const HomeButton = () => (
   <button className="bar-side" data-home onClick={() => go("/")} aria-label={t("phone.computers")} title={t("phone.computers")}>
-    <svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M3 11 12 3l9 8" />
-      <path d="M5 9.5V21h5v-6h4v6h5V9.5" />
-    </svg>
+    <Icon paths={["M3 11 12 3l9 8", "M5 9.5V21h5v-6h4v6h5V9.5"]} />
   </button>
 );
 
@@ -347,7 +353,7 @@ function PushBanner({ computers }: { computers: Computer[] }) {
   );
 }
 
-function ComputerList({ computers, onRemove }: { computers: Computer[]; onRemove: (id: string) => void }) {
+export function ComputerList({ computers, onRemove }: { computers: Computer[]; onRemove: (id: string) => void }) {
   // 컴퓨터마다 켜져 있는지 (/api/info가 답하는지)
   const [state, setState] = useState<Record<string, string>>({});
   useEffect(() => {
@@ -376,8 +382,14 @@ function ComputerList({ computers, onRemove }: { computers: Computer[]; onRemove
               <span className="row-title">{c.name}</span>
               <span className={`row-sub${state[c.id] ? " bad" : ""}`}>{state[c.id] ?? "…"}</span>
             </button>
-            <button className="row-side" onClick={() => confirm(t("phone.removeConfirm", { name: c.name })) && onRemove(c.id)}>
-              {t("phone.remove")}
+            {/* 실수로 누르지 않게 작은 빨간 휴지통 아이콘, 누르면 확인 창 */}
+            <button
+              className="row-side row-remove"
+              onClick={() => confirm(t("phone.removeConfirm", { name: c.name })) && onRemove(c.id)}
+              aria-label={t("phone.remove")}
+              title={t("phone.remove")}
+            >
+              <Icon paths={["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13", "M10 11v6", "M14 11v6"]} />
             </button>
           </div>
         ))}

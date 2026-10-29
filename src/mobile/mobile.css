@@ -166,6 +166,18 @@ textarea:focus {
   margin: 8px 12px 8px 0;
   align-self: center;
 }
+/* 컴퓨터 빼기: 글자 버튼 대신 작은 빨간 아이콘 (실수로 누르기 쉬웠다) */
+.row-remove {
+  color: var(--error);
+  background: transparent;
+  border: none;
+  font-size: calc(20px * var(--font-scale, 1));
+  line-height: 1;
+  padding: 10px;
+}
+.row-remove svg {
+  display: block;
+}
 .row-add {
   margin: 16px;
 }

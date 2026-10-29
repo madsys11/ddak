@@ -23,7 +23,7 @@ import { LOCALES, isLocale } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
 import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
-import { Chat, KeyProblem, Settings as PhoneSettingsView } from "./mobile/MobileApp";
+import { Chat, ComputerList, KeyProblem, Settings as PhoneSettingsView } from "./mobile/MobileApp";
 import { locale as phoneLocale, t as phoneT } from "./mobile/i18n";
 import { DEFAULT_SETTINGS as DEFAULT_PHONE_SETTINGS, parseSettings as parsePhoneSettings, resolveLocale as resolvePhoneLocale, resolveTheme as resolvePhoneTheme, type PhoneSettings } from "./mobile/settings";
 import { API_VERSION as PHONE_API, ApiError as PhoneApiError, api as phoneApi } from "./mobile/api";
@@ -930,14 +930,48 @@ async function testMobileThemeUnit() {
   for (const [id, theme] of Object.entries(THEMES)) {
     const vars = Object.entries(theme.ui).map(([k, v]) => `${k}:${v}`).join(";");
     const loaded = new Promise((r) => (frame.onload = r));
-    frame.srcdoc = `<style>:root{${vars}}${mobileCss}</style><header class="bar"><button class="bar-back">‹</button><h1>Mac</h1><button class="bar-side">+</button></header><main class="list"><button class="row row-main"><span class="row-title">proj</span></button></main><span class="ref" style="color:var(--fg)">x</span>`;
+    frame.srcdoc = `<style>:root{${vars}}${mobileCss}</style><header class="bar"><button class="bar-back">‹</button><h1>Mac</h1><button class="bar-side">+</button></header><main class="list"><button class="row row-main"><span class="row-title">proj</span></button></main><button class="row-side row-remove">x</button><span class="ref" style="color:var(--fg)">x</span><span class="ref-error" style="color:var(--error)">x</span>`;
     await loaded;
     const doc = frame.contentDocument!;
     const color = (sel: string) => frame.contentWindow!.getComputedStyle(doc.querySelector(sel)!).color;
     for (const sel of [".row-title", ".bar-back", ".bar-side"]) if (color(sel) !== color(".ref")) wrong.push(`${id} ${sel} ${color(sel)} (화면 글자 ${color(".ref")})`);
+    const remove = frame.contentWindow!.getComputedStyle(doc.querySelector(".row-remove")!);
+    if (color(".row-remove") !== color(".ref-error") || remove.backgroundColor !== "rgba(0, 0, 0, 0)") wrong.push(`${id} .row-remove ${remove.color} ${remove.backgroundColor} (오류색 ${color(".ref-error")})`);
   }
-  frame.remove();
-  check("폰 화면: 배경 없는 버튼(프로젝트 이름, 막대의 ‹·+)은 모든 테마에서 화면 글자색", wrong.length === 0, wrong.join(", "));
+  check("폰 화면: 배경 없는 버튼(프로젝트 이름, 막대의 ‹·+)은 화면 글자색, 컴퓨터 빼기는 배경 없이 오류색 (모든 테마)", wrong.length === 0, wrong.join(", "));
+
+  // 컴퓨터 빼기 (MobileApp.tsx ComputerList): 글자 없는 휴지통 아이콘(이름은 "빼기"), 확인 창에서 취소하면 빼지 않는다
+  const loaded = new Promise((r) => (frame.onload = r));
+  frame.srcdoc = `<style>${mobileCss}</style><div id="root"></div>`;
+  await loaded;
+  const doc = frame.contentDocument!;
+  const savedInfo = phoneApi.info;
+  const savedConfirm = window.confirm;
+  phoneApi.info = async () => ({ id: "a", name: "Mac", version: "", api: PHONE_API });
+  const removed: string[] = [];
+  const asked: string[] = [];
+  let answer = false;
+  window.confirm = (text?: string) => (asked.push(text ?? ""), answer);
+  const root = createRoot(doc.getElementById("root")!);
+  try {
+    root.render(createElement(ComputerList, { computers: [{ id: "a", name: "Mac", api: "http://127.0.0.1:9", token: "t" }], onRemove: (id: string) => removed.push(id) }));
+    const button = await waitFor("빼기 버튼", () => doc.querySelector<HTMLElement>(".row-remove"), 2000).catch(() => null);
+    const iconOnly = !!button?.querySelector("svg") && button.textContent === "" && button.getAttribute("aria-label") === phoneT("phone.remove");
+    button?.click();
+    const cancelled = removed.length;
+    answer = true;
+    button?.click();
+    check(
+      "폰 컴퓨터 목록: 빼기는 글자 없는 아이콘(이름 '빼기'), 확인 창에서 취소하면 그대로, 확인하면 뺌",
+      iconOnly && asked.length === 2 && asked[0] === phoneT("phone.removeConfirm", { name: "Mac" }) && cancelled === 0 && removed.join(",") === "a",
+      `${iconOnly} ${button?.textContent} ${button?.getAttribute("aria-label")} ${asked.length} ${cancelled} ${removed}`,
+    );
+  } finally {
+    root.unmount();
+    phoneApi.info = savedInfo;
+    window.confirm = savedConfirm;
+    frame.remove();
+  }
 }
 
 // 폰 알림의 실제 코드를 브라우저·네트워크 대역과 돌린다: 맥마다 구독 맞추기 (src/mobile/push.ts reconcile)와 서비스 워커
