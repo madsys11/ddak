@@ -5037,6 +5037,57 @@ async function testGitGraph(root: string, first: Terminal) {
 }
 
 // 탭 이름 바꾸기: 더블클릭이나 오른쪽 클릭 메뉴. 이때 활성 탭은 첫 탭(기본 그룹 "Test")이다.
+// WebView 기본 오른쪽 클릭 메뉴는 contextmenu의 기본 동작을 막으면 뜨지 않는다 (실제로 안 뜨는지는 화면으로 확인).
+async function testNativeMenu() {
+  const ws = document.querySelector<HTMLElement>(".project-workspace:not([style*='none'])")!;
+  const blocked = (el: Element | null) => el !== null && !rightClick(el);
+  const closeMenu = async () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await waitFor("앱 메뉴 닫힘", () => !contextMenu(), 3000);
+  };
+  check("기본 메뉴: 파일 트리에서 막음", blocked(document.querySelector(".tree-row")));
+  await waitFor("트리 메뉴", contextMenu, 3000); // 트리는 앱 메뉴를 연다
+  await closeMenu();
+  check("기본 메뉴: 터미널 화면에서 막음", blocked(ws.querySelector(".xterm-screen")));
+  check("기본 메뉴: 터미널 숨은 입력란에서도 막음", blocked(ws.querySelector(".xterm-helper-textarea")));
+  check("기본 메뉴: 빈 곳에서 막음", blocked(document.body));
+
+  // 글 입력란은 기본 메뉴(잘라내기·붙여넣기·맞춤법)를 남긴다. 체크 상자는 글 입력란이 아니다.
+  const fields = [document.createElement("input"), document.createElement("textarea"), Object.assign(document.createElement("input"), { type: "checkbox" })];
+  document.body.append(...fields);
+  check("기본 메뉴: 글 입력란(input)은 그대로", !blocked(fields[0]));
+  check("기본 메뉴: 글 입력란(textarea)은 그대로", !blocked(fields[1]));
+  check("기본 메뉴: 체크 상자에서는 막음", blocked(fields[2]));
+  fields.forEach((el) => el.remove());
+
+  // 앱이 그리는 메뉴는 그대로 열린다
+  check("기본 메뉴: 확인 전 열린 앱 메뉴 없음", !contextMenu());
+  rightClick(ws.querySelector(".tab.active")!);
+  await waitFor("탭 메뉴", contextMenu, 3000).then(
+    () => check("기본 메뉴: 막아도 앱 메뉴(탭)는 열림", menuLabels()[0] === "Rename Tab…", menuLabels().join(",")),
+    (e) => check("기본 메뉴: 막아도 앱 메뉴(탭)는 열림", false, String(e)),
+  );
+
+  // 앱 메뉴를 여는 행 안의 이름 입력란도 기본 메뉴를 남기고 앱 메뉴를 열지 않는다 (리뷰 R1)
+  const escape = (el: HTMLElement) => el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  const keepsNative = async (name: string, el: HTMLInputElement) => {
+    const native = !blocked(el);
+    await sleep(100); // 앱 메뉴가 열렸다면 React가 그릴 때까지
+    check(`기본 메뉴: ${name} 입력란은 그대로, 앱 메뉴 안 열림`, native && !contextMenu(), `기본 메뉴 ${native ? "남음" : "막힘"}, 앱 메뉴 ${menuLabels().join(",") || "없음"}`);
+    if (contextMenu()) await closeMenu();
+    escape(el);
+  };
+  await pickMenu("Rename Tab…");
+  const tabInput = await waitFor("탭 이름 입력란", () => ws.querySelector<HTMLInputElement>(".tab.active .tab-input"), 3000);
+  await keepsNative("탭 이름", tabInput);
+  await waitFor("탭 이름 입력란 닫힘", () => !ws.querySelector(".tab-input"), 3000);
+  rightClick(await waitFor("파일 행", () => fileRows()[0], 3000));
+  await pickMenu("Rename…");
+  const fileInput = await waitFor("파일 이름 입력란", () => document.querySelector<HTMLInputElement>("input[data-rename]"), 3000);
+  await keepsNative("파일 이름", fileInput);
+  await waitFor("파일 이름 입력란 닫힘", () => !document.querySelector("input[data-rename]"), 3000);
+}
+
 async function testTabRename() {
   const tab = () => document.querySelector<HTMLElement>(".project-workspace:not([style*='none']) .tab.active")!;
   const title = () => tab().querySelector(".tab-title")?.textContent ?? "";
@@ -5514,6 +5565,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["groups", () => testGroups(t())],
     ["groupWorktree", () => testGroupWorktree(root, t())],
     ["tabRename", testTabRename],
+    ["nativeMenu", testNativeMenu],
     ["prefs", testPrefs],
     ["notifySound", testNotifySound],
     ["mobile", () => testMobile(root)],

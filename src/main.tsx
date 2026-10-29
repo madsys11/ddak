@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
+import { refuseNativeMenu } from "./ContextMenu";
 import { refuseOutsideDrops } from "./dragPath";
 import { PrefsProvider } from "./prefs";
 import { loadMonoFont } from "./monoFont";
@@ -11,6 +12,7 @@ async function main() {
   // 지난 자체 테스트가 중간에 멈췄어도 기본 언어·테마·배율·패널·알림 소리로 시작한다.
   if (selftest) for (const key of ["ddak.locale", "ddak.theme", "ddak.zoom", "ddak.sidebar", "ddak.sidebarWidth", "ddak.chatWidth", "ddak.notifySound"]) localStorage.removeItem(key);
   refuseOutsideDrops();
+  refuseNativeMenu();
   await loadMonoFont();
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
