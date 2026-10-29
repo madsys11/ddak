@@ -96,7 +96,7 @@ R2 해결 확인 (최대 3번도). **R1 남음 [P2] — 타당.**
 ## 재리뷰 2회 (reviewer-2 #397) — 리뷰 횟수 끝, 사용자 결정: 고치고 후속 리뷰 1회 (#400)
 
 R2 해결 유지. **R1 남음 [P2] — 타당.** 설정을 원문 글로만 찾아서, 유효한 JSON 이스케이프
-(`{"permissions":{"defaultMode":"bypassPermissions"}}`)로 쓴 bypass 설정을 놓친다 (`--settings` JSON 값과 설정 파일 모두).
+(`{"permissions":{"defaultMode":"bypass\u0050ermissions"}}`, P를 `\u0050`으로 씀)로 쓴 bypass 설정을 놓친다 (`--settings` JSON 값과 설정 파일 모두).
 해석하지 못하는 설정을 허용 근거로 삼으면 안 된다는 점도 맞다.
 고친 것: 설정(인라인 JSON, `--settings` 파일, 표준 설정 파일)을 serde_json으로 해석해 키·문자열 값을
 이스케이프를 푼 뒤 보고, 해석하지 못하면 켤 수 있다고 본다. 앞 프로세스의 인자는 ps 출력을 빈칸으로 나눠서는 JSON을 되살릴 수
