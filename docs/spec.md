@@ -905,7 +905,8 @@ ddak 앱
 - 기본은 꺼짐. 앱 메뉴 "모바일 연결…"(`MobileDialog.tsx`)에서 켠다. 설정은 앱 데이터 `mobile/config.json`
   (켬, 포트 47320, 화면 주소, 폰에 보일 이름 = 맥 이름, 컴퓨터 id). 포트를 열지 못하면 창에 이유를 보인다.
 - 창은 Tailscale 상태를 CLI(`tailscale status --json`, `serve status --json`)로 읽어 보인다: 설치·로그인, 이 이름의 HTTPS
-  인증서, `tailscale serve`가 이 포트를 가리키는지. 아니면 "Tailscale Serve로 연결" 버튼이 `tailscale serve --bg <포트>`를
+  인증서, `tailscale serve`가 이 포트를 가리키는지. CLI는 `TAILSCALE_BE_CLI=1`로 부른다 (맥의 Tailscale.app 실행 파일은
+  TERM·SHLVL이 없으면, 곧 Dock·로그인으로 켠 ddak에서는 GUI로 켜지려 하고 JSON 대신 오류 문구를 내고 0으로 끝난다). 아니면 "Tailscale Serve로 연결" 버튼이 `tailscale serve --bg <포트>`를
   실행한다 (누를 때만). funnel이 켜져 있으면 서버를 멈추고 경고한다.
 - 페어링: 창의 "폰 페어링"이 6자리 코드(5분, 1회용, 새로 만들면 이전 것은 버림)와 QR(`<화면 주소>#pair=<API 주소>&code=<코드>`)을
   보인다. 폰이 코드를 기기 토큰(256비트)으로 바꾼다. 앱 데이터 `mobile/devices.json`(0600)에는 토큰의 SHA-256, 기기 이름,

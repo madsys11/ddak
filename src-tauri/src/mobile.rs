@@ -775,9 +775,18 @@ fn tailscale_cli() -> Option<PathBuf> {
     TAILSCALE_CLI.iter().map(PathBuf::from).find(|p| p.exists())
 }
 
+// 맥의 Tailscale.app 실행 파일은 셸 흔적(TERM, SHLVL)이 없으면 GUI로 켜지려 하고, JSON 대신 "The Tailscale GUI failed to
+// start…"를 내고 0으로 끝난다. Dock·로그인으로 켠 ddak에는 둘 다 없다 (터미널에서 연 ddak은 물려받아 됐다).
+// TAILSCALE_BE_CLI로 CLI로 돌게 한다.
+fn tailscale_command(cli: PathBuf) -> std::process::Command {
+    let mut cmd = crate::platform::background(cli);
+    cmd.env("TAILSCALE_BE_CLI", "1");
+    cmd
+}
+
 fn tailscale_json(args: &[&str]) -> Result<Value, String> {
     let cli = tailscale_cli().ok_or("tailscale not installed")?;
-    let out = crate::platform::background(cli).args(args).output().map_err(|e| e.to_string())?;
+    let out = tailscale_command(cli).args(args).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -970,7 +979,7 @@ pub fn mobile_serve(state: tauri::State<'_, MobileState>) -> Result<Status, Stri
     let mobile = mobile_of(&state)?;
     let port = mobile.port().unwrap_or(mobile.config().port);
     let cli = tailscale_cli().ok_or("tailscale not installed")?;
-    let out = crate::platform::background(cli).args(["serve", "--bg", &port.to_string()]).output().map_err(|e| e.to_string())?;
+    let out = tailscale_command(cli).args(["serve", "--bg", &port.to_string()]).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -1498,5 +1507,25 @@ mod tests {
         assert_eq!(parse_serve(&serve("http://127.0.0.1:47320", false), HOST, 47320), ("ours".into(), false));
         assert_eq!(parse_serve(&serve("http://127.0.0.1:3000", true), HOST, 47320), ("other".into(), true));
         assert_eq!(parse_serve(&json!({}), HOST, 47320), ("off".into(), false));
+    }
+
+    // Dock·로그인으로 켠 ddak처럼 TERM 없이 불러도 JSON이 온다 (설치된 Tailscale이 있어야 해서 --ignored)
+    #[test]
+    #[ignore]
+    fn reads_tailscale_status_without_term() {
+        let cli = tailscale_cli().expect("Tailscale이 설치되어 있어야 한다");
+        let mut cmd = tailscale_command(cli);
+        // Dock으로 켠 ddak의 환경처럼 HOME·USER·PATH만 남긴다 (테스트를 돌린 셸의 TERM·SHLVL을 빼고)
+        for (k, _) in std::env::vars_os().filter(|(k, _)| k != "TAILSCALE_BE_CLI") {
+            cmd.env_remove(k);
+        }
+        for k in ["HOME", "USER", "PATH"] {
+            if let Some(v) = std::env::var_os(k) {
+                cmd.env(k, v);
+            }
+        }
+        let out = cmd.args(["status", "--json"]).output().unwrap();
+        let status: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("JSON이 아님 ({e}): {}", String::from_utf8_lossy(&out.stdout)));
+        assert!(status["BackendState"].is_string(), "{status}");
     }
 }
