@@ -87,6 +87,10 @@ textarea:focus {
   background: transparent;
   border: none;
 }
+.bar-side svg {
+  display: block;
+  margin: auto;
+}
 .banner {
   padding: 6px 16px;
   font-size: calc(14px * var(--font-scale, 1));

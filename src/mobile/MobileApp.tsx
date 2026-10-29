@@ -172,7 +172,7 @@ export function MobileApp() {
   const computer = computers.find((c) => c.id === route.computer);
   if (!computer) return <Redirect to="/" />;
   if (route.view === "projects") return <ProjectList computer={computer} computers={computers} />;
-  return <Chat key={`${computer.id}/${route.project}`} computer={computer} project={route.project} />;
+  return <Chat key={`${computer.id}/${route.project}`} computer={computer} project={route.project} home={computers.length > 1} />;
 }
 
 function AddComputer({ computers, address: initialAddress, code: initialCode, canCancel, onPaired }: { computers: Computer[]; address: string; code: string; canCancel: boolean; onPaired: (c: Computer) => void }) {
@@ -225,6 +225,17 @@ function AddComputer({ computers, address: initialAddress, code: initialCode, ca
 const SettingsButton = () => (
   <button className="bar-side" onClick={() => go("/settings")} aria-label={t("phone.settings")} title={t("phone.settings")}>
     ⚙
+  </button>
+);
+
+// 처음(컴퓨터 목록)으로 한 번에. 컴퓨터가 여럿일 때 채팅 막대에 둔다 (여러 프로젝트를 다니면 뒤로 가기로는 멀다.
+// 하나면 처음이 프로젝트 목록이라 ‹와 같다)
+const HomeButton = () => (
+  <button className="bar-side" data-home onClick={() => go("/")} aria-label={t("phone.computers")} title={t("phone.computers")}>
+    <svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 11 12 3l9 8" />
+      <path d="M5 9.5V21h5v-6h4v6h5V9.5" />
+    </svg>
   </button>
 );
 
@@ -440,7 +451,7 @@ function ProjectList({ computer, computers }: { computer: Computer; computers: C
   );
 }
 
-export function Chat({ computer, project }: { computer: Computer; project: string }) {
+export function Chat({ computer, project, home = false }: { computer: Computer; project: string; home?: boolean }) {
   const [name, setName] = useState("");
   // 보이는 메시지 (src/mobile/sync.ts). 바뀔 때마다 그리기 번호를 올린다.
   const view = useRef(new MessageView());
@@ -601,6 +612,7 @@ export function Chat({ computer, project }: { computer: Computer; project: strin
           ‹
         </button>
         <h1>{name || "…"}</h1>
+        {home && <HomeButton />}
       </header>
       {outdated && <div className="banner bad">{t("phone.update", { name: computer.name })}</div>}
       {!outdated && live !== "live" && !error && <div className="banner">{t("phone.reconnecting")}</div>}

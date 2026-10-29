@@ -794,6 +794,20 @@ async function testMobileChatUnit() {
       onlyDev && currentOff && refused === phoneT("mode.err.awaiting") && refusedBypass && modeSets.join(",") === "origin/dev:manual,origin/dev:manual,origin/dev:manual" && closed,
       `${onlyDev} ${modeChip?.textContent} ${currentOff} ${refused} ${refusedBypass} ${modeSets} ${closed}`,
     );
+
+    // 처음으로 (컴퓨터가 여럿일 때만): 막대의 집 버튼이 #/(컴퓨터 목록)로 간다. 화면이 쓰는 location은 이 창의 것이라 주소를 되돌린다
+    const noHome = !doc.querySelector(".bar [data-home]");
+    root.render(createElement(Chat, { computer: { id: "c", name: "Mac", api: "http://127.0.0.1:9", token: "t" }, project: "p", home: true }));
+    const homeButton = await waitFor("집 버튼", () => doc.querySelector<HTMLElement>(".bar [data-home]"), 2000).catch(() => null);
+    const before = location.href;
+    homeButton?.click();
+    const went = location.hash;
+    history.replaceState(history.state, "", before);
+    check(
+      "폰 채팅: 컴퓨터가 여럿이면 막대에 집 버튼, 누르면 컴퓨터 목록(#/)으로 (하나면 없음)",
+      noHome && homeButton?.getAttribute("aria-label") === phoneT("phone.computers") && went === "#/",
+      `${noHome} ${homeButton?.getAttribute("aria-label")} ${went}`,
+    );
   } finally {
     root.unmount();
     Object.assign(phoneApi, saved);
