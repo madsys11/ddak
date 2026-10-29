@@ -189,6 +189,8 @@ export const en = {
   "endGroup.runningError": "Terminals are still running in {items}. Nothing was removed.",
   "endGroup.restarted": "The sessions in this work group were closed, so they were started again (continuing the previous conversations).",
   "endGroup.dirty": "Uncommitted changes appeared in: {items}. Commit or discard them first.",
+  "endGroup.lastTab": "This is the last tab of this work group. End the work group too (its worktrees and merged branches are deleted), or close only the tab and keep them.",
+  "endGroup.closeTabOnly": "Close Tab Only",
   "endGroup.submit": "End Work Group",
   "endGroup.kept": "The work group ended. These branches were kept:",
   "endGroup.close": "OK",

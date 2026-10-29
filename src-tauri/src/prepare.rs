@@ -77,6 +77,18 @@ struct Progress {
     state: State,
 }
 
+// 다시 쓰는 작업그룹 (worktrees.rs reuse): 설치·복제의 시작·성공 기록을 지운다. 코드를 앞으로 감아 lockfile 등이 바뀌었을 수
+// 있어, 예전 성공 기록을 보고 설치를 건너뛰지 않게 다시 설치한다 (리뷰 R3). 가상 환경과 만든 폴더 기록은 둔다 (그 폴더가 우리
+// 것인지 알아야 다시 만들 때 지울 수 있다). 기록 파일이 없으면 할 것 없음
+pub fn forget_installs(temp_root: &Path, group: &Path) -> Result<(), String> {
+    let mut progress = Progress::open(temp_root, group);
+    if !progress.path.exists() {
+        return Ok(());
+    }
+    let keys: Vec<String> = progress.state.done.iter().chain(&progress.state.started).filter(|k| k.starts_with("install:") || k.starts_with("clone:")).cloned().collect();
+    progress.forget(&keys.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 impl Progress {
     // 기록을 못 읽으면 빈 기록으로 시작한다 (우리가 남긴 것을 모르면 지우지 않고, 설치는 다시 한다)
     fn open(temp_root: &Path, group: &Path) -> Progress {

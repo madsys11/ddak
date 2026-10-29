@@ -77,6 +77,26 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+// git의 표준 출력 그대로 (앞뒤 공백·줄 끝을 자르지 않고 UTF-8로 바꾸지 않는다). -z 경로 목록용: 파일 이름 앞뒤의 공백도
+// 이름이다 (재리뷰 R1: git()이 자른 탓에 " secret.local"을 "secret.local"로 보고 지나쳤다)
+fn git_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = git_command().arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+// NUL로 나눈 경로 목록 (git -z). 유닉스는 바이트 그대로 경로로
+fn nul_paths(out: &[u8]) -> Vec<PathBuf> {
+    #[cfg(unix)]
+    let path = |b: &[u8]| PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(b));
+    #[cfg(not(unix))]
+    let path = |b: &[u8]| PathBuf::from(String::from_utf8_lossy(b).into_owned());
+    out.split(|b| *b == 0).filter(|p| !p.is_empty()).map(path).collect()
+}
+
 pub struct Repo {
     // 그룹 폴더 안의 이름 (프로젝트 자체가 저장소면 None = 그룹 폴더 자체)
     pub name: Option<String>,
@@ -169,8 +189,8 @@ fn plan(repos: &[Repo], commons: &[String], dest: &Path, name: &str) -> Vec<Step
     steps
 }
 
-// home: ~/.ddak (테스트는 임시 폴더)
-fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError> {
+// home: ~/.ddak (테스트는 임시 폴더). in_use: 그 작업그룹 폴더를 지금 쓰는지 (프론트의 탭, ddak 터미널. 남은 것을 다시 쓸 때)
+fn create(home: &Path, project: &str, prefix: &str, in_use: &dyn Fn(&Path) -> bool) -> Result<Created, CodeError> {
     let root = crate::platform::canonical(project).map_err(|e| code_err("io", e))?;
     let base = home.join("worktrees").join(project_slug(&root));
 
@@ -179,9 +199,12 @@ fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError
         return Err(code_err("noRepos", root.to_string_lossy()));
     }
 
-    // 이름: <그룹>-<번호>. 폴더도, 실제로 만들 브랜치도 (항목 이름이 붙은 것까지) 아직 없는 첫 번호 (리뷰 지적 3)
     let prefix = branch_safe(prefix);
     let commons: Vec<String> = repos.iter().map(|r| git(&r.path, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).unwrap_or_default()).collect();
+    if let Some(made) = reuse(&base, &root, &prefix, &repos, &commons, &others, in_use) {
+        return Ok(made);
+    }
+    // 이름: <그룹>-<번호>. 폴더도, 실제로 만들 브랜치도 (항목 이름이 붙은 것까지) 아직 없는 첫 번호 (리뷰 지적 3)
     let name = (1..1000)
         .map(|n| format!("{prefix}-{n}"))
         .find(|n| !base.join(n).exists() && plan(&repos, &commons, &base.join(n), n).iter().all(|(repo, _, b)| !branch_exists(repo, b)))
@@ -234,6 +257,94 @@ fn create(home: &Path, project: &str, prefix: &str) -> Result<Created, CodeError
         return Err(e);
     }
     Ok(Created { name, path: dest.to_string_lossy().into_owned(), setup: None })
+}
+
+// 남은 작업그룹 다시 쓰기 (사용자 결정 2026-10-29): 탭을 닫으면 작업그룹 폴더·브랜치는 남아서, 새 작업그룹이 늘 다음 번호를
+// 만들었다. 같은 그룹의 남은 폴더(<그룹>-<번호>)를 번호 작은 것부터 보고, 잃을 것도 모르는 것도 없는 첫 폴더를 원본의 지금
+// 커밋으로 앞으로 감아(merge --ff-only) 새것처럼 쓴다. 모두 닫았으면 1번부터 다시 쓴다. 쓸 것이 없으면 None (새로 만든다).
+// 다시 쓰는 조건:
+// - 지금 쓰지 않음 (in_use: 프론트의 탭이나 ddak 터미널, 닫는 중 포함)
+// - 만들 때 적은 기록이 있고, 기록의 (저장소, worktree, 브랜치)가 지금 프로젝트로 새로 만들 것과 같음 (저장소를 더하거나 뺐으면 아님)
+// - 끝내기와 같은 상태 검사(status_of)에서 막힐 것이 없음: 모르는 항목, worktree 아님, 커밋 안 한 변경(추적 안 하는 파일 포함),
+//   어느 브랜치에도 없는 커밋. 그리고 빠진 worktree, 원본 HEAD에 병합 안 된 커밋도 없음
+// - 각 worktree가 기록한 브랜치에 있고, 그 HEAD가 원본의 지금 HEAD의 조상 (앞으로 감기만 하면 됨)
+// 원본의 저장소 아닌 항목 중 링크가 없는 것(나중에 생긴 메모 등)은 링크를 더한다. 확인하지 못하면(git 오류) 쓰지 않는다.
+fn reuse(base: &Path, root: &Path, prefix: &str, repos: &[Repo], commons: &[String], others: &[String], in_use: &dyn Fn(&Path) -> bool) -> Option<Created> {
+    let mut found: Vec<(u32, String)> = std::fs::read_dir(base)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let n = name.strip_prefix(prefix)?.strip_prefix('-')?.parse::<u32>().ok()?;
+            (format!("{prefix}-{n}") == name && e.path().is_dir()).then_some((n, name))
+        })
+        .collect();
+    found.sort();
+    'next: for (_, name) in found {
+        let dest = base.join(&name);
+        if in_use(&dest) {
+            continue;
+        }
+        let Ok((made, true)) = members(base, &name, root) else { continue };
+        let mut planned: Vec<Step> = plan(repos, commons, &dest, &name);
+        let mut recorded: Vec<Step> = made.iter().map(|m| (m.repo.clone(), m.worktree.clone(), m.branch.clone())).collect();
+        planned.sort();
+        recorded.sort();
+        if planned != recorded {
+            continue;
+        }
+        let Ok(now) = status_of(&dest, root, &made, true) else { continue };
+        if now.blocked().is_some() || now.repos.iter().any(|r| r.missing || r.unmerged > 0) {
+            continue;
+        }
+        let mut targets = Vec::new();
+        for m in &made {
+            let Ok(sha) = git(&m.repo, &["rev-parse", "--verify", "HEAD^{commit}"]) else { continue 'next };
+            let on_branch = git(&m.worktree, &["branch", "--show-current"]).is_ok_and(|b| b == m.branch);
+            let Ok(head) = git(&m.worktree, &["rev-parse", "HEAD"]) else { continue 'next };
+            if !on_branch || git(&m.repo, &["merge-base", "--is-ancestor", &head, &sha]).is_err() {
+                continue 'next;
+            }
+            // 다른 checkout(다른 worktree)이 이 브랜치를 쓰면 옮기지 않는다: 그쪽의 HEAD와 인덱스가 어긋난다 (리뷰 R2)
+            let Ok(own) = git(&m.worktree, &["rev-parse", "--absolute-git-dir"]) else { continue 'next };
+            if branch_in_use_except(&m.repo, &m.branch, Some(Path::new(&own))).unwrap_or(true) {
+                continue 'next;
+            }
+            // 앞으로 감으며 새로 생길 파일 자리에 이미 무엇이 있으면 (커밋 안 한 변경이 없으니 무시된 파일) 덮어쓰므로 쓰지 않는다
+            // (리뷰 R1: git merge는 무시된 파일을 지켜 주지 않는다). 그 자리의 상위 경로가 폴더가 아닌 것으로 있어도 마찬가지
+            let Ok(added) = git_bytes(&m.worktree, &["diff", "--name-only", "--no-renames", "--diff-filter=A", "-z", &head, &sha]) else { continue 'next };
+            for path in nul_paths(&added) {
+                let at = m.worktree.join(path);
+                let blocked = at.symlink_metadata().is_ok()
+                    || at.ancestors().skip(1).take_while(|a| *a != m.worktree).any(|a| a.symlink_metadata().is_ok_and(|meta| !meta.is_dir()));
+                if blocked {
+                    continue 'next;
+                }
+            }
+            targets.push(sha);
+        }
+        // 설치·복제 성공 기록은 지운다: 앞으로 감은 코드의 lockfile에 맞게 준비가 다시 설치한다 (리뷰 R3)
+        if crate::prepare::forget_installs(base, &dest).is_err() {
+            continue;
+        }
+        // 확인을 마친 뒤에만 바꾼다. 앞으로 감기만 하고, 무시된 파일을 덮게 되면 git도 멈춘다 (--no-overwrite-ignore: 위 검사가
+        // 놓친 경우의 두 번째 막이). 중간에 실패해도 잃는 것은 없다 (남은 것은 다음에 다시 본다)
+        for (m, sha) in made.iter().zip(&targets) {
+            if git(&m.worktree, &["merge", "--ff-only", "--no-overwrite-ignore", "--quiet", sha]).is_err() {
+                continue 'next;
+            }
+        }
+        for other in others {
+            let link = dest.join(other);
+            if link.symlink_metadata().is_err() && crate::platform::symlink(&root.join(other), &link).is_err() {
+                continue 'next;
+            }
+        }
+        let record = Record { repos: made.iter().zip(&targets).map(|(m, sha)| Made { start: sha.clone(), ..m.clone() }).collect() };
+        let _ = write_record(&record_path(base, &name), &record);
+        return Some(Created { name, path: dest.to_string_lossy().into_owned(), setup: None });
+    }
+    None
 }
 
 // 작업그룹을 만들 때 적는 기록 (작업그룹 폴더들이 든 ddak 폴더의 .ddak-group-<이름>.json)
@@ -408,6 +519,12 @@ fn status(home: &Path, project: &str, group: &str) -> Result<GroupStatus, CodeEr
 // 원본 HEAD가 아니라 upstream 기준으로 병합을 판단해서 쓰지 않는다 (리뷰 P2). 파일이 없으면 그 상태가 아닌 것이고,
 // 그 밖에 읽지 못하면 (권한 등) 쓰는지 모르므로 오류 (리뷰 후속 P2: 빈 내용으로 보고 지웠다).
 fn branch_in_use(repo: &Path, branch: &str) -> Result<bool, CodeError> {
+    branch_in_use_except(repo, branch, None)
+}
+
+// own: 이 worktree의 git 폴더는 HEAD만 보지 않는다 (다시 쓰는 작업그룹 자신은 그 브랜치에 있는 것이 맞다. 진행 중인
+// rebase·bisect는 본다)
+fn branch_in_use_except(repo: &Path, branch: &str, own: Option<&Path>) -> Result<bool, CodeError> {
     let common = git(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).map_err(|e| code_err("git", e))?;
     let common = PathBuf::from(common);
     let io = |p: &Path, e: std::io::Error| code_err("io", format!("{}: {e}", p.display()));
@@ -427,9 +544,11 @@ fn branch_in_use(repo: &Path, branch: &str) -> Result<bool, CodeError> {
         Err(e) => Err(io(&p, e)),
     };
     let full = format!("refs/heads/{branch}");
+    let own = own.and_then(|p| crate::platform::canonical(p).ok());
     for d in dirs {
         let bisect = read(d.join("BISECT_START"))?;
-        let used = read(d.join("HEAD"))?.trim() == format!("ref: {full}")
+        let is_own = own.is_some() && crate::platform::canonical(&d).ok() == own;
+        let used = (!is_own && read(d.join("HEAD"))?.trim() == format!("ref: {full}"))
             || read(d.join("rebase-merge/head-name"))?.trim() == full
             || read(d.join("rebase-apply/head-name"))?.trim() == full
             || read(d.join("rebase-merge/update-refs"))?.lines().any(|l| l.trim() == full)
@@ -557,12 +676,20 @@ pub async fn group_end(app: AppHandle, project: String, group: String) -> Result
 // 할 준비가 있으면 준비 창에서 돌릴 명령을 함께 돌려준다. 준비 설정은 만들기 전에 읽는다 (잘못됐으면 아무것도
 // 만들지 않고 실패).
 #[tauri::command]
-pub async fn group_create(app: AppHandle, project: String, prefix: String) -> Result<Created, CodeError> {
+pub async fn group_create(app: AppHandle, project: String, prefix: String, in_use: Vec<String>) -> Result<Created, CodeError> {
     let home = ddak_home()?;
     let plan = crate::setup::plan(&app, Path::new(&project))?;
     let origin = project.clone();
     let made = tauri::async_runtime::spawn_blocking(move || {
-        let made = create(&home, &project, &prefix)?;
+        // 지금 쓰는 작업그룹 폴더: 프론트가 넘긴 이 프로젝트 탭들의 폴더, 또는 그 안에 ddak 터미널이 있는 것
+        let real = |p: &Path| crate::platform::canonical(p).unwrap_or_else(|_| p.to_path_buf());
+        let tabs: Vec<PathBuf> = in_use.iter().map(|p| real(Path::new(p))).collect();
+        let ptys = app.state::<Ptys>();
+        let busy = |dir: &Path| {
+            let dir = real(dir);
+            tabs.iter().any(|t| t.starts_with(&dir)) || crate::pty::running_under(&ptys, &dir)
+        };
+        let made = create(&home, &project, &prefix, &busy)?;
         // 원본 프로젝트를 claude가 신뢰하면 작업그룹 폴더도 (첫 claude가 신뢰를 묻는 동안 깨우기의 Enter가 답을 고르지 않게)
         crate::claude_trust::inherit_for_group(Path::new(&project), Path::new(&made.path));
         Ok::<_, CodeError>(made)
@@ -608,24 +735,99 @@ mod tests {
         let home = tmp.join("home");
         let p = proj.to_string_lossy().into_owned();
 
-        let a = create(&home, &p, "dev").unwrap();
+        let a = create(&home, &p, "dev", &|_| true).unwrap();
         assert_eq!(a.name, "dev-1");
         let dest = PathBuf::from(&a.path);
         assert_eq!(git(&dest.join("server"), &["branch", "--show-current"]).unwrap(), "ddak/dev-1");
         assert_eq!(std::fs::read_link(dest.join("notes.md")).unwrap(), crate::platform::canonical(&proj).unwrap().join("notes.md"));
         assert!(std::fs::read_link(dest.join("docs")).is_ok());
-        assert_eq!(create(&home, &p, "dev").unwrap().name, "dev-2");
+        assert_eq!(create(&home, &p, "dev", &|_| true).unwrap().name, "dev-2");
 
         // 커밋 없는 저장소가 있으면 실패하고, 먼저 만든 worktree·브랜치·폴더를 지운다
         std::fs::create_dir_all(proj.join("zempty")).unwrap();
         sh(&proj.join("zempty"), "git init -q");
-        let e = create(&home, &p, "dev").unwrap_err();
+        let e = create(&home, &p, "dev", &|_| true).unwrap_err();
         assert_eq!(e.code, "git");
         assert!(!dest.with_file_name("dev-3").exists());
         assert!(git(&proj.join("server"), &["rev-parse", "--verify", "--quiet", "refs/heads/ddak/dev-3"]).is_err());
         let list = git(&proj.join("server"), &["worktree", "list"]).unwrap();
         assert!(!list.contains("dev-3"), "{list}");
 
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // 남은 작업그룹 다시 쓰기: 쓰지 않고 잃을 것이 없는 가장 작은 번호를 원본의 지금 커밋으로 앞으로 감아 쓴다. 쓰는 중·고친
+    // 파일·추적 안 하는 파일·병합 안 된 커밋·모르는 항목·기록 없음·저장소 구성이 다름이면 건너뛴다. 새로 생긴 메모는 링크를 더한다
+    #[test]
+    fn reuses_the_smallest_idle_clean_group() {
+        let tmp = std::env::temp_dir().join(format!("ddak-wt-reuse-{}", std::process::id()));
+        let (proj, home, p) = end_project(&tmp);
+        let none: &dyn Fn(&Path) -> bool = &|_| false;
+        let all: &dyn Fn(&Path) -> bool = &|_| true;
+        let names: Vec<String> = (0..7).map(|_| create(&home, &p, "g", all).unwrap().name).collect();
+        assert_eq!(names.join(","), "g-1,g-2,g-3,g-4,g-5,g-6,g-7");
+        let dir = |n: &str| home.join("worktrees").join(project_slug(&crate::platform::canonical(&proj).unwrap())).join(n);
+        // g-1: 쓰는 중, g-2: 고친 파일, g-3: 추적 안 하는 파일, g-4: 병합 안 된 커밋, g-5: 모르는 항목, g-6: 기록 없음, g-7: 깨끗함
+        std::fs::write(dir("g-2").join("a/x"), "x").unwrap();
+        sh(&dir("g-2").join("a"), "git add x");
+        std::fs::write(dir("g-3").join("b/new.txt"), "x").unwrap();
+        std::fs::write(dir("g-4").join("a/w.txt"), "w").unwrap();
+        sh(&dir("g-4").join("a"), COMMIT);
+        std::fs::write(dir("g-5").join("todo.md"), "t").unwrap();
+        std::fs::remove_file(record_path(&dir("g-6").parent().unwrap().to_path_buf(), "g-6")).unwrap();
+        // 원본이 앞으로 가고 새 메모가 생겼다
+        std::fs::write(proj.join("a/main.txt"), "m").unwrap();
+        sh(&proj.join("a"), COMMIT);
+        std::fs::write(proj.join("plan.md"), "p").unwrap();
+        let g1 = dir("g-1");
+        let busy = move |d: &Path| d == g1;
+        let again = create(&home, &p, "g", &busy).unwrap();
+        assert_eq!(again.name, "g-7", "가장 작은 깨끗한 번호");
+        let head = |d: &Path| git(d, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(head(&dir("g-7").join("a")), head(&proj.join("a")), "원본의 지금 커밋으로 앞으로 감음");
+        assert_eq!(git(&dir("g-7").join("a"), &["branch", "--show-current"]).unwrap(), "ddak/g-7");
+        assert!(std::fs::read_link(dir("g-7").join("plan.md")).is_ok(), "새 메모 링크");
+        assert_ne!(head(&dir("g-4").join("a")), head(&proj.join("a")), "병합 안 된 것은 그대로");
+        // 다 쓰면 새 번호. 다른 그룹 이름의 폴더는 보지 않는다
+        assert_eq!(create(&home, &p, "g", &move |d: &Path| d.ends_with("g-1") || d.ends_with("g-7")).unwrap().name, "g-8");
+        assert_eq!(create(&home, &p, "other", none).unwrap().name, "other-1");
+        // 저장소를 더하면 구성이 달라 다시 쓰지 않는다
+        std::fs::create_dir_all(proj.join("c")).unwrap();
+        sh(&proj.join("c"), INIT);
+        assert_eq!(create(&home, &p, "g", &move |d: &Path| d.ends_with("g-1")).unwrap().name, "g-9");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // 다시 쓰다 잃을 수 있는 것은 건너뛴다 (리뷰 R1·R2): 앞으로 감으면 새로 생길 파일 자리의 무시된 파일 (덮어씀), 같은 브랜치를
+    // 다른 worktree가 쓰는 것 (그쪽 HEAD·인덱스가 어긋남). 다시 쓰면 설치·복제 성공 기록을 지운다 (리뷰 R3: 바뀐 lockfile에도
+    // 설치를 건너뛰었다). 가상 환경 기록은 둔다
+    #[test]
+    fn reuse_skips_what_it_could_lose() {
+        let tmp = std::env::temp_dir().join(format!("ddak-wt-reuse-lose-{}", std::process::id()));
+        let (proj, home, p) = end_project(&tmp);
+        std::fs::write(proj.join("a/.gitignore"), "*.local\n").unwrap();
+        sh(&proj.join("a"), COMMIT);
+        let all: &dyn Fn(&Path) -> bool = &|_| true;
+        for _ in 0..3 {
+            create(&home, &p, "g", all).unwrap();
+        }
+        let base = home.join("worktrees").join(project_slug(&crate::platform::canonical(&proj).unwrap()));
+        // g-1: 무시된 " secret.local" (이름 앞 공백. 원본이 같은 이름을 추적 파일로 더한다), g-2: 같은 브랜치를 다른 worktree가 씀,
+        // g-3: 깨끗함
+        std::fs::write(base.join("g-1/a/ secret.local"), "PRIVATE").unwrap();
+        let other = tmp.join("other");
+        sh(&proj.join("a"), &format!("git worktree add -q --force '{}' ddak/g-2", other.display()));
+        std::fs::write(base.join(".ddak-state-g-3.json"), r#"{"started":["install:b\nnpm i"],"done":["install:a\nnpm ci","clone:a/node_modules","venv:a/.venv"],"made":{"venv:a/.venv":[1,2,3,4]}}"#).unwrap();
+        sh(&proj.join("a"), "git rm -q --cached .gitignore && rm .gitignore && printf FROM-MAIN > ' secret.local' && git add ' secret.local' && git -c user.name=t -c user.email=t@example.com commit -qm add");
+        let made = create(&home, &p, "g", &|_| false).unwrap();
+        assert_eq!(made.name, "g-3", "무시된 파일을 덮을 g-1, 다른 worktree가 쓰는 g-2는 건너뜀");
+        assert_eq!(std::fs::read_to_string(base.join("g-1/a/ secret.local")).unwrap(), "PRIVATE", "무시된 파일 그대로");
+        assert_eq!(git(&other, &["rev-parse", "HEAD"]).unwrap(), git(&base.join("g-2/a"), &["rev-parse", "HEAD"]).unwrap(), "다른 worktree는 그대로");
+        assert_ne!(git(&other, &["rev-parse", "HEAD"]).unwrap(), git(&proj.join("a"), &["rev-parse", "HEAD"]).unwrap());
+        let state: serde_json::Value = serde_json::from_slice(&std::fs::read(base.join(".ddak-state-g-3.json")).unwrap()).unwrap();
+        assert_eq!(state["done"], serde_json::json!(["venv:a/.venv"]), "설치·복제 성공 기록만 지움");
+        assert_eq!(state["started"], serde_json::json!([]));
+        assert!(state["made"]["venv:a/.venv"].is_array(), "만든 폴더 기록은 둠");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
@@ -651,7 +853,7 @@ mod tests {
         let (proj, home, p) = end_project(&tmp);
         let branch = |repo: &str, b: &str| git(&proj.join(repo), &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{b}")]).is_ok();
 
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         let dest = PathBuf::from(&g.path);
         let st = status(&home, &p, &g.path).unwrap();
         assert!(st.recorded && st.unknown.is_empty() && st.blocked().is_none(), "{st:?}");
@@ -671,7 +873,7 @@ mod tests {
         assert!(!git(&proj.join("a"), &["worktree", "list"]).unwrap().contains("g-1"));
 
         // worktree에서 브랜치를 바꿨으면: 우리 브랜치(병합됨)만 지우고 사용자 브랜치는 둔다
-        let g2 = create(&home, &p, "g").unwrap();
+        let g2 = create(&home, &p, "g", &|_| true).unwrap();
         sh(&PathBuf::from(&g2.path).join("b"), "git checkout -q -b mine");
         end(&home, &p, &g2.path, &Ptys::default()).unwrap();
         assert!(branch("b", "mine") && !branch("b", &format!("ddak/{}", g2.name)));
@@ -687,7 +889,7 @@ mod tests {
     fn end_keeps_everything_it_does_not_know() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-unknown-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         let dest = PathBuf::from(&g.path);
         std::fs::write(dest.join("todo.md"), "mine").unwrap();
         std::fs::create_dir_all(dest.join("drafts")).unwrap();
@@ -710,7 +912,7 @@ mod tests {
         assert!(!dest.exists());
 
         // 기록 없는 작업그룹(이전 버전)에서 b를 프로젝트에서 뺐으면, b의 worktree는 모르는 항목
-        let g2 = create(&home, &p, "g").unwrap();
+        let g2 = create(&home, &p, "g", &|_| true).unwrap();
         let dest2 = PathBuf::from(&g2.path);
         std::fs::remove_file(record_path(dest2.parent().unwrap(), &g2.name)).unwrap();
         std::fs::write(dest2.join("b/uncommitted.txt"), "x").unwrap();
@@ -728,7 +930,7 @@ mod tests {
     fn end_refuses_commits_on_no_branch() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-detached-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         let a = PathBuf::from(&g.path).join("a");
         sh(&a, "git checkout -q --detach && echo x > f.txt");
         sh(&a, COMMIT);
@@ -747,7 +949,7 @@ mod tests {
     fn end_keeps_branch_checked_out_elsewhere() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-inuse-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         sh(&PathBuf::from(&g.path).join("a"), "git checkout -q -b mine");
         sh(&proj.join("a"), "git checkout -q ddak/g-1");
         let ended = end(&home, &p, &g.path, &Ptys::default()).unwrap();
@@ -763,7 +965,7 @@ mod tests {
     fn end_stops_when_a_check_fails() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-checkfail-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         let a = PathBuf::from(&g.path).join("a");
         sh(&a, "git checkout -q --detach && echo x > f.txt");
         sh(&a, COMMIT);
@@ -783,7 +985,7 @@ mod tests {
     fn end_keeps_branch_moved_after_check() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-moved-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         let repo = proj.join("a");
         sh(&PathBuf::from(&g.path).join("a"), "git checkout -q -b mine");
         sh(&repo, "git branch up ddak/g-1 && git branch -q -u up ddak/g-1");
@@ -813,7 +1015,7 @@ mod tests {
     fn end_keeps_branch_being_rebased() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-rebase-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         let repo = proj.join("a");
         sh(&PathBuf::from(&g.path).join("a"), "git checkout -q -b mine");
         sh(&repo, "git checkout -q ddak/g-1 && echo y > r.txt");
@@ -833,7 +1035,7 @@ mod tests {
     fn end_keeps_branch_it_cannot_check() {
         let tmp = std::env::temp_dir().join(format!("ddak-wt-unchecked-{}", std::process::id()));
         let (proj, home, p) = end_project(&tmp);
-        let g = create(&home, &p, "g").unwrap();
+        let g = create(&home, &p, "g", &|_| true).unwrap();
         let repo = proj.join("a");
         sh(&PathBuf::from(&g.path).join("a"), "git checkout -q -b mine");
         sh(&repo, &format!("git worktree add -q '{}' ddak/g-1", tmp.join("other").display()));
@@ -868,7 +1070,7 @@ mod tests {
         .unwrap();
         sh(&tmp, "chmod +x git-wrapper.sh");
         TEST_GIT.with(|g| *g.borrow_mut() = Some(wrapper.clone()));
-        let result = create(&tmp.join("home"), &proj.to_string_lossy(), "dev");
+        let result = create(&tmp.join("home"), &proj.to_string_lossy(), "dev", &|_| true);
         TEST_GIT.with(|g| *g.borrow_mut() = None);
 
         assert!(mark.exists(), "래퍼가 끼어들지 않음");
@@ -915,13 +1117,13 @@ mod tests {
         let hook = server.join(".git/hooks/post-checkout");
         std::fs::write(&hook, "#!/bin/sh\ncase \"$(pwd)\" in */web) exit 1;; esac\n").unwrap();
         sh(&server, "chmod +x .git/hooks/post-checkout");
-        assert_eq!(create(&home, &p, "dev").unwrap_err().code, "git");
+        assert_eq!(create(&home, &p, "dev", &|_| true).unwrap_err().code, "git");
         assert!(git(&server, &["branch", "--list", "ddak/*"]).unwrap().is_empty(), "브랜치가 남음");
         let list = git(&server, &["worktree", "list"]).unwrap();
         assert!(!list.contains("dev-1"), "{list}");
         // 남은 것이 없으니 다시 하면 같은 이름으로 된다
         std::fs::remove_file(&hook).unwrap();
-        assert_eq!(create(&home, &p, "dev").unwrap().name, "dev-1");
+        assert_eq!(create(&home, &p, "dev", &|_| true).unwrap().name, "dev-1");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
@@ -933,7 +1135,7 @@ mod tests {
         let server = proj.join("server");
         sh(&server, "git branch ddak/dev-1-web");
         let home = tmp.join("home");
-        let made = create(&home, &proj.to_string_lossy(), "dev").unwrap();
+        let made = create(&home, &proj.to_string_lossy(), "dev", &|_| true).unwrap();
         assert_eq!(made.name, "dev-2", "ddak/dev-1-web이 이미 있어서 dev-1은 건너뛴다");
         let dest = PathBuf::from(&made.path);
         let mut branches: Vec<String> = ["server", "web", "z.lock", "리뷰", "한글"]

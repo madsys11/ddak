@@ -451,9 +451,8 @@ pub fn stop_under(ptys: &Ptys, dir: &Path) -> bool {
     all
 }
 
-// dir 안에서 띄운 터미널이 남아 있는지 (닫는 중 포함)
-#[cfg(all(test, unix))]
-fn running_under(ptys: &Ptys, dir: &Path) -> bool {
+// dir 안에서 띄운 터미널이 남아 있는지 (닫는 중 포함. 남은 작업그룹을 다시 쓸지 볼 때, worktrees.rs)
+pub fn running_under(ptys: &Ptys, dir: &Path) -> bool {
     let sessions = ptys.sessions.lock().unwrap();
     let closing = ptys.closing.lock().unwrap();
     sessions.values().any(|s| s.cwd.starts_with(dir)) || closing.values().any(|(_, cwd)| cwd.starts_with(dir))

@@ -189,6 +189,8 @@ export const ko: Messages = {
   "endGroup.runningError": "{items}에서 터미널이 아직 돌고 있습니다. 아무것도 지우지 않았습니다.",
   "endGroup.restarted": "이 작업그룹의 세션을 끝냈기 때문에 다시 띄웠습니다 (이전 대화를 이어서).",
   "endGroup.dirty": "커밋하지 않은 변경이 생겼습니다: {items}. 먼저 커밋하거나 버리세요.",
+  "endGroup.lastTab": "이 작업그룹의 마지막 탭입니다. 작업그룹도 끝낼까요(worktree와 병합된 브랜치를 지움), 아니면 탭만 닫고 남길까요?",
+  "endGroup.closeTabOnly": "탭만 닫기",
   "endGroup.submit": "작업그룹 끝내기",
   "endGroup.kept": "작업그룹을 끝냈습니다. 남긴 브랜치:",
   "endGroup.close": "확인",

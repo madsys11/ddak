@@ -40,11 +40,13 @@ const BLOCKED = {
 // group_end는 확인한 뒤 이 폴더를 잠그고 그 안에서 띄운 세션을 끝내고 기다린 뒤 다시 확인하고 지운다 (확인한 뒤 세션이 만든
 // 커밋을 잃지 않게, 리뷰 P1). onStopping: 부르기 직전 (세션이 끝나도 창을 닫지 않게). onFailed(stopped): 끝내지 못함,
 // stopped면 세션을 끝낸 뒤라 다시 띄워야 한다.
-export function EndGroupDialog({ project, group, name, onClose, onStopping, onFailed, onEnded }: {
+// onCloseTab: 작업그룹의 마지막 탭을 닫으려다 열린 창이면 "탭만 닫기"로 할 일 (안내와 단추가 더해진다)
+export function EndGroupDialog({ project, group, name, onClose, onCloseTab, onStopping, onFailed, onEnded }: {
   project: string;
   group: string;
   name: string;
   onClose: () => void;
+  onCloseTab?: () => void;
   onStopping: () => void;
   onFailed: (stopped: boolean) => void;
   onEnded: () => void;
@@ -134,6 +136,7 @@ export function EndGroupDialog({ project, group, name, onClose, onStopping, onFa
           </>
         ) : (
           <>
+            {onCloseTab && <div className="modal-hint" data-last-tab>{t("endGroup.lastTab")}</div>}
             <div className="modal-hint">{t("endGroup.hint")}</div>
             {!status && !error && <div className="modal-hint">{t("endGroup.loading")}</div>}
             {status?.repos.map((r) => {
@@ -156,6 +159,19 @@ export function EndGroupDialog({ project, group, name, onClose, onStopping, onFa
               <button className="secondary" disabled={busy} onClick={onClose}>
                 {t("common.cancel")}
               </button>
+              {onCloseTab && (
+                <button
+                  className="secondary"
+                  data-action="close-tab-only"
+                  disabled={busy}
+                  onClick={() => {
+                    onCloseTab();
+                    onClose();
+                  }}
+                >
+                  {t("endGroup.closeTabOnly")}
+                </button>
+              )}
               <button data-action="end-group" disabled={busy || !status || blocked} onClick={end}>
                 {t("endGroup.submit")}
               </button>

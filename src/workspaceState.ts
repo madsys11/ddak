@@ -42,6 +42,8 @@ export type State = {
   loaded: boolean;
   saveBlocked?: boolean;
   slowSave?: boolean;
+  // 닫기 요청이 작업그룹의 마지막 탭을 닫게 되어 묻는 중 (Workspace.tsx: 작업그룹 끝내기 창을 연다). 저장하지 않는다
+  askClose?: { tab: number; pane?: number };
 };
 
 // 앱 데이터 workspaces/<프로젝트>.json에 두는 것 (src-tauri/src/workspace.rs). 터미널 제목·출력은 두지 않는다.

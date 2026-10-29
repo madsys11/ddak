@@ -3520,9 +3520,47 @@ async function testGroupWorktree(root: string, first: Terminal) {
   );
   await run(first, `rm "${flags}/hold"`);
 
-  // 작업그룹 탭 닫기 (worktree는 남긴다: 정리는 6단계)
-  for (let i = 0; i < 5; i++) await menu("close_pane"); // test-3 (세션 + 시작 못 한 setup), test-2 (세션 + setup), test-1
+  // 작업그룹 탭 닫기: 작업그룹의 마지막 창을 닫으면 바로 닫지 않고 작업그룹 끝내기 창이 떠서 끝낼지 탭만 닫을지 묻는다.
+  // 취소하면 그대로, "탭만 닫기"면 탭만 닫히고 worktree는 남는다 (정리는 6단계). 마지막이 아닌 창은 묻지 않는다
+  const endDialog = () => document.querySelector<HTMLElement>(".end-group-dialog");
+  const tabsBeforeClose = tabCount();
+  await menu("close_pane"); // test-3의 두 창 중 하나
+  await sleep(300);
+  const notAsked = !endDialog() && tabCount() === tabsBeforeClose;
+  await menu("close_pane"); // test-3의 마지막 창
+  const asked = await waitFor("끝내기 창", () => endDialog()?.querySelector("[data-last-tab]") && endDialog(), 3000).catch(() => null);
+  const offered = !!asked?.querySelector("[data-action=close-tab-only]") && !!asked.querySelector("[data-action=end-group]");
+  asked?.querySelector<HTMLElement>("button.secondary")?.click(); // 취소
+  await waitFor("창 닫힘", () => !endDialog(), 3000).catch(() => null);
+  const keptOnCancel = tabCount() === tabsBeforeClose && visiblePanes().length === 1;
+  await menu("close_pane");
+  await waitFor("끝내기 창", () => endDialog()?.querySelector("[data-action=close-tab-only]"), 3000).catch(() => null);
+  endDialog()?.querySelector<HTMLElement>("[data-action=close-tab-only]")?.click();
+  const closedOnly = await waitFor("탭만 닫기", () => !endDialog() && tabCount() === tabsBeforeClose - 1, 3000).then(() => true, () => false);
+  const folderLeft = (await run(first, `test -d "${group3}" && echo kept || echo gone`)).some((l) => l.trim() === "kept");
+  check(
+    "작업그룹 탭 닫기: 마지막 창을 닫으면 끝내기 창(끝내기·탭만 닫기)을 띄우고, 취소하면 그대로, 탭만 닫으면 worktree는 남김",
+    notAsked && offered && keptOnCancel && closedOnly && folderLeft,
+    `${notAsked} ${offered} ${keptOnCancel} ${closedOnly} ${folderLeft}`,
+  );
+  // ⌘W가 빠르게 두 번 와도 (화면이 한 번 늦은 상태) 마지막 창에서는 묻는다: test-2의 두 창
+  const tabsBeforeRapid = tabCount();
+  await Promise.all([menu("close_pane"), menu("close_pane")]);
+  const rapidAsked = await waitFor("빠른 ⌘W의 끝내기 창", () => document.querySelector<HTMLElement>("[data-action=close-tab-only]"), 3000).catch(() => null);
+  const rapidKept = tabCount() === tabsBeforeRapid;
+  rapidAsked?.click();
+  await waitFor("탭만 닫기", () => !endDialog() && tabCount() === tabsBeforeRapid - 1, 3000).catch(() => null);
+  check("작업그룹 탭 닫기: ⌘W가 빠르게 이어져도 마지막 창에서는 묻고 탭을 닫지 않음", !!rapidAsked && rapidKept, `${!!rapidAsked} ${rapidKept}`);
+  await closePaneKeepGroup(); // test-1
   await waitFor("작업그룹 탭 닫기", () => tabCount() === before, 5000);
+}
+
+// 창 닫기 (⌘W). 작업그룹의 마지막 창이면 작업그룹 끝내기 창이 뜨므로 "탭만 닫기"를 누른다 (작업그룹 폴더는 남겨 뒤 단계가 쓴다)
+async function closePaneKeepGroup() {
+  await menu("close_pane");
+  const only = await waitFor("탭만 닫기", () => document.querySelector<HTMLElement>("[data-action=close-tab-only]"), 300).catch(() => null);
+  only?.click();
+  if (only) await waitFor("끝내기 창 닫힘", () => !document.querySelector(".end-group-dialog"), 3000).catch(() => null);
 }
 
 // 작업그룹 준비…: 원본의 커밋 안 된 node_modules를 골라 두면 새 작업그룹에 복제한다 (src-tauri/src/clone.rs).
@@ -3530,6 +3568,7 @@ async function testGroupWorktree(root: string, first: Terminal) {
 // 터미널을 넷 더 만들므로 WebGL 검사 뒤에 둔다 (컨텍스트가 많으면 가장 오래된 첫 터미널의 것을 잃는다).
 async function testGroupClone(root: string, first: Terminal) {
   const sh = async (cmd: string, ms?: number) => (await run(first, cmd, ms)).map((l) => l.trim()).filter(Boolean);
+  const tabTitles = () => [...document.querySelectorAll(".project-workspace:not([style*='none']) .tab .tab-title")].map((el) => el.textContent);
   // 원본 server: package.json·lockfile(의존성 없는 npm 형식, npm ci가 내려받지 않고 끝난다)·requirements.txt를 커밋하고,
   // 무시되는 node_modules·.venv·.env를 만든다. node_modules에는 안쪽 상대 링크, 절대 링크, FIFO, 오래된 수정 시각을 둔다.
   const nm = `${root}/server/node_modules`;
@@ -3600,6 +3639,9 @@ async function testGroupClone(root: string, first: Terminal) {
   const before = tabCount();
   await clickMenu("Terminal", "New Work Group");
   await waitFor("네 번째 작업그룹", () => tabCount() === before + 1, 15000);
+  // 탭을 닫아 남은 작업그룹(test-1~3, 고친 것·병합 안 된 커밋 없음)이 있으면 가장 작은 번호를 다시 쓴다 (worktrees.rs reuse)
+  const name4 = tabTitles().at(-1) ?? "";
+  check("작업그룹 다시 쓰기: 탭을 닫아 남은 작업그룹 중 가장 작은 번호를 새 작업그룹으로 다시 씀", name4 === "test-1", tabTitles().join(","));
   const [, setup] = await waitFor("복제 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 40000);
   const out = screen(setup.term).join("\n");
   check(
@@ -3612,8 +3654,8 @@ async function testGroupClone(root: string, first: Terminal) {
     out.includes("[ddak] copied server/.env") && out.includes("[ddak] creating server/.venv with the same Python") && out.includes("[ddak] skipped server: npm ci: node_modules is already there"),
     out.slice(-600),
   );
-  const g4 = `${groups}test-4/server/node_modules`;
-  const env = await sh(`cat "${groups}test-4/server/.env"; echo; grep '^home' "${groups}test-4/server/.venv/pyvenv.cfg"; grep '^home' "${root}/server/.venv/pyvenv.cfg"; test -x "${groups}test-4/server/.venv/bin/python" && echo py-ok`);
+  const g4 = `${groups}${name4}/server/node_modules`;
+  const env = await sh(`cat "${groups}${name4}/server/.env"; echo; grep '^home' "${groups}${name4}/server/.venv/pyvenv.cfg"; grep '^home' "${root}/server/.venv/pyvenv.cfg"; test -x "${groups}${name4}/server/.venv/bin/python" && echo py-ok`);
   check("작업그룹 준비: 새 작업그룹의 .env 내용, .venv의 Python이 원본과 같음", env[0] === "TOKEN=secret" && env[1] === env[2] && env[1]?.startsWith("home") === true && env[3] === "py-ok", env.join("|"));
   const facts = await sh(
     `cd "${g4}" && cat pkg/index.js; echo; readlink .bin/run; test -e abs -o -L abs && echo abs-there; test -e pipe && echo pipe-there; ` +
@@ -3629,9 +3671,10 @@ async function testGroupClone(root: string, first: Terminal) {
   await sh(`printf 'lock2' > "${root}/server/package-lock.json"`);
   await clickMenu("Terminal", "New Work Group");
   await waitFor("다섯 번째 작업그룹", () => tabCount() === before + 2, 15000);
+  const name5 = tabTitles().at(-1) ?? "";
   const [, setup5] = await waitFor("건너뛴 뒤 세션", () => visiblePanes().length === 2 && visiblePanes(), 40000);
   const out5 = screen(setup5.term).join("\n");
-  const left = await sh(`test -e "${groups}test-5/server/node_modules" && echo there || echo none`);
+  const left = await sh(`test -e "${groups}${name5}/server/node_modules" && echo there || echo none`);
   check(
     "작업그룹 복제: lockfile이 다르면 건너뛰고 알림, 세션은 뜸",
     out5.includes("skipped server/node_modules: server/package-lock.json differs") && left.includes("none"),
@@ -3639,7 +3682,7 @@ async function testGroupClone(root: string, first: Terminal) {
   );
   check("작업그룹 준비: 복제를 건너뛰었으면 npm ci를 돌림", out5.includes("[ddak] running server: npm ci") && out5.includes("up to date"), out5.slice(-300));
   await sh(`cd "${root}/server" && git checkout -q package-lock.json && rm -rf node_modules .venv .env && cd - > /dev/null`);
-  for (let i = 0; i < 4; i++) await menu("close_pane"); // test-5, test-4 (세션 + setup)
+  for (let i = 0; i < 4; i++) await closePaneKeepGroup(); // 두 작업그룹 (세션 + setup)
   await waitFor("복제 작업그룹 탭 닫기", () => tabCount() === before, 5000);
 }
 
@@ -3907,6 +3950,9 @@ async function testAddSession(root: string, first: Terminal) {
 
   for (const tab of [made, document.querySelectorAll<HTMLElement>(".project-workspace:not([style*='none']) .tab")[before]]) {
     tab.querySelector<HTMLElement>("[title='Close Tab']")!.click();
+    // 작업그룹의 마지막 탭이면 끝내기 창이 뜬다: 탭만 닫는다
+    const only = await waitFor("탭만 닫기", () => document.querySelector<HTMLElement>("[data-action=close-tab-only]"), 500).catch(() => null);
+    only?.click();
   }
   await waitFor("탭 정리", () => tabCount() === before, 5000);
   const left = await waitAsync("참여자 정리", async () => {
@@ -4674,11 +4720,13 @@ async function testGitGraph(root: string, first: Terminal) {
   Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select(), "server");
   select().dispatchEvent(new Event("change", { bubbles: true }));
   const kept = await waitFor("그래프", () => row("end-test"), 8000).catch(() => undefined);
+  // 작업그룹 끝내기가 남긴 병합 안 된 브랜치 (번호는 남은 작업그룹을 다시 쓰는지에 따라 달라서 git으로 찾는다)
+  const keptBranch = (await run(first, `git --no-pager -C "${root}/server" branch --no-merged HEAD --list 'ddak/test-*' --format='%(refname:short)'`)).map((l) => l.trim()).find((l) => l.startsWith("ddak/"));
   const headRow = rows().find((r) => r.querySelector(".git-ref.head"));
   check(
     "Git Graph: 커밋과 참조(브랜치·HEAD), 원본 탭(작업그룹)과 세션을 HEAD 커밋에 표시",
-    chips(kept, "branch").includes(`ddak/${"test-6"}`) && !!headRow && chips(headRow, "group").some((g) => g?.startsWith("Test · shell")),
-    `${chips(kept, "branch")} | ${chips(headRow, "group")}`,
+    !!keptBranch && chips(kept, "branch").includes(keptBranch) && !!headRow && chips(headRow, "group").some((g) => g?.startsWith("Test · shell")),
+    `${keptBranch} ${chips(kept, "branch")} | ${chips(headRow, "group")}`,
   );
 
   // 원본에 커밋하면 다시 읽는다 (참조가 바뀜)
@@ -4695,7 +4743,11 @@ async function testGitGraph(root: string, first: Terminal) {
   gitBtn().click();
   const tagged = await waitFor("작업그룹 표시", () => rows().find((r) => chips(r, "group").includes(`${groupName} · shell`)), 8000).catch(() => undefined);
   check("Git Graph: 새 worktree 작업그룹의 탭 이름·세션을 그 worktree의 커밋에 표시", tagged === row("graph-live") && chips(tagged, "branch").includes(`ddak/${groupName}`), `${groupName} ${chips(tagged, "group")} ${chips(tagged, "branch")}`);
+  // 작업그룹의 마지막 탭이라 ×를 누르면 끝내기 창이 뜬다: 탭만 닫는다
   groupTab.querySelector<HTMLElement>("[title='Close Tab']")!.click();
+  const askedOnTabX = await waitFor("탭 ×의 끝내기 창", () => document.querySelector<HTMLElement>("[data-action=close-tab-only]"), 3000).catch(() => null);
+  askedOnTabX?.click();
+  check("작업그룹 탭 닫기: 탭 ×도 마지막 탭이면 끝내기 창을 띄움", !!askedOnTabX);
   await waitFor("작업그룹 탭 닫기", () => tabCount() === tabsBefore, 3000);
   await waitFor("Git Graph로", () => view(), 3000).catch(() => null);
 

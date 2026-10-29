@@ -30,9 +30,10 @@ type Action =
   | { type: "selectTab"; id: number }
   | { type: "selectTabAt"; index: number }
   | { type: "cycleTab"; delta: number }
-  | { type: "closeTab"; id: number }
+  | { type: "closeTab"; id: number; ask?: boolean }
   | { type: "split"; dir: "row" | "col" }
-  | { type: "closePane"; pane?: number }
+  | { type: "closePane"; pane?: number; ask?: boolean }
+  | { type: "askCloseDone" }
   | { type: "restartPane"; pane: number }
   | { type: "focus"; pane: number }
   | { type: "reveal"; pane: number }
@@ -147,8 +148,13 @@ function step(s: State, a: Action): State {
       const i = s.tabs.findIndex((t) => t.id === s.active);
       return { ...s, active: s.tabs[(i + a.delta + s.tabs.length) % s.tabs.length].id };
     }
-    case "closeTab":
+    case "closeTab": {
+      const target = s.tabs.find((x) => x.id === a.id);
+      if (a.ask && target && lastOfGroup(s, target)) return { ...s, askClose: { tab: a.id } };
       return closeTab(s, a.id);
+    }
+    case "askCloseDone":
+      return { ...s, askClose: undefined };
     case "split": {
       if (!tab || isViewer(tab)) return s;
       const pane = s.nextId;
@@ -159,6 +165,7 @@ function step(s: State, a: Action): State {
       const owner = s.tabs.find((t) => paneIds(t.layout).includes(pane!));
       if (!owner) return s;
       const layout = remove(owner.layout, pane!);
+      if (!layout && a.ask && lastOfGroup(s, owner)) return { ...s, askClose: { tab: owner.id, pane } };
       if (!layout) return closeTab(s, owner.id);
       const focus = owner.focus === pane ? paneIds(layout)[0] : owner.focus;
       // 돌던 준비 창을 닫으면 준비가 중단된 것으로 본다 (세션은 계속 기다리고, 다시 준비 / 그래도 시작을 고른다)
@@ -257,8 +264,11 @@ const MENU: Record<string, Action> = {
   new_tab: { type: "newTab" },
   split_right: { type: "split", dir: "row" },
   split_down: { type: "split", dir: "col" },
-  close_pane: { type: "closePane" },
+  close_pane: { type: "closePane", ask: true },
 };
+
+// 이 탭이 그 작업그룹(새 worktree)의 마지막 탭인지: 같은 폴더를 쓰는 다른 탭이 없다. 원본 탭은 아니다
+const lastOfGroup = (s: State, tab: Tab) => !!tab.worktree && !s.tabs.some((x) => x.id !== tab.id && x.cwd === tab.cwd);
 
 const pct = (v: number) => `${v * 100}%`;
 
@@ -329,8 +339,8 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
   const [s, dispatch] = useReducer(reducer, cwd, initial);
-  const latest = useRef({ group, onError, onTreeRoot, t, loaded: s.loaded });
-  latest.current = { group, onError, onTreeRoot, t, loaded: s.loaded };
+  const latest = useRef({ group, onError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs });
+  latest.current = { group, onError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs };
   const creating = useRef(false);
   const bodies = useRef<Record<number, HTMLDivElement | null>>({});
   const root = useRef<HTMLDivElement>(null);
@@ -339,6 +349,8 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   const [menu, setMenu] = useState<MenuState | null>(null);
   // 끝내기 창을 연 작업그룹 탭
   const [ending, setEnding] = useState<Tab | null>(null);
+  // 작업그룹의 마지막 탭을 닫으려 해서 끝내기 창을 열었으면, "탭만 닫기"로 할 닫기 (사용자 결정 2026-10-29)
+  const [closeOnly, setCloseOnly] = useState<(() => void) | null>(null);
   // 세션 추가 창을 연 탭
   const [adding, setAdding] = useState<number | null>(null);
   // 채팅 깨우기를 기다리는 창 → 바로 깨우기 (src-tauri/src/pty.rs wake)
@@ -404,6 +416,19 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   };
   // 자체 테스트: 지금 탭을 위처럼 다시 띄운다 (↻가 아닌 길로 터미널이 바뀌는 경우, 재리뷰 2회 R4)
   if (import.meta.env.DEV && visible) devHooks.relaunchActiveTab = () => relaunchTabs([s.active]);
+  // 탭·창 닫기 요청 (탭의 ×, 창의 ×, ⌘W: ask). 작업그룹의 마지막 탭이 닫히게 되면 리듀서가 닫지 않고 askClose를 남기고, 여기서
+  // 작업그룹 끝내기 창을 열어 끝낼지("작업그룹 끝내기") 탭만 닫을지("탭만 닫기") 고르게 한다. 닫으면 작업그룹 폴더·브랜치가 남아
+  // 쌓이므로 (사용자 결정 2026-10-29). 판단은 리듀서가 그때의 상태로 한다 (⌘W가 빠르게 이어져도). 같은 폴더를 쓰는 다른 탭이
+  // 있거나 원본 탭이면 묻지 않는다. 프로그램이 스스로 끝나 닫히는 것(exit)과 끝낸 뒤 닫기는 묻지 않는다 (ask 없음)
+  useEffect(() => {
+    const ask = s.askClose;
+    if (!ask) return;
+    dispatch({ type: "askCloseDone" });
+    const target = s.tabs.find((x) => x.id === ask.tab);
+    if (!target) return;
+    setCloseOnly(() => () => dispatch(ask.pane === undefined ? { type: "closeTab", id: ask.tab } : { type: "closePane", pane: ask.pane }));
+    setEnding(target);
+  }, [s.askClose, s.tabs]);
   // 작업그룹을 끝내느라 세션을 끝내는(끝낸) 터미널 ("탭:횟수"). 그 터미널은 끝나도 창을 닫지 않는다.
   const stopping = useRef(new Set<string>());
   // 그 폴더(작업그룹 폴더)에서 띄운 탭. group_end가 그 폴더의 터미널을 모두 끝낸다.
@@ -426,9 +451,11 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
     // 저장한 상태를 읽기 전에는 만들지 않는다: 만들어도 그 결과를 읽은 상태가 덮어 탭이 생기지 않는다 (리뷰 P2)
     if (creating.current || !latest.current.loaded) return;
     creating.current = true;
-    const { group, onError, t } = latest.current;
+    const { group, onError, t, tabs } = latest.current;
     try {
-      const made = await invoke<Created>("group_create", { project: cwd, prefix: group?.id ?? "shell" });
+      // 탭이 쓰는 폴더는 넘긴다: Rust는 쓰지 않는 남은 작업그룹 폴더를 다시 쓴다 (worktrees.rs reuse)
+      const inUse = tabs.map((tab) => tab.cwd);
+      const made = await invoke<Created>("group_create", { project: cwd, prefix: group?.id ?? "shell", inUse });
       dispatch({ type: "newGroupTab", group, cwd: made.path, made });
     } catch (raw) {
       const { code, detail } = codeError(raw);
@@ -689,7 +716,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                 className="tab-close"
                 title={t("workspace.closeTab")}
                 onMouseDown={(e) => e.stopPropagation()}
-                onClick={() => dispatch({ type: "closeTab", id: tab.id })}
+                onClick={() => dispatch({ type: "closeTab", id: tab.id, ask: true })}
               >
                 ×
               </span>
@@ -821,7 +848,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
                           ↻
                         </button>
                       )}
-                      <button className="pane-action" data-action="pane-close" title={t("pane.close")} onClick={() => dispatch({ type: "closePane", pane: id })}>
+                      <button className="pane-action" data-action="pane-close" title={t("pane.close")} onClick={() => dispatch({ type: "closePane", pane: id, ask: true })}>
                         ×
                       </button>
                     </span>
@@ -937,7 +964,11 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
           project={s.root}
           group={ending.cwd}
           name={ending.worktree}
-          onClose={() => setEnding(null)}
+          onClose={() => {
+            setEnding(null);
+            setCloseOnly(null);
+          }}
+          onCloseTab={closeOnly ?? undefined}
           onStopping={() => tabsIn(ending.cwd).forEach((id) => stopping.current.add(runKey(id)))}
           onFailed={(stopped) => {
             const ids = tabsIn(ending.cwd);
