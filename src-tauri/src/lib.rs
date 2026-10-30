@@ -170,6 +170,7 @@ pub fn run() {
             mobile::mobile_serve,
             mobile::mobile_pair_code,
             mobile::mobile_forget,
+            mobile::mobile_set_name,
             mobile::set_opened,
             mobile::selftest_mobile_http,
             mobile::selftest_mobile_pushes,

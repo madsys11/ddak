@@ -262,6 +262,7 @@ export const en = {
   "mobile.title": "Mobile Connection",
   "mobile.hint": "Read and send project chat from your phone over Tailscale. Only phones you pair here can connect.",
   "mobile.enable": "Allow phones to connect to {name}",
+  "mobile.name": "Name shown on phones",
   "mobile.startFailed": "Could not start the mobile server: {error}",
   "mobile.funnel": "Tailscale Funnel is on for this Mac, which would expose it to the internet. Turn Funnel off to use the mobile connection.",
   "mobile.tsMissing": "Tailscale is not installed. Install it from tailscale.com and sign in on this Mac and your phone with the same account.",

@@ -208,6 +208,9 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String>
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
+// 폰에 보일 이름의 최대 글자 수 (MobileDialog.tsx 입력란 maxLength와 같다)
+const NAME_MAX: usize = 64;
+
 // 이 맥 이름 (폰에 보일 기본 이름)
 #[cfg(target_os = "macos")]
 fn host_name() -> String {
@@ -333,6 +336,19 @@ impl Mobile {
             self.state.lock().unwrap().error = None;
         }
         Ok(())
+    }
+
+    // 폰에 보일 이름 (창에서 바꿈). 앞뒤 공백과 제어 문자를 빼고 NAME_MAX자까지, 비우면 이 맥 이름으로 돌아간다.
+    // 폰은 /api/info의 이름으로 저장한 이름을 맞추고, 알림 제목도 이 이름이다
+    pub fn set_name(&self, name: &str) -> Result<(), String> {
+        let mut name: String = name.trim().chars().filter(|c| !c.is_control()).take(NAME_MAX).collect();
+        name = name.trim().to_string();
+        if name.is_empty() {
+            name = host_name();
+        }
+        let mut st = self.state.lock().unwrap();
+        st.config.name = name;
+        self.save_config(&st)
     }
 
     pub fn set_error(&self, error: Option<String>) {
@@ -1008,6 +1024,14 @@ pub fn set_opened(state: tauri::State<'_, MobileState>, projects: Vec<String>) {
 }
 
 #[tauri::command(async)]
+pub fn mobile_set_name(state: tauri::State<'_, MobileState>, name: String) -> Result<Status, String> {
+    let mobile = mobile_of(&state)?;
+    mobile.set_name(&name)?;
+    let ts = refresh(&mobile);
+    Ok(status(&mobile, ts))
+}
+
+#[tauri::command(async)]
 pub fn mobile_forget(state: tauri::State<'_, MobileState>, id: String) -> Result<Status, String> {
     let mobile = mobile_of(&state)?;
     mobile.forget(&id)?;
@@ -1286,6 +1310,19 @@ mod tests {
             seen.push_str(&line);
         }
         assert!(seen.contains("event: message") && seen.contains(&project_id(&f.project)), "{seen}");
+    }
+
+    // 폰에 보일 이름: 공백·제어 문자를 빼고 저장, 길면 자르고, 비우면 이 맥 이름
+    #[test]
+    fn renaming_trims_limits_and_falls_back_to_host_name() {
+        let f = fixture("rename");
+        f.mobile.set_name("  Studio\n Mac  ").unwrap();
+        let saved: Config = read_json(&f.dir.join("mobile/config.json"));
+        assert_eq!(saved.name, "Studio Mac");
+        f.mobile.set_name(&"가".repeat(NAME_MAX + 10)).unwrap();
+        assert_eq!(f.mobile.config().name.chars().count(), NAME_MAX);
+        f.mobile.set_name(" \t ").unwrap();
+        assert_eq!(f.mobile.config().name, host_name());
     }
 
     // 기기 연결을 끊으면 열려 있던 SSE도 닫히고, 그 뒤의 이벤트는 받지 못한다 (리뷰 R1)

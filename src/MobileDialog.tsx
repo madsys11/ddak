@@ -44,6 +44,8 @@ export function MobileDialog({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [pairing, setPairing] = useState<Pairing | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  // 고치는 중인 폰에 보일 이름 (null: 저장된 이름)
+  const [name, setName] = useState<string | null>(null);
 
   const run = async (cmd: string, args?: Record<string, unknown>) => {
     setBusy(true);
@@ -76,6 +78,13 @@ export function MobileDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
+  // 칸을 벗어나거나 Enter면 저장한다. Rust가 다듬은 이름(비우면 이 맥 이름)으로 칸을 되돌린다.
+  // 저장하는 동안(Tailscale 상태까지 다시 읽는다) 칸을 잠근다: 그 사이 고친 것을 응답이 지우지 않게 (리뷰 R1)
+  const saveName = async () => {
+    if (name !== null && name !== status?.config.name) await run("mobile_set_name", { name });
+    setName(null);
+  };
+
   const ts = status?.tailscale;
   const enabled = !!status?.config.enabled;
   // 폰이 붙을 수 있는 상태: 서버가 떠 있고 Tailscale이 돌며 HTTPS 인증서와 serve가 이 포트로
@@ -98,6 +107,22 @@ export function MobileDialog({ onClose }: { onClose: () => void }) {
           <label className="mobile-enable">
             <input type="checkbox" checked={enabled} disabled={busy} data-action="mobile-enable" onChange={(e) => run("mobile_set_enabled", { enabled: e.target.checked })} autoFocus />
             <span>{t("mobile.enable", { name: status.config.name })}</span>
+          </label>
+        )}
+        {status && (
+          <label>
+            {t("mobile.name")}
+            <input
+              value={name ?? status.config.name}
+              maxLength={64}
+              data-action="mobile-name"
+              disabled={busy}
+              onChange={(e) => setName(e.target.value)}
+              onBlur={saveName}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229) e.currentTarget.blur();
+              }}
+            />
           </label>
         )}
         {enabled && status && ts && (

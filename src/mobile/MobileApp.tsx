@@ -141,6 +141,13 @@ export function MobileApp() {
     saveComputers(list);
     setComputers(list);
   };
+  // 맥이 알려 준 이름(/api/info, 맥의 "모바일 연결" 창에서 바꿈)으로 저장한 이름을 맞춘다.
+  // 여러 컴퓨터가 잇달아 답해도 서로 덮어쓰지 않게 저장소에서 다시 읽는다
+  const rename = (id: string, name: string) => {
+    const list = loadComputers();
+    if (!name || !list.some((c) => c.id === id && c.name !== name)) return;
+    update(list.map((c) => (c.id === id ? { ...c, name } : c)));
+  };
 
   if (route.view === "settings") return <Settings />;
   if (route.view === "add" || (route.view === "home" && computers.length === 0)) {
@@ -168,10 +175,10 @@ export function MobileApp() {
     update(rest);
     if (removed) removeComputer(removed, rest);
   };
-  if (route.view === "home") return <ComputerList computers={computers} onRemove={remove} />;
+  if (route.view === "home") return <ComputerList computers={computers} onRemove={remove} onRename={rename} />;
   const computer = computers.find((c) => c.id === route.computer);
   if (!computer) return <Redirect to="/" />;
-  if (route.view === "projects") return <ProjectList computer={computer} computers={computers} />;
+  if (route.view === "projects") return <ProjectList computer={computer} computers={computers} onRename={rename} />;
   return <Chat key={`${computer.id}/${route.project}`} computer={computer} project={route.project} home={computers.length > 1} />;
 }
 
@@ -353,14 +360,18 @@ function PushBanner({ computers }: { computers: Computer[] }) {
   );
 }
 
-export function ComputerList({ computers, onRemove }: { computers: Computer[]; onRemove: (id: string) => void }) {
+export function ComputerList({ computers, onRemove, onRename }: { computers: Computer[]; onRemove: (id: string) => void; onRename: (id: string, name: string) => void }) {
   // 컴퓨터마다 켜져 있는지 (/api/info가 답하는지)
   const [state, setState] = useState<Record<string, string>>({});
   useEffect(() => {
     let alive = true;
     for (const c of computers) {
       api.info(c).then(
-        (info) => alive && setState((s) => ({ ...s, [c.id]: info.api === API_VERSION ? "" : t("phone.update", { name: c.name }) })),
+        (info) => {
+          if (!alive) return;
+          setState((s) => ({ ...s, [c.id]: info.api === API_VERSION ? "" : t("phone.update", { name: info.name }) }));
+          onRename(c.id, info.name);
+        },
         (e) => alive && setState((s) => ({ ...s, [c.id]: errorText(e, c.name) })),
       );
     }
@@ -401,7 +412,7 @@ export function ComputerList({ computers, onRemove }: { computers: Computer[]; o
   );
 }
 
-function ProjectList({ computer, computers }: { computer: Computer; computers: Computer[] }) {
+export function ProjectList({ computer, computers, onRename }: { computer: Computer; computers: Computer[]; onRename: (id: string, name: string) => void }) {
   const many = computers.length > 1;
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -411,6 +422,7 @@ function ProjectList({ computer, computers }: { computer: Computer; computers: C
     Promise.all([api.info(computer), api.projects(computer)]).then(
       ([info, list]) => {
         if (mine !== n.current) return;
+        onRename(computer.id, info.name);
         // 이 화면이 모르는 API면 목록도 쓰지 않는다
         setError(info.api === API_VERSION ? null : t("phone.update", { name: computer.name }));
         setProjects(info.api === API_VERSION ? list : null);

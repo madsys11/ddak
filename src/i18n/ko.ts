@@ -262,6 +262,7 @@ export const ko: Messages = {
   "mobile.title": "모바일 연결",
   "mobile.hint": "폰에서 Tailscale로 프로젝트 채팅을 읽고 보냅니다. 여기서 페어링한 폰만 연결할 수 있습니다.",
   "mobile.enable": "{name}에 폰 연결 허용",
+  "mobile.name": "폰에 보일 이름",
   "mobile.startFailed": "모바일 서버를 띄우지 못했습니다: {error}",
   "mobile.funnel": "이 맥에 Tailscale Funnel이 켜져 있어 인터넷에 공개될 수 있습니다. 모바일 연결을 쓰려면 Funnel을 끄세요.",
   "mobile.tsMissing": "Tailscale이 설치되어 있지 않습니다. tailscale.com에서 설치하고 이 맥과 폰에서 같은 계정으로 로그인하세요.",

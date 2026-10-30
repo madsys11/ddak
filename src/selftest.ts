@@ -23,7 +23,7 @@ import { LOCALES, isLocale } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
 import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
-import { Chat, ComputerList, KeyProblem, Settings as PhoneSettingsView } from "./mobile/MobileApp";
+import { Chat, ComputerList, KeyProblem, ProjectList, Settings as PhoneSettingsView } from "./mobile/MobileApp";
 import { locale as phoneLocale, t as phoneT } from "./mobile/i18n";
 import { DEFAULT_SETTINGS as DEFAULT_PHONE_SETTINGS, parseSettings as parsePhoneSettings, resolveLocale as resolvePhoneLocale, resolveTheme as resolvePhoneTheme, type PhoneSettings } from "./mobile/settings";
 import { API_VERSION as PHONE_API, ApiError as PhoneApiError, api as phoneApi } from "./mobile/api";
@@ -940,21 +940,27 @@ async function testMobileThemeUnit() {
   }
   check("폰 화면: 배경 없는 버튼(프로젝트 이름, 막대의 ‹·+)은 화면 글자색, 컴퓨터 빼기는 배경 없이 오류색 (모든 테마)", wrong.length === 0, wrong.join(", "));
 
-  // 컴퓨터 빼기 (MobileApp.tsx ComputerList): 글자 없는 휴지통 아이콘(이름은 "빼기"), 확인 창에서 취소하면 빼지 않는다
+  // 컴퓨터 빼기 (MobileApp.tsx ComputerList): 글자 없는 휴지통 아이콘(이름은 "빼기"), 확인 창에서 취소하면 빼지 않는다.
+  // 컴퓨터 목록·프로젝트 목록은 맥이 알려 준 이름(/api/info)으로 저장한 이름을 맞추게 한다 (맥 "모바일 연결" 창에서 바꿈)
   const loaded = new Promise((r) => (frame.onload = r));
   frame.srcdoc = `<style>${mobileCss}</style><div id="root"></div>`;
   await loaded;
   const doc = frame.contentDocument!;
   const savedInfo = phoneApi.info;
+  const savedProjects = phoneApi.projects;
   const savedConfirm = window.confirm;
   phoneApi.info = async () => ({ id: "a", name: "Mac", version: "", api: PHONE_API });
+  phoneApi.projects = async () => [];
+  const renamed: string[] = [];
+  const onRename = (id: string, name: string) => renamed.push(`${id}:${name}`);
+  const old = { id: "a", name: "Old Mac", api: "http://127.0.0.1:9", token: "t" };
   const removed: string[] = [];
   const asked: string[] = [];
   let answer = false;
   window.confirm = (text?: string) => (asked.push(text ?? ""), answer);
   const root = createRoot(doc.getElementById("root")!);
   try {
-    root.render(createElement(ComputerList, { computers: [{ id: "a", name: "Mac", api: "http://127.0.0.1:9", token: "t" }], onRemove: (id: string) => removed.push(id) }));
+    root.render(createElement(ComputerList, { computers: [old], onRemove: (id: string) => removed.push(id), onRename }));
     const button = await waitFor("빼기 버튼", () => doc.querySelector<HTMLElement>(".row-remove"), 2000).catch(() => null);
     const iconOnly = !!button?.querySelector("svg") && button.textContent === "" && button.getAttribute("aria-label") === phoneT("phone.remove");
     button?.click();
@@ -963,12 +969,18 @@ async function testMobileThemeUnit() {
     button?.click();
     check(
       "폰 컴퓨터 목록: 빼기는 글자 없는 아이콘(이름 '빼기'), 확인 창에서 취소하면 그대로, 확인하면 뺌",
-      iconOnly && asked.length === 2 && asked[0] === phoneT("phone.removeConfirm", { name: "Mac" }) && cancelled === 0 && removed.join(",") === "a",
+      iconOnly && asked.length === 2 && asked[0] === phoneT("phone.removeConfirm", { name: "Old Mac" }) && cancelled === 0 && removed.join(",") === "a",
       `${iconOnly} ${button?.textContent} ${button?.getAttribute("aria-label")} ${asked.length} ${cancelled} ${removed}`,
     );
+    const fromList = renamed.join(",");
+    renamed.length = 0;
+    root.render(createElement(ProjectList, { computer: old, computers: [old], onRename }));
+    await waitFor("프로젝트 목록에서 이름 맞춤", () => renamed.length > 0, 2000).catch(() => null);
+    check("폰: 컴퓨터 목록·프로젝트 목록이 맥이 알려 준 이름으로 저장한 이름을 맞춤", fromList === "a:Mac" && renamed.join(",") === "a:Mac", `${fromList} / ${renamed}`);
   } finally {
     root.unmount();
     phoneApi.info = savedInfo;
+    phoneApi.projects = savedProjects;
     window.confirm = savedConfirm;
     frame.remove();
   }
@@ -1184,6 +1196,40 @@ async function testMobile(root: string) {
   const token = paired === 200 ? (JSON.parse(pairBody).token as string) : "";
   check("모바일 연결: 다른 로그인 거절, 코드로 페어링", other === 403 && paired === 200 && token.length === 64, `${other} ${paired} ${pairBody}`);
   const auth = { Authorization: `Bearer ${token}` };
+
+  // 폰에 보일 이름 (mobile.rs set_name): 창의 칸에서 바꾸고 칸을 벗어나면 저장, 폰은 /api/info로 받는다. 비우면 이 맥 이름으로
+  const infoName = async () => JSON.parse((await http("GET", "/api/info", auth))[1]).name as string;
+  const nameInput = () => dialog()!.querySelector<HTMLInputElement>("[data-action=mobile-name]")!;
+  // 저장을 시작하면 응답까지 칸을 잠그는지 (그 사이 고친 것을 응답이 지우지 않게. 리뷰 R1)
+  let lockedWhileSaving = true;
+  const typeName = async (value: string) => {
+    nameInput().focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(nameInput(), value);
+    nameInput().dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(50);
+    nameInput().blur();
+    // React는 이벤트 뒤 마이크로태스크에서 다시 그린다 (저장 응답은 IPC라 그보다 늦다)
+    await Promise.resolve();
+    lockedWhileSaving &&= nameInput().disabled;
+  };
+  // 저장은 비동기라 폰 정보가 그 이름이 될 때까지 본다
+  const nameBecomes = async (want: string) => {
+    for (const end = Date.now() + 5000; Date.now() < end; await sleep(100)) if ((await infoName()) === want) return true;
+    return false;
+  };
+  const defaultName = await infoName();
+  await typeName("  Selftest Studio  ");
+  const renamed = await nameBecomes("Selftest Studio");
+  const shown = await waitFor("칸에 다듬은 이름", () => nameInput().value === "Selftest Studio" && nameInput().value, 3000).catch(() => nameInput().value);
+  await typeName("");
+  const restored = await nameBecomes(defaultName);
+  // 칸은 창이 저장 결과를 받은 뒤 되돌아간다
+  await waitFor("칸 되돌림", () => nameInput().value === defaultName, 3000).catch(() => null);
+  check(
+    "모바일 연결: 폰에 보일 이름을 창에서 바꾸면 저장되어 폰 정보에 (앞뒤 공백 뺌), 비우면 이 맥 이름으로. 저장하는 동안 칸은 잠김",
+    !!defaultName && renamed && shown === "Selftest Studio" && restored && nameInput().value === defaultName && lockedWhileSaving && !nameInput().disabled,
+    `${defaultName} ${renamed} ${shown} ${restored} ${nameInput().value} 잠김=${lockedWhileSaving} 지금=${nameInput().disabled}`,
+  );
   const [listed, listBody] = await http("GET", "/api/projects", auth);
   const project = listed === 200 ? (JSON.parse(listBody).projects as { id: string; name: string }[]).find((p) => p.name === root.split("/").pop()) : undefined;
   check("모바일 연결: 프로젝트 목록", !!project, `${listed} ${listBody}`);
