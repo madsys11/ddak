@@ -77,9 +77,12 @@ const nameKey = (name: string, windows: boolean) => (windows ? name : name.norma
 
 // 폴더(위치 prefix)의 바로 아래 항목 이름 → 표시. 폴더는 안에 바뀐 것이 있으면 그중 가장 눈에 띌 것
 // (충돌 > 수정·삭제·이름 바뀜(M으로) > 추가·추적 안 함). 추적 안 하는 폴더 자체("이름/")는 그 폴더의 U.
+const rank = (c: GitCode) => (c === "!" ? 3 : c === "A" || c === "U" ? 1 : 2);
+// 폴더 안에 든 것의 표시를 폴더에 올릴 때: 수정·삭제·이름 바뀜은 M으로
+const inside = (c: GitCode): GitCode => (rank(c) === 2 ? "M" : c);
+
 export function gitDecorations(prefix: string, files: Files, windows = IS_WINDOWS): (name: string) => GitCode | undefined {
   const out = new Map<string, GitCode>();
-  const rank = (c: GitCode) => (c === "!" ? 3 : c === "A" || c === "U" ? 1 : 2);
   const base = nameKey(prefix, windows);
   for (const [raw, code] of files) {
     const path = nameKey(raw, windows);
@@ -89,17 +92,30 @@ export function gitDecorations(prefix: string, files: Files, windows = IS_WINDOW
     const name = slash < 0 ? rest : rest.slice(0, slash);
     if (!name) continue;
     const own = slash < 0 || slash === rest.length - 1;
-    const c: GitCode = own || code === "!" ? code : rank(code) === 2 ? "M" : code;
+    const c: GitCode = own ? code : inside(code);
     const prev = out.get(name);
     if (!prev || rank(c) > rank(prev)) out.set(name, c);
   }
   return (name: string) => out.get(nameKey(name, windows));
 }
 
-// 폴더 dir의 바로 아래 항목 이름 → 표시 (없으면 undefined)
-export function useGitStatus(dir: string): (name: string) => GitCode | undefined {
+// 위치 prefix 아래 전체의 표시: 저장소·worktree 행 (안에 바뀐 것이 있으면 폴더처럼 가장 눈에 띌 것)
+export function gitSummary(prefix: string, files: Files, windows = IS_WINDOWS): GitCode | undefined {
+  const base = nameKey(prefix, windows);
+  let out: GitCode | undefined;
+  for (const [raw, code] of files) {
+    if (!nameKey(raw, windows).startsWith(base)) continue;
+    const c = inside(code);
+    if (!out || rank(c) > rank(out)) out = c;
+  }
+  return out;
+}
+
+// 폴더 dir이 든 저장소의 바뀐 파일 (dir의 위치와 함께). dir이 null이면 읽지 않는다
+function useRepoFiles(dir: string | null): { prefix: string; files: Files } | null {
   const [state, setState] = useState<{ prefix: string; files: Files } | null>(null);
   useEffect(() => {
+    if (dir === null) return setState(null);
     let alive = true;
     let seq = 0;
     let current: (Place & { unsub: () => void }) | null = null;
@@ -132,5 +148,17 @@ export function useGitStatus(dir: string): (name: string) => GitCode | undefined
       current?.unsub();
     };
   }, [dir]);
+  return state;
+}
+
+// 폴더 dir의 바로 아래 항목 이름 → 표시 (없으면 undefined)
+export function useGitStatus(dir: string): (name: string) => GitCode | undefined {
+  const state = useRepoFiles(dir);
   return useMemo(() => (state ? gitDecorations(state.prefix, state.files) : () => undefined), [state]);
+}
+
+// 저장소·worktree 폴더 dir 전체의 표시. 접혀 있어도 보이는 동안 그 저장소를 읽는다 (null이면 읽지 않는다)
+export function useGitSummary(dir: string | null): GitCode | undefined {
+  const state = useRepoFiles(dir);
+  return useMemo(() => (state ? gitSummary(state.prefix, state.files) : undefined), [state]);
 }

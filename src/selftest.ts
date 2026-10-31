@@ -17,7 +17,7 @@ import { baseName as platformBaseName, dirName as platformDirName, fileUrlPath, 
 import { MIN_CONTRAST, clipboardKey } from "./Terminal";
 import { insertAt } from "./dragPath";
 import selftestPlan from "../scripts/selftest-plan.json";
-import { gitDecorations } from "./gitStatus";
+import { gitDecorations, gitSummary } from "./gitStatus";
 import { THEMES, isThemeId } from "./themes";
 import { LOCALES, isLocale } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
@@ -148,7 +148,7 @@ async function testTree() {
 }
 
 // 파일 트리의 git 표시 (src/gitStatus.ts, git.rs git_status): 저장소를 펼치면 파일은 글자(M 수정, A 스테이징, U 추적 안 함),
-// 바뀐 것이 든 폴더는 점. 추적 안 하는 폴더 안은 무시한 파일만 빼고 U. 내용만 바뀐 것(폴더 감시에 안 잡힘)과 커밋도 몇 초 안에
+// 바뀐 것이 든 폴더는 점. 저장소 행은 접혀 있어도 자기 저장소에 바뀐 것이 있으면 점. 추적 안 하는 폴더 안은 무시한 파일만 빼고 U. 내용만 바뀐 것(폴더 감시에 안 잡힘)과 커밋도 몇 초 안에
 // 반영된다. 분해형(NFD) 한글 이름도 git의 합성형 경로와 맞춘다. 펼쳐 둔 폴더에서 git init 하면 표시가 생긴다.
 async function testTreeGit(term: Terminal) {
   const ident = "-c user.name=t -c user.email=t@example.com";
@@ -163,11 +163,14 @@ async function testTreeGit(term: Terminal) {
   };
   const all = (names: string[]) => names.map((n) => `${n}=${status(n)}`).join(" ");
   await waitFor("저장소 표시", () => fileRow("gst")?.dataset.git === "repo", 3000);
+  // 접힌 저장소 행: 안에 수정·스테이징·추적 안 함이 있으면 가장 눈에 띌 것(수정)의 점
+  await waitFor("접힌 저장소 행의 점", () => status("gst") === "M•~", 3000).catch(() => {});
+  check("파일 트리 git: 접힌 저장소 행도 자기 저장소에 바뀐 것이 있으면 점 (수정 색)", status("gst") === "M•~", status("gst"));
   fileRow("gst")!.click();
   const names = ["gst", "fresh", "lib", nfd, "keep.txt", "loose.txt", "mod.txt", "staged.txt", `${nfd}.txt`];
-  const want = `gst=- fresh=U• lib=M•~ ${nfd}=M•~ keep.txt=- loose.txt=UU mod.txt=MM~ staged.txt=AA ${nfd}.txt=UU`;
+  const want = `gst=M•~ fresh=U• lib=M•~ ${nfd}=M•~ keep.txt=- loose.txt=UU mod.txt=MM~ staged.txt=AA ${nfd}.txt=UU`;
   await waitFor("git 표시", () => all(names) === want, 5000).catch(() => {});
-  check("파일 트리 git: 수정 M·스테이징 A·추적 안 함 U, 바뀐 것이 든 폴더는 점, 저장소 행 자체는 표시 없음, 분해형 한글 이름도", all(names) === want, all(names));
+  check("파일 트리 git: 수정 M·스테이징 A·추적 안 함 U, 바뀐 것이 든 폴더와 저장소 행은 점, 분해형 한글 이름도", all(names) === want, all(names));
   fileRow(nfd)!.click();
   await waitFor("분해형 폴더 안", () => status("in.txt") === "MM~", 3000).catch(() => {});
   check("파일 트리 git: 분해형 한글 폴더 안의 수정도 M", status("in.txt") === "MM~", status("in.txt"));
@@ -208,6 +211,15 @@ async function testTreeGit(term: Terminal) {
     mac(nfd) === "M" && mac(`${nfd}.txt`) === "U" && inside("a.txt") === "M" && win(nfd) === undefined && win(nfc) === "M",
     `${mac(nfd)} ${mac(`${nfd}.txt`)} ${inside("a.txt")} ${win(nfd)} ${win(nfc)}`,
   );
+  // 저장소 행 (gitSummary): 충돌 > 수정·삭제·이름 바뀜(M) > 추가·추적 안 함, 위치 아래만
+  const sums = [
+    gitSummary("", [["a", "U"], ["b/c", "D"]]),
+    gitSummary("", [["a", "R"], ["x/", "U"], ["b", "!"]]),
+    gitSummary("", [["x/", "U"]]),
+    gitSummary("sub/", [["a", "M"], ["sub/b", "A"]]),
+    gitSummary("", []),
+  ].join(",");
+  check("파일 트리 git: 저장소 행의 점은 가장 눈에 띌 것 (충돌 > 수정 > 추가·추적 안 함)", sums === "M,!,U,A,", sums);
 }
 
 // 명령을 보내고 앞뒤에 찍은 표시 사이의 출력을 돌려준다.
@@ -5068,6 +5080,34 @@ async function testGitGraph(root: string, first: Terminal) {
   await run(first, `git -C "${root}/server" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m graph-live`);
   const live = await waitFor("새 커밋", () => row("graph-live"), 8000).catch(() => undefined);
   check("Git Graph: 참조가 바뀌면 다시 읽어 새 커밋을 보임 (HEAD)", !!live && chips(live, "head").length === 1, rows()[0]?.textContent ?? "");
+
+  // 커밋하지 않은 변경: 맨 위 행에 수(참조가 그대로여도 몇 초 안에), 누르면 바뀐 파일, 커밋을 고르면 그 상세로, 없어지면 행도 없음
+  const uncommitted = () => view()!.querySelector<HTMLElement>(".git-uncommitted");
+  const cleanAtFirst = !uncommitted();
+  await run(first, `cd "${root}/server" && echo u > graph-new.txt && echo m >> "$(git ls-files | head -1)"; cd - >/dev/null`);
+  const dirty = await waitFor("커밋하지 않은 변경 행", () => uncommitted()?.dataset.uncommitted === "2" && uncommitted(), 3000 + 5000).catch(() => null);
+  const firstRow = view()!.querySelector(".git-list")?.querySelector(".git-row") === dirty;
+  dirty?.click();
+  const changedFiles = () => [...view()!.querySelectorAll<HTMLElement>(".git-detail[data-detail=uncommitted] .git-file")].map((f) => `${f.querySelector(".git-status")?.textContent}${f.dataset.file === "graph-new.txt" ? ":new" : ""}`).sort().join(",");
+  const listed = await waitFor("바뀐 파일", () => changedFiles() === "M,U:new" && changedFiles(), 2000).catch(() => changedFiles());
+  row("graph-live")?.click();
+  const switched = await waitFor("커밋 상세로", () => !view()!.querySelector(".git-detail[data-detail=uncommitted]") && view()!.querySelector(".git-detail .git-message")?.textContent === "graph-live", 3000).then(() => true, () => false);
+  row("graph-live")?.click();
+  await run(first, `cd "${root}/server" && rm graph-new.txt && git checkout -q -- . ; cd - >/dev/null`);
+  const gone = await waitFor("변경 없어짐", () => !uncommitted(), 3000 + 5000).then(() => true, () => false);
+  // 조회가 폴링 주기(3초)보다 오래 걸려도 응답을 반영한다 (겹친 요청이 서로를 버리지 않게. 리뷰 R1)
+  devHooks.gitStatusDelay = () => 4000;
+  await run(first, `cd "${root}/server" && echo u > graph-slow.txt; cd - >/dev/null`);
+  const slow = await waitFor("느린 조회", () => uncommitted()?.dataset.uncommitted === "1", 4000 + 3000 + 4000 + 3000).then(() => true, () => false);
+  devHooks.gitStatusDelay = undefined;
+  await run(first, `rm "${root}/server/graph-slow.txt"`);
+  const slowGone = await waitFor("느린 조회 뒤 없어짐", () => !uncommitted(), 4000 + 3000 + 5000).then(() => true, () => false);
+  check("Git Graph: 커밋하지 않은 변경 조회가 폴링 주기보다 오래 걸려도 반영됨", slow && slowGone, `${slow} ${slowGone} ${uncommitted()?.dataset.uncommitted}`);
+  check(
+    "Git Graph: 커밋하지 않은 변경은 맨 위 행에 수, 누르면 바뀐 파일(M·U), 커밋을 고르면 그 상세, 변경이 없어지면 행도 없음",
+    cleanAtFirst && !!dirty && firstRow && dirty.textContent === "Uncommitted Changes (2)" && listed === "M,U:new" && switched && gone,
+    `${cleanAtFirst} ${dirty?.textContent} ${firstRow} ${listed} ${switched} ${gone}`,
+  );
 
   // 새 worktree로 만든 작업그룹: 그 worktree가 있는 커밋(원본 HEAD에서 시작)에 그 탭 이름과 세션을 붙인다
   const tabsBefore = tabCount();

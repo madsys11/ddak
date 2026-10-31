@@ -95,6 +95,7 @@ export const en = {
   "git.empty": "No commits yet.",
   "git.loading": "Loading…",
   "git.parents": "Parents",
+  "git.uncommitted": "Uncommitted Changes ({n})",
   "git.files": "{n} files changed",
   "panel.resizeHint": "Drag to resize. Double-click to reset.",
   "sidebar.unread": "{n} messages for you",

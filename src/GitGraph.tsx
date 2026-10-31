@@ -11,6 +11,8 @@ type Ref = { name: string; kind: "branch" | "remote" | "tag"; sha: string };
 type Worktree = { path: string; sha: string | null; branch: string | null; place: number | null };
 type Graph = { commits: Commit[]; refs: Ref[]; head: string | null; worktrees: Worktree[]; truncated: boolean; lanes: number };
 type Detail = { sha: string; parents: string[]; author: string; time: number; message: string; files: { status: string; path: string }[] };
+// git_status: 커밋하지 않은 변경 (최상위 기준 경로, M·A·U·D·R·!. 추적 안 하는 폴더는 "폴더/" 한 줄)
+type Change = [string, string];
 // 작업그룹 표시: 터미널 탭의 폴더, 탭 이름, 그 탭의 세션 이름
 export type Place = { cwd: string; label: string; sessions: string[] };
 
@@ -42,6 +44,9 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  // 커밋하지 않은 변경과 그 행을 골랐는지 (커밋 선택과 함께 하나만)
+  const [changes, setChanges] = useState<Change[] | null>(null);
+  const [showChanges, setShowChanges] = useState(false);
   const list = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, height: 0 });
 
@@ -102,8 +107,31 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
         },
         (e) => alive && setError(codeError(e).detail),
       );
+    // 커밋하지 않은 변경: 참조가 그대로여도 바뀌므로 지문과 따로 매번 읽는다. 실패하면 행을 감춘다.
+    // 읽는 중이면 다음 확인은 건너뛴다: 겹친 요청 중 마지막 것만 쓰면 주기보다 오래 걸리는 저장소에서 응답이 모두 버려진다 (리뷰 R1).
+    // 저장소가 바뀌거나 숨으면 alive로 늦은 응답을 버린다
+    let changing = false;
+    const pollChanges = () => {
+      if (changing) return;
+      changing = true;
+      const delay = import.meta.env.DEV ? (devHooks.gitStatusDelay?.() ?? 0) : 0;
+      invoke<Change[]>("git_status", { repo: current.path, open: [] })
+        .then(async (c) => {
+          if (delay) await new Promise((r) => setTimeout(r, delay));
+          return c;
+        })
+        .then(
+          (c) => alive && setChanges((prev) => (JSON.stringify(prev) === JSON.stringify(c) ? prev : c)),
+          () => alive && setChanges(null),
+        )
+        .finally(() => (changing = false));
+    };
     poll();
-    const timer = setInterval(poll, POLL_MS);
+    pollChanges();
+    const timer = setInterval(() => {
+      poll();
+      pollChanges();
+    }, POLL_MS);
     return () => {
       alive = false;
       clearInterval(timer);
@@ -116,6 +144,8 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
     setDetail(null);
     setLimit(PAGE);
     setGraph(null);
+    setChanges(null);
+    setShowChanges(false);
   }, [current?.path]);
 
   // 커밋 상세: 선택이 바뀌면 이전 상세를 바로 비우고, 지금 고른 커밋의 응답만 보인다 (리뷰 P2: 늦게 온 이전 응답이나
@@ -164,6 +194,13 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
     groupsAt.set(w.sha, [...(groupsAt.get(w.sha) ?? []), label]);
   }
   const width = Math.max(graph?.lanes ?? 1, 1) * LANE + 8;
+  // 커밋하지 않은 변경 행은 HEAD 커밋의 레인에 빈 원으로 (그 커밋이 읽은 범위에 없으면 첫 레인)
+  const headLane = commits.find((c) => c.sha === graph?.head)?.lane ?? 0;
+  const changed = !!graph && !!changes?.length;
+  const select = (sha: string | null) => {
+    setShowChanges(false);
+    setSelected(sha);
+  };
   const first = Math.max(0, Math.floor(view.top / ROW) - 10);
   const last = Math.min(commits.length, Math.ceil((view.top + view.height) / ROW) + 10);
   const date = (s: number) => new Date(s * 1000).toLocaleString(locale, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -194,6 +231,22 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
       <div className="git-main">
         <div ref={list} className="git-list" onScroll={(e) => setView({ top: e.currentTarget.scrollTop, height: e.currentTarget.clientHeight })}>
           {graph && commits.length === 0 && <div className="git-none">{t("git.empty")}</div>}
+          {changed && (
+            <div
+              className={`git-row git-uncommitted${showChanges ? " selected" : ""}`}
+              data-uncommitted={changes!.length}
+              style={{ height: ROW }}
+              onClick={() => {
+                setSelected(null);
+                setShowChanges(!showChanges);
+              }}
+            >
+              <svg className="git-lanes" width={width} height={ROW}>
+                <circle cx={laneX(headLane)} cy={ROW / 2} r={4} fill="none" stroke={laneColor(headLane)} strokeWidth={2} />
+              </svg>
+              <span className="git-subject">{t("git.uncommitted", { n: changes!.length })}</span>
+            </div>
+          )}
           <div style={{ height: commits.length * ROW, position: "relative" }}>
             {commits.slice(first, last).map((c, k) => {
               const i = first + k;
@@ -205,7 +258,7 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
                   className={`git-row${selected === c.sha ? " selected" : ""}`}
                   data-sha={c.sha}
                   style={{ top: i * ROW, height: ROW }}
-                  onClick={() => setSelected(selected === c.sha ? null : c.sha)}
+                  onClick={() => select(selected === c.sha ? null : c.sha)}
                 >
                   <svg className="git-lanes" width={width} height={ROW}>
                     {above.map(([a, b], j) => (
@@ -238,6 +291,19 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
             })}
           </div>
         </div>
+        {showChanges && changed && (
+          <div className="git-detail" data-detail="uncommitted">
+            <div className="git-files-title">{t("git.files", { n: changes!.length })}</div>
+            <div className="git-files">
+              {changes!.map(([path, code]) => (
+                <div key={path} className="git-file" data-file={path}>
+                  <span className={`git-status s-${code === "!" ? "X" : code}`}>{code}</span>
+                  {path}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
         {selected && (
           <div className="git-detail" data-detail={selected}>
             {detailError ? (
@@ -254,7 +320,7 @@ export function GitGraph({ project, repo, visible, places, onRepo }: {
                   <div className="git-detail-meta">
                     {t("git.parents")}{" "}
                     {detail.parents.map((p) => (
-                      <button key={p} className="git-parent" onClick={() => setSelected(p)}>
+                      <button key={p} className="git-parent" onClick={() => select(p)}>
                         {p.slice(0, 7)}
                       </button>
                     ))}

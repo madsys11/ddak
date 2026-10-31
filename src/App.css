@@ -1208,8 +1208,18 @@ button.secondary {
   font-family: var(--mono-font);
   color: var(--fg-dim);
 }
-.git-status.s-A {
+.git-status.s-A,
+.git-status.s-U {
   color: var(--git-added);
+}
+.git-status.s-X {
+  color: var(--error);
+}
+/* 커밋하지 않은 변경 행 (목록 맨 위, 가상 스크롤 행이 아니라 흐름대로) */
+.git-row.git-uncommitted {
+  position: relative;
+  color: var(--fg-dim);
+  font-style: italic;
 }
 .git-status.s-D {
   color: var(--error);

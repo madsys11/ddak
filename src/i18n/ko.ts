@@ -95,6 +95,7 @@ export const ko: Messages = {
   "git.empty": "아직 커밋이 없습니다.",
   "git.loading": "읽는 중…",
   "git.parents": "부모",
+  "git.uncommitted": "커밋하지 않은 변경 ({n})",
   "git.files": "바뀐 파일 {n}개",
   "panel.resizeHint": "끌어서 크기를 바꿉니다. 더블클릭하면 기본 크기로.",
   "sidebar.unread": "나에게 온 메시지 {n}개",

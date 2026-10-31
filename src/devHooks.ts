@@ -43,6 +43,8 @@ export const devHooks: {
   gitDetailDelay?: (sha: string) => number;
   gitDetailFail?: (sha: string) => boolean;
   gitGraphFail?: () => boolean;
+  // Git Graph의 커밋하지 않은 변경 응답을 늦춘다 (ms, 폴링 주기보다 오래 걸리는 조회. 리뷰 R1)
+  gitStatusDelay?: () => number;
   gitFingerprintFail?: () => boolean;
 } = {
   confirm: (message, labels) => ask(message, { kind: "warning", ...labels }),

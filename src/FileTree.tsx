@@ -5,7 +5,7 @@ import { devHooks } from "./devHooks";
 import { isDocPath, requestOpenDoc } from "./docs";
 import { setDraggedPath } from "./dragPath";
 import { codeError } from "./errors";
-import { refreshGitStatus, useGitStatus, type GitCode } from "./gitStatus";
+import { refreshGitStatus, useGitStatus, useGitSummary, type GitCode } from "./gitStatus";
 import { ChevronIcon, RepoIcon, WorktreeIcon } from "./icons";
 import type { MessageKey } from "./i18n";
 import { useT } from "./prefs";
@@ -83,7 +83,7 @@ export function Children({ path, depth, root = path }: { path: string; depth: nu
     <>
       {creating?.dir === path && <NewEntry dir={path} kind={creating.kind} depth={depth} />}
       {entries.map((e) => (
-        // 안에 든 저장소·worktree는 자기 상태를 따로 보이므로 바깥 저장소의 "추적 안 함"을 붙이지 않는다
+        // 안에 든 저장소·worktree는 자기 저장소의 표시를 보이므로 (Node) 바깥 저장소의 "추적 안 함"을 붙이지 않는다
         <Node key={e.path} entry={e} dir={path} depth={depth} root={root} git={e.git ? undefined : gitStatus(e.name)} />
       ))}
     </>
@@ -184,8 +184,11 @@ const GIT_TITLE: Record<GitCode, MessageKey> = {
   "!": "tree.git.conflict",
 };
 
-function Node({ entry, dir, depth, root, git }: { entry: Entry; dir: string; depth: number; root: string; git?: GitCode }) {
+function Node({ entry, dir, depth, root, git: outer }: { entry: Entry; dir: string; depth: number; root: string; git?: GitCode }) {
   const t = useT();
+  // 저장소·worktree 행은 자기 저장소 전체에 바뀐 것이 있으면 폴더처럼 점
+  const own = useGitSummary(entry.git && entry.is_dir ? entry.path : null);
+  const git = outer ?? own;
   const tree = useTree();
   const folderMenu = useFolderMenu();
   const project = useContext(ProjectContext);
