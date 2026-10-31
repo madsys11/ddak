@@ -13,9 +13,12 @@ export type DocTab = { path: string };
 // 터미널 대신 보기 화면을 둔 탭 (분할·세션 추가가 없다)
 export const isViewer = (t: Tab) => !!(t.git || t.doc);
 // 창에서 돌리는 세션. setup: 작업그룹 준비를 돌리는 창 (이름표는 번역 문구). sid: 창마다 정한 세션 ID (인자의 {session}).
+// 창 키이기도 하다 (채팅 이름, 대화 ID 알림이 창을 찾는 키). 바꾸지 않는다.
+// cur: CLI가 지금 쓰는 대화 ID (claude SessionStart 훅이 알림, src-tauri/src/chat.rs /session/). /clear·/background가 대화 ID를
+// 바꾸므로 이어서 하기는 이것으로 한다. 없으면 sid.
 // prompt: 세션을 만들 때 정한 프롬프트 (인자의 {prompt}, useGroups.ts promptOf). resumed: 복원한 세션이라 이어서 하기(resume)
 // 인자로 띄운다.
-export type PaneSession = Session & { setup?: boolean; sid?: string; prompt?: string; resumed?: boolean };
+export type PaneSession = Session & { setup?: boolean; sid?: string; cur?: string; prompt?: string; resumed?: boolean };
 // 작업그룹 준비. 세션(CLI)은 준비가 성공하거나 사용자가 "그래도 시작"을 누를 때까지(started) 띄우지 않는다.
 // pane: 준비 창 (닫았으면 null). run: 몇 번째 실행인지 (다시 준비하면 터미널을 새로 만들고, 이전 실행의 종료는
 // 무시한다). code: 실패한 종료 코드, null이면 중단 (창을 닫음·시그널). spawnFailed: 준비 창의 터미널을 만들지 못함
@@ -81,6 +84,7 @@ function isSession(v: unknown): v is PaneSession {
     typeof v.readOnly === "boolean" &&
     (v.shiftEnter === null || isString(v.shiftEnter)) &&
     isOptString(v.sid) &&
+    isOptString(v.cur) &&
     isOptString(v.prompt)
   );
 }
@@ -158,11 +162,27 @@ export function fromSaved(text: string, root: string): State | null {
 
 // 세션을 띄울 명령. 복원한 세션은 resume 인자로 띄우고, 그것이 실패하면 (이어서 할 대화가 아직 없음 등) 처음 인자로
 // 띄운다 (src-tauri/src/pty.rs fallback). 인자의 자리표시자는 여기서 바꾸지 않고 값(vars)과 함께 넘긴다: Rust가 {chat}까지
-// 한 번에 바꾼다 (차례로 바꾸면 넣은 프롬프트 안의 {chat} 등이 다시 바뀌었다). 처음·복원·fallback에 같은 값을 쓴다.
-export function commandOf(s: PaneSession | undefined): { command?: string[]; fallback?: string[]; vars?: Record<string, string> } {
+// 한 번에 바꾼다 (차례로 바꾸면 넣은 프롬프트 안의 {chat} 등이 다시 바뀌었다). {session}은 지금 대화 ID(cur, 없으면 sid).
+// fallbackVars: fallback에만 덮어쓸 값. 대화 ID를 알려 오는 창(처음 인자에 {sessionStart})은 새로 시작할 때 새 ID를 쓴다:
+// 앞 ID로 시작하면 claude가 "already in use"로 거절한다. 새 ID는 훅이 알려 cur가 된다. 알려 오지 않는 창은 새 ID를 저장할
+// 길이 없어서 지금처럼 같은 ID로 (리뷰 R1, docs/reviews/2026-10-31-claude-session-follow.md). 터미널은 띄울 때 한 번만 읽는다.
+export function commandOf(s: PaneSession | undefined): {
+  command?: string[];
+  fallback?: string[];
+  vars?: Record<string, string>;
+  fallbackVars?: Record<string, string>;
+} {
   if (!s?.command) return {};
-  const vars = { session: s.sid ?? "", prompt: s.prompt ?? "" };
+  const vars = { session: s.cur ?? s.sid ?? "", prompt: s.prompt ?? "" };
   const first = [s.command, ...s.args];
-  if (s.resumed && s.resume) return { command: [s.command, ...s.resume], fallback: first, vars };
-  return { command: first, vars };
+  if (!s.resumed || !s.resume) return { command: first, vars };
+  const reports = s.args.some((a) => a.includes("{sessionStart}"));
+  return { command: [s.command, ...s.resume], fallback: first, vars, fallbackVars: reports ? { session: crypto.randomUUID() } : undefined };
+}
+
+// CLI가 알린 새 대화 ID를 창 키(sid)로 찾은 창의 cur에 둔다 (같으면 그대로: 저장하지 않게). 준비 창은 없다.
+export function followSession(sessions: Record<number, PaneSession>, key: string, id: string): Record<number, PaneSession> {
+  const hit = Object.entries(sessions).find(([, x]) => x.sid === key && !x.setup);
+  if (!hit || (hit[1].cur ?? hit[1].sid) === id) return sessions;
+  return { ...sessions, [hit[0]]: { ...hit[1], cur: id } };
 }

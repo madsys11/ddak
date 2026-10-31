@@ -156,12 +156,24 @@ VS Code + Claude Code 대신 쓰는, 필요한 기능만 담은 가벼운 개인
   읽지 못하면(권한 등) 기본으로 열되 알리고, 앱을 다시 켤 때까지 그 프로젝트는 저장하지 않는다 (덮어쓰지 않게).
   읽기 전에는 아무것도 띄우지 않고 단축키·새 작업그룹도 무시한다. 창·탭 번호가 겹치면(같은 탭 안 포함) 모양이 틀린 것.
 - 세션은 이어서 하기로 띄운다: 저장한 세션 구성의 `resume` 인자 (없으면 처음 인자). 저장한 구성을 그대로 쓰므로
-  `groups.json`에 `resume`을 더해도 그 뒤에 만든 탭부터 적용된다. 인자의 `{session}`은 창마다 정한 UUID (처음과 복원 때
-  같은 값). 이어서 하기가 0이 아닌 코드로 끝나면 터미널에서 새로 시작할지 묻고(`[y/N]`) y일 때만 처음 인자로
+  `groups.json`에 `resume`을 더해도 그 뒤에 만든 탭부터 적용된다 (예외: 아래 "이전 기본 인자 바꾸기").
+- 인자의 `{session}`:
+  - 창마다 정한 UUID(`sid`)로 처음 띄운다. `sid`는 창 키이기도 해서 (채팅 이름) 바꾸지 않는다.
+  - CLI가 대화 ID를 알려 오면 (`{sessionStart}`, 아래) 그 창의 `cur`에 저장한다. 이어서 하기는 `cur`(없으면 `sid`)로 한다.
+  - claude는 `/clear`(source `clear`)와 `/background`(데몬 쪽 새 세션이 source `fork`)에서 대화 ID가 바뀐다.
+- 이어서 하기가 0이 아닌 코드로 끝나면 터미널에서 새로 시작할지 묻고(`[y/N]`) y일 때만 처음 인자로
   (시작 실패와 쓰다가 끝난 것을 구분할 수 없어서 자동으로 새로 시작하지 않는다).
+  - 문구는 "위 메시지를 보고 고친 뒤 세션 다시 시작(↻)으로 다시 하라"고 함께 안내한다. ddak은 CLI 출력을 해석하지 않는다.
+    대화가 백그라운드에서 돌면 claude가 `claude attach <id>` / `claude stop <id>`를 안내한다.
+  - 새로 시작할 때 처음 인자에 `{sessionStart}`가 있는 창(대화 ID를 알려 오는 창)은 `{session}`에 새 UUID를 쓴다. 앞 ID로
+    시작하면 claude가 "already in use"로 거절한다. 새 ID는 훅이 알려 `cur`가 된다.
+  - 알려 오지 않는 창은 새 ID를 저장할 길이 없어서 같은 ID(`cur` 없으면 `sid`)로 시작한다.
   준비를 기다리던 탭의 세션은 뜬 적이 없어서 처음 인자로.
 - 한계: codex는 시작할 때 세션 ID·이름을 정할 수 없어서 기본 설정은 `resume --last`(그 폴더의 가장 최근 대화)로 이어 간다.
   같은 폴더에서 다른 codex(ddak 밖에서 띄운 것 포함)를 쓰면 다른 대화를 이어 갈 수 있다.
+- 한계: claude를 `/background`로 보낸 뒤 그 백그라운드 세션에서 한 번도 대화하지 않았으면, `claude stop` 뒤 이어서 하기가
+  "No conversation found"로 실패한다 (그 대화의 transcript가 비어 있다). 앞 대화는 `claude --resume <앞 ID>`로 손으로 열 수 있지만
+  ddak 인자는 빠진다.
 - 셸 창은 같은 폴더에서 새 셸. 준비 창은 되살리지 않는다. 준비를 마치기 전에 닫혔으면 중단으로 보고 세션 창에
   다시 준비 / 그래도 시작.
 - 목록에서 뺀 프로젝트의 상태도 남겨 둔다 (다시 추가하면 마지막 상태로 연다).
@@ -458,20 +470,31 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   그냥 셸에서 claude·codex를 직접 띄워도 ⇧↩이 줄바꿈이 되게 한다. 모든 창에 ESC CR을 걸면 Vim 삽입 모드가 끝나서 프로그램별로
   둔다. `shiftEnterFor`가 파일에 없으면 기본값 `{ claude, codex: ESC CR }`. 다른 입력과 같은 차례로 보낸다 (사용자 입력).
 - 인자의 자리표시자 (띄울 때 `pty.rs` fill_placeholders가 한 번에 바꾼다. 넣은 값은 다시 보지 않는다):
-  `{session}` 창마다 정한 세션 ID, `{chat}` 그 창의 채팅방 MCP 주소, `{attention}` 그 창이 사용자를 기다린다고 알리는 주소
-  (아래 "알림"), `{prompt}` 역할(`role`) + 빈 줄 + 그 세션이 든 그룹의 규약 (`rules`). `{prompt:toml}`처럼 `:toml`을 붙이면 TOML 문자열 리터럴(따옴표 포함, codex `-c`의 값)로 넣는다.
+  `{session}` 그 창의 대화 ID (위 "복원"), `{chat}` 그 창의 채팅방 MCP 주소, `{attention}` 그 창이 사용자를 기다린다고 알리는 주소
+  (아래 "알림"), `{sessionStart}` 그 창의 CLI가 대화를 시작·전환할 때 새 대화 ID를 알리는 주소
+  (`http://127.0.0.1:<포트>/session/<토큰>`, 채팅 서버. 본문은 claude 훅 입력 JSON, `session_id`가 UUID가 아니면 400, 맞으면 204.
+  창 키와 새 ID를 프론트에 `session-id` 이벤트로 알린다), `{prompt}` 역할(`role`) + 빈 줄 + 그 세션이 든 그룹의 규약 (`rules`). `{prompt:toml}`처럼 `:toml`을 붙이면 TOML 문자열 리터럴(따옴표 포함, codex `-c`의 값)로 넣는다.
   모르는 이름과 그 밖의 중괄호(JSON 등)는 그대로 둔다.
   - 프롬프트는 세션을 만들 때 정해 그 창의 세션과 함께 저장한다 (`PaneSession.prompt`). 처음·복원·fallback에 같은 값을 쓰고,
     설정을 고쳐도 이미 연 창은 그대로다. 다른 그룹의 세션을 지금 탭에 더하면 그 세션이 든 그룹의 규약을 쓴다.
   - 프론트는 자리표시자를 바꾸지 않고 값(`vars`: session, prompt)을 `pty_spawn`에 넘긴다 (`workspaceState.ts` commandOf).
-- 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt {prompt}`, 권한 확인 훅 `--settings`, 복원은
-  `--resume {session}`)
+- 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt {prompt}`, `--settings`의 권한 확인 훅과
+  대화 ID 훅, 복원은 `--resume {session}`)
   + codex(`-s read-only`, `-c developer_instructions={prompt:toml}`, `-c check_for_update_on_startup=false`, readOnly, 복원은
   `resume --last`와 같은 옵션), `shell` = 셸 하나. codex 업데이트 안내를 끄는 이유: 안내에서 업데이트하면 codex가 끝나고, 그
   창에서 손으로 다시 띄우면 ddak이 준 인자(채팅 주소 등)가 빠진다. 업데이트는 ddak 밖에서 (`brew upgrade --cask codex`).
   `dev-review`의 `rules`는 작업그룹 협업 규약 (아래), 세션의 `role`은 역할별 설명. 문구는 `groups.rs`의 상수(`RULES`,
   `DEV_ROLE`, `REVIEWER_ROLE`)를 기본 설정을 만들 때 넣는다.
   이미 있는 `groups.json`과 저장된 탭은 바뀌지 않는다 (저장된 탭은 저장할 때의 인자와 프롬프트로 복원된다).
+  - 대화 ID 훅: `SessionStart`(matcher 없음, 모든 source)가 훅 입력을 `curl --data-binary @- {sessionStart}`로 보낸다. async가
+    아니다 (연달아 온 두 알림의 순서가 바뀌지 않게. 로컬 요청이라 짧고, ddak이 없으면 연결 거부로 바로 끝난다).
+- 이전 기본 인자 바꾸기 (`groups.rs` upgrade): 대화 ID 훅이 없던 이전 기본 claude 인자(args·resume 한 쌍)와 **정확히 같은**
+  세션만 새 기본 인자로 바꾼다. 사용자가 고친 것은 그대로다.
+  - `groups.json`은 읽을 때 메모리에서만 바꾸고 파일은 다시 쓰지 않는다 (읽기·저장이 겹치거나 백업·교체가 실패할 일이 없게).
+    그래서 파일에는 이전 인자가 보인다. 그 세션 인자를 고칠 때는 새 기본 인자(훅 포함)를 넣는다 (아니면 정확히 같지 않게
+    되어 훅이 빠진다).
+  - 저장된 창은 작업 공간을 읽을 때 바꾼다 (`workspace_load`, 다음 저장 때 파일에 남는다). `sid`·`prompt`는 그대로다.
+  - 이미 떠 있는 프로세스에는 다음 세션 다시 시작(↻)이나 앱 재시작부터 적용된다.
 
 ### 작업그룹 협업 규약
 

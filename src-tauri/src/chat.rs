@@ -173,6 +173,14 @@ pub enum Change<'a> {
     // 같은 확인을 두 경로가 어느 순서로든 알리므로 하나로 친다: 상태 쪽은 pty.rs set_awaiting, 훅 쪽은 claim_hook_attention.
     // 훅은 상태를 보내지 않는 claude를 위해 남긴다
     Attention { name: &'a str, token: &'a str, kind: &'a str, hook: bool },
+    // 이 참여자의 CLI가 대화를 시작·전환함 (claude SessionStart 훅, /session/<토큰>). key: 창 키, id: 새 대화 ID,
+    // source: startup·resume·clear·compact·fork. 프론트가 그 창의 이어서 하기 ID(cur)를 옮긴다.
+    Session { key: &'a str, id: &'a str, source: &'a str },
+}
+
+// claude 대화 ID 모양 (UUID 8-4-4-4-12). 다른 값은 인자에 넣지 않게 받지 않는다.
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36 && s.char_indices().all(|(i, c)| if [8, 13, 18, 23].contains(&i) { c == '-' } else { c.is_ascii_hexdigit() })
 }
 
 type OnMessage = Box<dyn Fn(&Path, Change) + Send + Sync>;
@@ -615,6 +623,14 @@ impl Chats {
         }
     }
 
+    // 이 토큰의 참여자(창)의 CLI가 대화를 시작·전환함 (Change::Session). 모르는 토큰이면 false
+    pub fn session_started(&self, token: &str, id: &str, source: &str) -> bool {
+        let who = self.inner.lock().unwrap().members.get(token).map(|m| (m.project.clone(), m.key.clone()));
+        let Some((project, key)) = who else { return false };
+        (self.on_message)(&project, Change::Session { key: &key, id, source });
+        true
+    }
+
     fn respond(&self, mut request: tiny_http::Request) {
         let reply = |code: u16, body: String| tiny_http::Response::from_string(body).with_status_code(code);
         // DNS 리바인딩: 다른 이름으로 들어온 요청은 받지 않는다 (토큰이 있어도)
@@ -626,10 +642,12 @@ impl Chats {
             [format!("http://127.0.0.1:{}", self.port), format!("http://localhost:{}", self.port)].contains(&h.value.as_str().to_string())
         });
         let host_ok = host_ok && origin_ok;
-        // /mcp/<토큰>: MCP. /attention/<토큰>: 그 참여자가 사용자를 기다린다는 신호 (claude 권한 확인 훅, 본문 없음)
+        // /mcp/<토큰>: MCP. /attention/<토큰>: 그 참여자가 사용자를 기다린다는 신호 (claude 권한 확인 훅, 본문 없음).
+        // /session/<토큰>: 그 참여자의 CLI가 대화를 시작·전환함 (claude SessionStart 훅, 본문은 훅 입력 JSON)
         let url = request.url().to_string();
         let attention = url.starts_with("/attention/");
-        let token = url.strip_prefix("/mcp/").or_else(|| url.strip_prefix("/attention/")).map(str::to_string);
+        let session = url.starts_with("/session/");
+        let token = ["/mcp/", "/attention/", "/session/"].iter().find_map(|p| url.strip_prefix(p)).map(str::to_string);
         let known = token.as_ref().is_some_and(|t| self.inner.lock().unwrap().members.contains_key(t));
         if !host_ok || !known {
             let _ = request.respond(reply(if host_ok { 404 } else { 403 }, String::new()));
@@ -649,6 +667,19 @@ impl Chats {
         if attention {
             self.attention(&token, "permission", true);
             let _ = request.respond(reply(204, String::new()));
+            return;
+        }
+        if session {
+            let input = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+            let id = input.get("session_id").and_then(Value::as_str).filter(|id| is_uuid(id));
+            let code = match id {
+                Some(id) => {
+                    self.session_started(&token, id, input.get("source").and_then(Value::as_str).unwrap_or(""));
+                    204
+                }
+                None => 400,
+            };
+            let _ = request.respond(reply(code, String::new()));
             return;
         }
         let answer = match serde_json::from_str::<Value>(&body) {
@@ -828,6 +859,10 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                     _ => "attention",
                 };
                 crate::notify::send(project, crate::notify::Kind::Attention, &crate::notify::text(key, &[("name", name)]), pty);
+            }
+            // 창 키는 창마다 다른 UUID라 프론트는 프로젝트 경로를 맞추지 않고 키로 창을 찾는다 (Workspace.tsx)
+            Change::Session { key, id, source } => {
+                let _ = emitter.emit("session-id", json!({ "project": project, "key": key, "id": id, "source": source }));
             }
         }
     });
@@ -1095,7 +1130,7 @@ mod tests {
         let sink = log.clone();
         let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
             let entry = match c {
-                Change::Message(_, []) | Change::Members | Change::Cleared | Change::Seen | Change::Attention { .. } => return,
+                Change::Message(_, []) | Change::Members | Change::Cleared | Change::Seen | Change::Attention { .. } | Change::Session { .. } => return,
                 Change::Paused(g) => format!("paused {g}"),
                 Change::Message(m, r) => format!("message {} released {r:?}", m.from),
                 Change::Limits => "limits".to_string(),
@@ -1293,7 +1328,15 @@ mod tests {
         let dir = temp("http");
         let seen_attention = Arc::new(Mutex::new(Vec::<String>::new()));
         let sink = seen_attention.clone();
-        let chats = Chats::start(dir.clone(), Box::new(move |_, c| if let Change::Attention { name, kind, hook, .. } = c { sink.lock().unwrap().push(format!("{name} {kind} {hook}")) })).unwrap();
+        let chats = Chats::start(
+            dir.clone(),
+            Box::new(move |_, c| match c {
+                Change::Attention { name, kind, hook, .. } => sink.lock().unwrap().push(format!("{name} {kind} {hook}")),
+                Change::Session { key, id, source } => sink.lock().unwrap().push(format!("session {key} {id} {source}")),
+                _ => {}
+            }),
+        )
+        .unwrap();
         let project = Path::new("/p/x");
         let (token, url, _) = chats.join(project, "origin/dev", "k");
         let path = url.split_once(&format!("127.0.0.1:{}", chats.port)).unwrap().1.to_string();
@@ -1345,6 +1388,22 @@ mod tests {
         assert_eq!(http(chats.port, "POST", "/attention/nope", &host, "").0, 404);
         assert_eq!(http(chats.port, "GET", &attention, &host, "").0, 405);
         assert_eq!(http(chats.port, "POST", &attention, "evil.example:80", "").0, 403);
+        // 대화를 시작·전환함 (claude SessionStart 훅): /session/<토큰>에 훅 입력 JSON. 그 창 키·새 ID·source를 알린다.
+        // ID가 UUID가 아니거나 본문이 JSON이 아니면 400, 모르는 토큰 404, GET 405, 다른 Host 403
+        let session = path.replacen("/mcp/", "/session/", 1);
+        let id = "0de1a391-15e0-4a5a-bbfb-a823ddce0189";
+        let input = json!({ "session_id": id, "source": "clear", "hook_event_name": "SessionStart", "cwd": "/p/x" }).to_string();
+        assert_eq!(http(chats.port, "POST", &session, &host, &input).0, 204);
+        assert_eq!(seen_attention.lock().unwrap().last().unwrap(), &format!("session k {id} clear"));
+        let before = seen_attention.lock().unwrap().len();
+        for bad in [json!({ "session_id": "x; rm -rf /" }).to_string(), json!({ "source": "clear" }).to_string(), "{broken".into()] {
+            assert_eq!(http(chats.port, "POST", &session, &host, &bad).0, 400, "{bad}");
+        }
+        assert_eq!(http(chats.port, "POST", "/session/nope", &host, &input).0, 404);
+        assert_eq!(http(chats.port, "GET", &session, &host, "").0, 405);
+        assert_eq!(http(chats.port, "POST", &session, "evil.example:80", &input).0, 403);
+        assert_eq!(seen_attention.lock().unwrap().len(), before, "거절한 요청은 알리지 않음");
+        assert!(is_uuid(id) && !is_uuid(&id.to_uppercase().replace('-', "_")) && !is_uuid(&id[1..]));
         chats.leave(&token);
         assert_eq!(http(chats.port, "POST", &path, &host, "{}").0, 404);
         let _ = std::fs::remove_dir_all(&dir);

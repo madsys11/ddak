@@ -105,7 +105,7 @@
     { "files": ["src/zoom.ts"], "steps": ["zoom", "zoomIme"] },
     {
       "files": ["src/ChatPanel.tsx", "src-tauri/src/chat.rs"],
-      "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects"]
+      "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects", "sessionFollow"]
     },
     {
       "files": ["src/MobileDialog.tsx", "src/mobile/**", "src-tauri/src/mobile.rs", "src-tauri/src/push.rs"],
@@ -148,7 +148,7 @@
     { "files": ["src/AddSessionDialog.tsx"], "steps": ["addSession"] },
     {
       "files": ["src-tauri/src/groups.rs"],
-      "steps": ["groups", "groupWorktree", "groupClone", "groupEnd", "addSession", "shiftEnterProgram"],
+      "steps": ["groups", "groupWorktree", "groupClone", "groupEnd", "addSession", "sessionFollow", "shiftEnterProgram"],
       "scenarios": ["restart", "corrupt", "resume"]
     },
     {

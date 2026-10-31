@@ -18,7 +18,7 @@ import { useT } from "./prefs";
 import { type Group, promptOf } from "./useGroups";
 import { openLink } from "./terminalLinks";
 import { cmdKey, otherKey, relativeTo } from "./platform";
-import { type PaneSession, type Setup, type State, type Tab, commandOf, fromSaved, isViewer, toSaved } from "./workspaceState";
+import { type PaneSession, type Setup, type State, type Tab, commandOf, followSession, fromSaved, isViewer, toSaved } from "./workspaceState";
 
 // 새로 만든 worktree 작업그룹 (src-tauri/src/worktrees.rs Created). setup: 준비 창에서 돌릴 명령 (복제 + 준비 스크립트)
 type Created = { name: string; path: string; setup: string[] | null };
@@ -35,6 +35,7 @@ type Action =
   | { type: "closePane"; pane?: number; ask?: boolean }
   | { type: "askCloseDone" }
   | { type: "restartPane"; pane: number }
+  | { type: "sessionId"; key: string; id: string }
   | { type: "focus"; pane: number }
   | { type: "reveal"; pane: number }
   | { type: "ratio"; tab: number; path: Path; ratio: number }
@@ -181,6 +182,12 @@ function step(s: State, a: Action): State {
       const session = s.sessions[a.pane];
       if (!session?.command || session.setup) return s;
       return { ...s, sessions: { ...s.sessions, [a.pane]: { ...session, resumed: true } } };
+    }
+    // CLI가 대화 ID를 바꿈 (claude /clear·/background 등): 그 창의 이어서 하기 ID(cur)를 옮긴다. 떠 있는 터미널은 그대로
+    // (띄울 때만 명령을 읽는다)
+    case "sessionId": {
+      const sessions = followSession(s.sessions, a.key, a.id);
+      return sessions === s.sessions ? s : { ...s, sessions };
     }
     // 세션 추가: 그 탭의 포커스된 창 오른쪽에 새 창을 두고 그 세션을 띄운다 (창마다 새 세션 ID)
     case "addSession": {
@@ -492,6 +499,15 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
       alive = false;
     };
   }, [cwd]);
+
+  // CLI가 대화를 시작·전환함 (claude SessionStart 훅, src-tauri/src/chat.rs /session/). 창 키(sid)는 창마다 다른 UUID라
+  // 프로젝트 경로를 맞추지 않고 키로 이 Workspace의 창을 찾는다 (없으면 그대로). 바뀌면 저장된다.
+  useEffect(() => {
+    const unlisten = listen<{ key: string; id: string }>("session-id", ({ payload }) => dispatch({ type: "sessionId", key: payload.key, id: payload.id }));
+    return () => {
+      unlisten.then((u) => u());
+    };
+  }, []);
 
   // 문서 탭 열기 요청. 저장한 상태를 읽은 뒤에 연다 (읽기 전의 동작은 무시된다). 같은 파일은 실제 경로로 한 탭
   const docHandled = useRef(0);

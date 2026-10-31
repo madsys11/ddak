@@ -208,7 +208,10 @@ fn shell_command(cwd: &str, command: Option<&[String]>, fallback: Option<&[Strin
         let quote = |argv: &[String]| argv.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" ");
         let mut line = quote(argv);
         if let Some(other) = fallback.filter(|a| !a.is_empty()) {
-            let ask = "printf '\\n[ddak] Could not continue the previous session (exit %s). Start a new one? [y/N] ' \"$code\"";
+            // 무엇이 막았는지는 CLI가 위에 적는다 (백그라운드에서 도는 대화면 claude가 `claude stop <id>`를 안내한다). ddak은 CLI
+            // 출력을 해석하지 않으므로 고친 뒤 세션 다시 시작(↻, 문구의 "Restart Session")으로 다시 하게 하고, 아니면 새 대화를
+            // 시작할지 묻는다. 문구는 ASCII만 쓴다 (셸 인자로 넘어가는 글자).
+            let ask = "printf '\\n[ddak] Could not continue the previous session (exit %s). See the message above; after fixing it, use Restart Session. Start a new conversation instead? [y/N] ' \"$code\"";
             line = format!("{line} || {{ code=$?; {ask}; read -r answer; case \"$answer\" in [yY]*) {};; esac; }}", quote(other));
         }
         let script = if shell_after { format!("{line}; exec {} -l", sh_quote(&shell)) } else { line };
@@ -586,12 +589,14 @@ fn toml_string(s: &str) -> String {
 }
 
 // 채팅방에 참여시키고 인자의 자리표시자를 바꾼다 ({chat}은 그 주소, 나머지는 vars). 나가기와 토큰을 함께 돌려준다.
+// fallback_vars: fallback에만 vars 위에 덮어쓸 값 (이어서 하기가 실패해 새로 시작할 때의 새 대화 ID, workspaceState.ts commandOf).
 fn join_chat(
     chats: Option<Arc<crate::chat::Chats>>,
     chat: Option<ChatJoin>,
     command: Option<Vec<String>>,
     fallback: Option<Vec<String>>,
     vars: HashMap<String, String>,
+    fallback_vars: HashMap<String, String>,
 ) -> (Option<Vec<String>>, Option<Vec<String>>, Option<Joined>) {
     let joined = chat.zip(chats).map(|(c, chats)| {
         let project = crate::platform::canonical(&c.project).unwrap_or_else(|_| PathBuf::from(&c.project));
@@ -603,8 +608,12 @@ fn join_chat(
     vars.insert("chat".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.clone()));
     // 사용자를 기다린다는 신호를 보낼 주소 (claude 권한 확인 훅, src-tauri/src/chat.rs /attention/<토큰>)
     vars.insert("attention".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.replacen("/mcp/", "/attention/", 1)));
-    let fill = |argv: Option<Vec<String>>| argv.map(|a| a.iter().map(|x| fill_placeholders(x, &vars)).collect::<Vec<_>>());
-    (fill(command), fill(fallback), joined.map(|(_, j)| j))
+    // CLI가 대화를 시작·전환할 때 새 대화 ID를 보낼 주소 (claude SessionStart 훅, src-tauri/src/chat.rs /session/<토큰>)
+    vars.insert("sessionStart".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.replacen("/mcp/", "/session/", 1)));
+    let fill = |argv: Option<Vec<String>>, vars: &HashMap<String, String>| argv.map(|a| a.iter().map(|x| fill_placeholders(x, vars)).collect::<Vec<_>>());
+    let command = fill(command, &vars);
+    vars.extend(fallback_vars);
+    (command, fill(fallback, &vars), joined.map(|(_, j)| j))
 }
 
 // chat이 있으면 채팅방에 참여시키고, 명령·fallback 인자의 {chat}을 그 창의 MCP 주소로 바꾼다 (src-tauri/src/chat.rs).
@@ -623,9 +632,10 @@ pub fn pty_spawn(
     fallback: Option<Vec<String>>,
     shell_after: Option<bool>,
     vars: Option<HashMap<String, String>>,
+    fallback_vars: Option<HashMap<String, String>>,
 ) -> Result<u32, String> {
     let on_exit = on_data.clone();
-    let (command, fallback, joined) = join_chat(chats.0.clone(), chat, command, fallback, vars.unwrap_or_default());
+    let (command, fallback, joined) = join_chat(chats.0.clone(), chat, command, fallback, vars.unwrap_or_default(), fallback_vars.unwrap_or_default());
     open(
         &ptys,
         &cwd,
@@ -1385,23 +1395,29 @@ mod tests {
         let chats = crate::chat::Chats::new(dir.clone(), Box::new(|_, _| ()), 0);
         let join = ChatJoin { project: "/".into(), name: "origin/dev".into(), key: "k".into() };
         let argv = |s: &str| Some(vec!["/bin/sh".to_string(), "-c".to_string(), s.to_string()]);
-        let (command, fallback, leave) = join_chat(Some(chats.clone()), Some(join), argv("echo URL={chat}"), argv("echo {chat}"), HashMap::new());
-        let url = fallback.as_ref().unwrap()[2].strip_prefix("echo ").unwrap().to_string();
+        let vars = HashMap::from([("session".to_string(), "S".to_string())]);
+        let fallback_vars = HashMap::from([("session".to_string(), "NEW".to_string())]);
+        let (command, fallback, leave) = join_chat(Some(chats.clone()), Some(join), argv("echo URL={chat} {session}"), argv("echo {chat} {sessionStart} {session}"), vars, fallback_vars);
+        let words: Vec<&str> = fallback.as_ref().unwrap()[2].split(' ').collect();
+        let url = words[1].to_string();
         assert!(url.starts_with("http://127.0.0.1:") && url.contains("/mcp/"), "{url}");
+        // {sessionStart}는 같은 토큰의 /session/ 주소. fallback_vars는 fallback에만 덮어쓴다 (command는 vars 그대로)
+        assert_eq!(words[2..], [url.replacen("/mcp/", "/session/", 1).as_str(), "NEW"]);
+        assert!(command.as_ref().unwrap()[2].ends_with(" S"), "{command:?}");
         assert_eq!(chats.members(Path::new("/")), ["user", "origin/dev"]);
         let ptys = Ptys::default();
         let out = Arc::new(Mutex::new(Vec::new()));
         let sink = out.clone();
         let id = open(&ptys, "/", command.as_deref(), None, false, SIZE, move |b| { sink.lock().unwrap().extend(b); true }, |_| (), leave).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while !String::from_utf8_lossy(&out.lock().unwrap()).contains(&format!("URL={url}")) {
+        while !String::from_utf8_lossy(&out.lock().unwrap()).contains(&format!("URL={url} S")) {
             assert!(std::time::Instant::now() < deadline, "주소가 인자로 가지 않음");
             std::thread::sleep(Duration::from_millis(50));
         }
         close(&ptys, id);
         assert_eq!(chats.members(Path::new("/")), ["user"], "닫아도 참여자로 남음");
         // 채팅 서버가 없으면 빈 값
-        let (command, _, leave) = join_chat(None, Some(ChatJoin { project: "/".into(), name: "x".into(), key: "x".into() }), argv("{chat}"), None, HashMap::new());
+        let (command, _, leave) = join_chat(None, Some(ChatJoin { project: "/".into(), name: "x".into(), key: "x".into() }), argv("{chat}"), None, HashMap::new(), HashMap::new());
         assert!(command.unwrap()[2].is_empty() && leave.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }

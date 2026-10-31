@@ -1,5 +1,6 @@
 // 프로젝트마다 마지막 작업 화면(탭·분할·작업그룹·세션)을 앱 데이터의 workspaces/<프로젝트 이름>-<경로 해시>.json에 둔다
-// (docs/spec.md "복원"). 내용은 프론트가 정하고 Rust는 읽고 쓰기만 한다 (projects.json과 같은 방식).
+// (docs/spec.md "복원"). 내용은 프론트가 정하고 Rust는 읽고 쓰기만 한다 (projects.json과 같은 방식). 예외: 읽을 때 이전 기본
+// claude 인자로 저장된 창을 새 기본 인자로 바꾼다 (groups.rs upgrade_saved).
 
 use crate::fs::{code_err, CodeError};
 use crate::projects::data_dir;
@@ -24,7 +25,8 @@ fn load(path: &Path) -> Result<Option<String>, CodeError> {
         Err(e) => return Err(code_err("io", format!("{}: {e}", path.display()))),
     };
     if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
-        return Ok(Some(text));
+        // 이전 기본 claude 인자로 저장된 창은 새 기본 인자로 (groups.rs upgrade_saved. 다음 저장 때 파일에 남는다)
+        return Ok(Some(crate::groups::upgrade_saved(&text).unwrap_or(text)));
     }
     set_aside(path)?;
     Ok(None)

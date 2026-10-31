@@ -29,7 +29,7 @@ import { DEFAULT_SETTINGS as DEFAULT_PHONE_SETTINGS, parseSettings as parsePhone
 import { API_VERSION as PHONE_API, ApiError as PhoneApiError, api as phoneApi } from "./mobile/api";
 import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
-import { fromSaved } from "./workspaceState";
+import { type PaneSession, commandOf, followSession, fromSaved } from "./workspaceState";
 import { screenPixelRatio, setZoomFactor } from "./zoom";
 import { MONO_FONT, monoFaces } from "./monoFont";
 import { ZOOM_LEVELS } from "./prefs";
@@ -2390,6 +2390,30 @@ function testWorkspaceStateUnit() {
   const docTab = (doc: unknown) => JSON.stringify({ version: 1, active: 1, tabs: [{ id: 1, layout: { pane: 2 }, focus: 2, cwd: "/x", doc }], sessions: {} });
   check("복원 상태: 문서 탭과 그 파일을 읽음", fromSaved(docTab({ path: "/x/README.md" }), "/x")?.tabs[0].doc?.path === "/x/README.md");
   check("복원 상태: 문서 탭 모양이 틀리면 거부", fromSaved(docTab({}), "/x") === null && fromSaved(docTab("/x/a.md"), "/x") === null);
+
+  // 대화 ID 따라가기 (docs/reviews/2026-10-31-claude-session-follow.md): cur는 저장·복원되고 모양이 틀리면 거부. 이어서 하기는 cur
+  // (없으면 sid). fallback의 새 ID는 처음 인자에 {sessionStart}가 있는 창만 (리뷰 R1). 알림은 창 키(sid)로 창을 찾는다
+  const withCur = (cur: unknown) => JSON.stringify({ version: 1, active: 1, tabs: [{ id: 1, layout: { pane: 2 }, focus: 2, cwd: "/x" }], sessions: { 2: { ...session, sid: "S", cur } } });
+  check("복원 상태: 창의 지금 대화 ID(cur)를 읽고 모양이 틀리면 거부", fromSaved(withCur("C"), "/x")?.sessions[2].cur === "C" && fromSaved(withCur(3), "/x") === null);
+  const claude = (args: string[], cur?: string): PaneSession => ({ ...session, command: "claude", args, resume: ["--resume", "{session}"], sid: "S", cur, prompt: "P", resumed: true });
+  const reporting = commandOf(claude(["--session-id", "{session}", "--settings", "{sessionStart}"], "C"));
+  const silent = commandOf(claude(["--session-id", "{session}"], "C"));
+  const fresh = commandOf({ ...claude(["--session-id", "{session}", "{sessionStart}"]), resumed: false });
+  check(
+    "대화 ID: 이어서 하기는 cur(없으면 sid), 알려 오는 창만 fallback에 새 ID, 처음 띄우기는 sid",
+    reporting.vars?.session === "C" && reporting.command?.join(" ") === "claude --resume {session}" && UUID.test(reporting.fallbackVars?.session ?? "") &&
+      silent.vars?.session === "C" && silent.fallbackVars === undefined && fresh.vars?.session === "S" && fresh.fallback === undefined &&
+      commandOf(claude(["x"])).vars?.session === "S",
+    JSON.stringify({ reporting, silent, fresh }),
+  );
+  const panes: Record<number, PaneSession> = { 2: claude(["a"]), 3: { ...claude(["a"]), sid: "T" }, 4: { ...claude(["a"]), sid: "U", setup: true } };
+  const moved = followSession(panes, "T", "N");
+  check(
+    "대화 ID: 알린 창 키의 창만 cur를 바꾸고, 같은 ID·모르는 키·준비 창은 그대로",
+    moved[3].cur === "N" && moved[2] === panes[2] && followSession(moved, "T", "N") === moved && followSession(panes, "S", "S") === panes &&
+      followSession(panes, "nope", "N") === panes && followSession(panes, "U", "N") === panes,
+    JSON.stringify(moved),
+  );
 }
 
 // 터미널 자동 응답 판별 (깨우기의 사용자 입력에서 뺀다, src/Terminal.tsx isTerminalReply)
@@ -4182,6 +4206,103 @@ async function testAddSession(root: string, first: Terminal) {
   await waitFor("테스트 설정 복귀", () => devHooks.groups?.groups.length === 1, 3000);
 }
 
+// 대화 ID 따라가기 (docs/reviews/2026-10-31-claude-session-follow.md): claude SessionStart 훅 대신 curl로 그 창의 {sessionStart}에
+// 훅 입력을 보낸다. follower는 알려 오는 창(처음 인자에 {sessionStart}), plain은 알려 오지 않는 창(리뷰 R1). 처음 인자는 받은
+// {session}(과 주소)을 파일에 쓰고, follower는 claude처럼 그 ID를 startup으로 알린다. 이어서 하기는 받은 {session}을 파일에 쓰고
+// 실패한다 → [y/N]에 y → 처음 인자.
+// (창이 좁아 긴 줄이 접히므로 값은 파일로 받는다. 설정은 셸 작은따옴표로 쓰므로 작은따옴표를 쓰지 않는다)
+async function testSessionFollow(root: string, first: Terminal) {
+  const file = await groupsFile();
+  const [ff, fr, pf] = ["follow-first", "follow-resumed", "plain-first"].map((n) => `${root}/${n}.txt`);
+  const startup = `printf "{\\"session_id\\":\\"%s\\",\\"source\\":\\"startup\\"}" "$0" | curl -s -o /dev/null --data-binary @- "$1"`;
+  const follower = JSON.stringify({
+    name: "follower",
+    command: "sh",
+    args: ["-c", `echo "$0" > "$2"; echo "$1" >> "$2"; ${startup}`, "{session}", "{sessionStart}", ff],
+    resume: ["-c", `echo "$0" > "$1"; exit 1`, "{session}", fr],
+  });
+  // (읽기 전용 표시: 쓰는 세션이 둘이면 더할 때 경고 창이 뜬다)
+  const plain = `{"name":"plain","command":"sh","args":["-c","echo \\"$0\\" > \\"$1\\"","{session}","${pf}"],"resume":["-c","exit 1"],"readOnly":true}`;
+  const content = TEST_GROUPS.replace(/]}$/, `,{"id":"follow","name":"Follow","sessions":[${follower},${plain}]}]}`);
+  await run(first, `rm -f "${ff}" "${fr}" "${pf}"; : > "${file}.part"`);
+  for (let i = 0; i < content.length; i += 500) await run(first, `printf '%s' '${content.slice(i, i + 500)}' >> "${file}.part"`);
+  await run(first, `mv "${file}.part" "${file}"`);
+  await waitFor("대화 ID 설정", () => devHooks.groups?.groups.some((g) => g.id === "follow"), 3000);
+  const lines = async (path: string) => (await run(first, `cat "${path}" 2>/dev/null`)).map((l) => l.trim()).filter(Boolean);
+  // 파일 내용이 cond를 만족할 때까지
+  const fileWhen = (path: string, cond: (l: string[]) => boolean) => waitAsync(path, async () => ((l) => cond(l) && l)(await lines(path)), 10000).catch(() => [] as string[]);
+  const before = tabCount();
+  await menu("new_tab");
+  await waitFor("셸 탭", () => tabCount() === before + 1 && visiblePanes().length === 1);
+  const dialog = () => document.querySelector<HTMLElement>(".add-session-dialog");
+  for (const id of ["follow/follower", "follow/plain"]) {
+    // 탭의 오른쪽 클릭 메뉴로 연다 (앱 메뉴 클릭은 맥에만 있다)
+    rightClick(activeTabEl()!);
+    await waitFor("탭 메뉴", contextMenu);
+    await pickMenu("Add Session…");
+    const choice = await waitFor("세션 추가 창", () => dialog()?.querySelector<HTMLElement>(`[data-session="${id}"]`));
+    choice.click();
+    await waitFor("세션 추가", () => !dialog(), 5000);
+  }
+  const paneOf = (name: string) => paneEls().find((el) => el.querySelector(".pane-label")?.firstChild?.textContent === name);
+  const termOf = (name: string) => visiblePanes().find((p) => p.el === paneOf(name))?.term;
+  const saved = async () => {
+    const text = await invoke<string | null>("workspace_load", { project: root });
+    const sessions = Object.values((JSON.parse(text ?? "{}").sessions ?? {}) as Record<string, PaneSession>);
+    return (name: string) => sessions.find((x) => x.name === name);
+  };
+  const realConfirm = devHooks.confirm;
+  devHooks.confirm = async () => true;
+  try {
+    const [sid, url] = await fileWhen(ff, (l) => l.length === 2);
+    const [plainSid] = await fileWhen(pf, (l) => l.length === 1);
+    check("대화 ID: 처음에는 창 키(sid)로 시작하고 {sessionStart}는 그 창의 /session/ 주소", UUID.test(sid ?? "") && /^http:\/\/127\.0\.0\.1:\d+\/session\/\S+$/.test(url ?? "") && UUID.test(plainSid ?? ""), `${sid} ${url} ${plainSid}`);
+
+    // 훅 입력을 보내면 그 창의 cur가 바뀌어 저장된다 (sid·채팅 이름은 그대로)
+    const next = crypto.randomUUID();
+    const posted = await run(first, `curl -s -o /dev/null -w "CODE%{http_code}" --data-binary '{"session_id":"${next}","source":"clear"}' "${url}"; echo`);
+    const stored = await waitAsync("cur 저장", async () => ((s) => s?.cur === next && s)((await saved())("follower")), 5000).catch(() => undefined);
+    check("대화 ID: SessionStart 입력을 받으면(204) 그 창의 cur를 바꿔 저장, sid는 그대로", posted.some((l) => l.trim() === "CODE204") && stored?.sid === sid, `${posted.join("|")} ${JSON.stringify(stored && { sid: stored.sid, cur: stored.cur })}`);
+
+    // ↻: 이어서 하기가 cur로. 실패하면 묻고, y면 알려 오는 창은 새 ID로 처음 인자 (앞 ID로 시작하면 "already in use")
+    paneOf("follower")!.querySelector<HTMLElement>("[data-action=pane-restart]")!.click();
+    const [resumedWith] = await fileWhen(fr, (l) => l.length === 1);
+    const asked = await waitFor("새로 시작할지 묻기", () => termOf("follower") && screen(termOf("follower")!).join("").includes("Start a new conversation instead? [y/N]"), 10000).catch(() => false);
+    termOf("follower")?.input("y\r");
+    const [fresh] = await fileWhen(ff, (l) => l.length === 2 && l[0] !== sid);
+    check(
+      "대화 ID: 다시 시작하면 cur로 이어서 하기, 실패 뒤 y면 새 대화 ID로 시작 (알려 오는 창)",
+      resumedWith === next && asked && UUID.test(fresh ?? "") && fresh !== sid && fresh !== next,
+      `${resumedWith} ${asked} ${fresh}`,
+    );
+    // 새로 시작한 ID를 알려 오면 그것이 cur가 되고, 다음 ↻는 그 ID로 이어 간다 (리뷰 R2)
+    const freshStored = await waitAsync("새 ID 저장", async () => ((s) => s?.cur === fresh && s)((await saved())("follower")), 5000).catch(() => undefined);
+    await run(first, `rm -f "${fr}"`);
+    paneOf("follower")!.querySelector<HTMLElement>("[data-action=pane-restart]")!.click();
+    const [resumedAgain] = await fileWhen(fr, (l) => l.length === 1);
+    await waitFor("다시 묻기", () => termOf("follower") && screen(termOf("follower")!).join("").includes("[y/N]"), 10000).catch(() => false);
+    termOf("follower")?.input("\r");
+    check("대화 ID: 새로 시작한 ID를 알리면 cur로 저장되고 다음 다시 시작은 그 ID로", freshStored?.sid === sid && resumedAgain === fresh, `${freshStored?.cur} ${resumedAgain} ${fresh}`);
+    const members = await invoke<string[]>("chat_members", { project: root });
+    check("대화 ID: 다시 시작해도 채팅 이름은 그대로 (창 키가 그대로)", members.includes("origin/follower") && !members.some((m) => m.startsWith("origin/follower-")), members.join(","));
+
+    // 알려 오지 않는 창 (리뷰 R1): 새 ID를 저장할 길이 없으니 y면 지금처럼 같은 ID로
+    await run(first, `rm -f "${pf}"`);
+    paneOf("plain")!.querySelector<HTMLElement>("[data-action=pane-restart]")!.click();
+    const plainAsked = await waitFor("새로 시작할지 묻기 (plain)", () => termOf("plain") && screen(termOf("plain")!).join("").includes("[y/N]"), 10000).catch(() => false);
+    termOf("plain")?.input("y\r");
+    const [plainAgain] = await fileWhen(pf, (l) => l.length === 1);
+    check("대화 ID: 알려 오지 않는 창은 실패 뒤 y면 같은 ID로 시작 (리뷰 R1)", plainAsked && plainAgain === plainSid, `${plainAsked} ${plainAgain} ${plainSid}`);
+  } finally {
+    devHooks.confirm = realConfirm;
+  }
+  const tab = document.querySelectorAll<HTMLElement>(".project-workspace:not([style*='none']) .tab")[before];
+  tab.querySelector<HTMLElement>("[title='Close Tab']")!.click();
+  await waitFor("탭 정리", () => tabCount() === before, 5000);
+  await run(first, `rm -f "${ff}" "${fr}" "${pf}"; printf '%s' '${TEST_GROUPS}' > "${file}"`);
+  await waitFor("테스트 설정 복귀", () => devHooks.groups?.groups.length === 1, 3000);
+}
+
 // 선택 창 답하기 (src-tauri/src/prompts.rs, src/PromptChoices.tsx, Terminal.tsx answerPrompt): 세션이 선택 창을 띄우면 그 이름으로
 // 채팅에 질문·선택지가 올라오고 (채팅 알림은 내지 않음), 누르면 (승인일 수 있으면 확인 뒤) 화살표로 커서를 옮겨 확인한 다음 Enter.
 // 알린 뒤 화면이 바뀌었으면 넣지 않고 "바뀜"으로 기록한다. picker.py가 claude 권한 확인 모양을 흉내 낸다 (두 번 묻고, x면 질문이 바뀜)
@@ -5557,7 +5678,8 @@ async function testResumeCheck(root: string) {
     () => check("복원: 세션을 이어서 하기 인자(같은 세션 ID, 만들 때 저장한 프롬프트)로 띄움", false, screen(keeps.term).join("|").slice(-200)),
   );
   // 이어서 하기가 실패하면 새로 시작할지 묻고, y일 때만 처음 인자로 (리뷰 P2: 쓰다가 끝난 것과 구분할 수 없어서)
-  const asked = await waitFor("새로 시작할지 묻기", () => screen(fresh.term).find((l) => l.includes("Start a new one? [y/N]")), 10000).catch(() => "");
+  // 문구가 길어 여러 줄로 접히므로 화면을 이어 붙여 본다
+  const asked = await waitFor("새로 시작할지 묻기", () => [screen(fresh.term).join("")].find((l) => l.includes("Start a new conversation instead? [y/N]")), 10000).catch(() => "");
   check("복원: 이어서 하기가 실패하면 새로 시작할지 묻고 바로 시작하지 않음", asked.includes("(exit 1)") && !screen(fresh.term).some((l) => l.startsWith("FRESH ")), asked);
   fresh.term.input("y\r");
   await waitFor("처음처럼", () => screen(fresh.term).some((l) => l.trim() === `FRESH ${sid("fresh")}`), 10000).then(
@@ -5734,6 +5856,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["groupClone", () => testGroupClone(root, t())],
     ["groupEnd", () => testGroupEnd(root, t())],
     ["addSession", () => testAddSession(root, t())],
+    ["sessionFollow", () => testSessionFollow(root, t())],
     ["gitGraph", () => testGitGraph(root, t())],
     ["tabMove", testTabMove],
     ["tabScroll", testTabScroll],
