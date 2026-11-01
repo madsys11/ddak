@@ -23,7 +23,8 @@ import { LOCALES, isLocale } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
 import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
-import { Chat, ComputerList, KeyProblem, ProjectList, Settings as PhoneSettingsView } from "./mobile/MobileApp";
+import { Chat, ComputerList, KeyProblem, ProjectList, Settings as PhoneSettingsView, WAKE_LIMIT as PHONE_WAKE_LIMIT } from "./mobile/MobileApp";
+import { WAKE_LIMIT } from "./ChatPanel";
 import { locale as phoneLocale, t as phoneT } from "./mobile/i18n";
 import { DEFAULT_SETTINGS as DEFAULT_PHONE_SETTINGS, parseSettings as parsePhoneSettings, resolveLocale as resolvePhoneLocale, resolveTheme as resolvePhoneTheme, type PhoneSettings } from "./mobile/settings";
 import { API_VERSION as PHONE_API, ApiError as PhoneApiError, api as phoneApi } from "./mobile/api";
@@ -4040,9 +4041,9 @@ async function testAddSession(root: string, first: Terminal) {
   // 시작할 때 커서 위치를 물어서 xterm이 자동 응답(ESC[행;열R)을 보내게 한다 (사용자 입력이 아니다. 리뷰 P2)
   // 줄을 받을 때마다 상태(ESC[5n)·DEC 커서 위치(ESC[?6n)도 물어서, Enter 직후에 응답이 오게 한다 (리뷰 후속 P2)
   const listener = `{"name":"listener","command":"sh","args":["-c","stty -echo; printf \\"\\\\033[6n\\"; while read l; do echo GOT:$l; printf \\"\\\\033[5n\\\\033[?6n\\"; done"],"readOnly":true}`;
-  // chatter: 같은 작업그룹(origin)의 listener를 멘션한 메시지를 MCP로 7개 보낸다 (자동 깨우기 제한 WAKE_LIMIT=6). $0은 주소, $1은 요청
+  // chatter: 같은 작업그룹(origin)의 listener를 멘션한 메시지를 MCP로 WAKE_LIMIT + 1개 보낸다 (자동 깨우기 제한). $0은 주소, $1은 요청
   const chatRpc = `{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"tools/call\\",\\"params\\":{\\"name\\":\\"post_message\\",\\"arguments\\":{\\"text\\":\\"@origin/listener ping\\"}}}`;
-  const chatter = `{"name":"chatter","command":"sh","args":["-c","for i in 1 2 3 4 5 6 7; do curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"; echo; done","{chat}","${chatRpc}"],"readOnly":true}`;
+  const chatter = `{"name":"chatter","command":"sh","args":["-c","for i in ${Array.from({ length: WAKE_LIMIT + 1 }, (_, i) => i + 1).join(" ")}; do curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"; echo; done","{chat}","${chatRpc}"],"readOnly":true}`;
   // prompter: 역할(role) + 그룹 규약(rules)이 인자의 {prompt}·{prompt:toml}로 들어가는지 찍는다. 역할 안의 {chat}은 바뀌면 안 된다
   const prompter = `{"name":"prompter","role":"R {chat}","command":"sh","args":["-c","printf \\"A:%s|B:%s|\\" \\"$0\\" \\"$1\\"","{prompt}","v={prompt:toml}"],"readOnly":true}`;
   // attn: claude 권한 확인 훅처럼 자기 {attention} 주소로 사용자를 기다린다는 신호를 보낸다 (알림)
@@ -5121,7 +5122,7 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   check("깨우기: 터미널은 깨우기 이벤트 등록이 끝난 뒤에 뜸", !!spawned && elapsed >= 1400, `${Math.round(elapsed)}ms`);
   await menu("close_pane");
 
-  // 자동 깨우기 제한: 같은 작업그룹의 세션끼리 사용자 없이 6개를 주고받으면 7번째부터는 저장만 하고 깨우지 않는다.
+  // 자동 깨우기 제한: 같은 작업그룹의 세션끼리 사용자 없이 WAKE_LIMIT개를 주고받으면 그다음부터는 저장만 하고 깨우지 않는다.
   // 패널에 멈춤과 재개 버튼, 깨우지 않은 메시지 표시. 보낸 세션은 도구 결과로 안다. 재개하면 받는 사람을 한 번 깨운다.
   const fromChatter = () => got().filter((l) => l.includes("New chat message from origin/chatter")).length;
   const pausedBar = () => panel()!.querySelector<HTMLElement>("[data-paused='origin']");
@@ -5129,21 +5130,23 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   choose("pick/chatter");
   const chatterPane = await waitFor("chatter 창", () => visiblePanes().find((p) => p.el.querySelector(".pane-label")?.firstChild?.textContent === "chatter"), 5000);
   const pings = async () => (await stored()).filter((m) => m.from === "origin/chatter") as { held?: boolean }[];
-  await waitAsync("chatter 메시지 7개", async () => (await pings()).length === 7, 10000).catch(() => null);
-  const sent7 = await pings();
-  const pausedNote = (await invoke<[[string, string][], number]>("selftest_notifications"))[0].find(([, b]) => b.startsWith("origin: sessions exchanged 6 messages"));
+  await waitAsync("chatter 메시지", async () => (await pings()).length === WAKE_LIMIT + 1, 10000).catch(() => null);
+  const pinged = await pings();
+  const pausedNote = (await invoke<[[string, string][], number]>("selftest_notifications"))[0].find(([, b]) => b.startsWith(`origin: sessions exchanged ${WAKE_LIMIT} messages`));
   await waitFor("멈춤 표시", pausedBar, 3000).catch(() => null);
   await waitFor("허용된 알림", () => fromChatter() > 0, WAKE_IDLE_MS + 4000).catch(() => null);
   await sleep(WAKE_IDLE_MS + 1000);
   const beforeResume = fromChatter();
   const toldChatter = screen(chatterPane.term).some((l) => l.includes("nobody was notified: automatic notifications for your work group are paused"));
-  // 깨우지 않음 표시는 7번째 메시지에만
+  // 깨우지 않음 표시는 마지막(WAKE_LIMIT + 1번째) 메시지에만
   const heldTag = panel()!.querySelectorAll(".chat-msg [data-held]").length === 1 && !!panel()!.querySelector(".chat-msg:last-of-type [data-held]");
   check(
-    "깨우기 제한: 세션끼리 6개까지 깨우고 7번째는 저장만 (보낸 세션에 알림, 패널에 멈춤·깨우지 않음 표시)",
-    sent7.length === 7 && sent7.filter((m) => m.held).length === 1 && !!sent7[6].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar() && !!pausedNote,
-    `${sent7.map((m) => !!m.held).join(",")} told=${toldChatter} tag=${heldTag} bar=${!!pausedBar()} wakes=${beforeResume} note=${JSON.stringify(pausedNote)}`,
+    `깨우기 제한: 세션끼리 ${WAKE_LIMIT}개까지 깨우고 그다음은 저장만 (보낸 세션에 알림, 패널에 멈춤·깨우지 않음 표시)`,
+    pinged.length === WAKE_LIMIT + 1 && pinged.filter((m) => m.held).length === 1 && !!pinged[WAKE_LIMIT].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar() && !!pausedNote,
+    `${pinged.map((m) => !!m.held).join(",")} told=${toldChatter} tag=${heldTag} bar=${!!pausedBar()} wakes=${beforeResume} note=${JSON.stringify(pausedNote)}`,
   );
+  // 멈춤 알림 문구(Rust WAKE_LIMIT)와 데스크톱 패널의 수가 맞는 것은 위 pausedNote가 본다. 폰 화면의 수도 같아야 한다
+  check("깨우기 제한: 폰 화면의 수도 같음", PHONE_WAKE_LIMIT === WAKE_LIMIT, `${PHONE_WAKE_LIMIT} ${WAKE_LIMIT}`);
   pausedBar()?.querySelector("button")?.click();
   const resumed = await waitFor("재개 뒤 깨움", () => fromChatter() === beforeResume + 1, WAKE_IDLE_MS + 4000).then(() => true, () => false);
   await sleep(1000);

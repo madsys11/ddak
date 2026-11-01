@@ -134,7 +134,7 @@ struct Inner {
 // 세션이 다른 세션에게 보낸 메시지를 센다 (@all도 1개). WAKE_LIMIT개까지는 깨우고, 그 뒤 메시지는 저장만 하고 깨우지 않는다
 // (held). 사용자 메시지가 그 작업그룹에 닿거나 사용자가 재개하면 다시 세고, 보류된 알림을 받는 사람마다 한 번 알린다.
 // 이미 깨운 세션의 작업은 멈추지 않는다 (새 알림을 넣지 않을 뿐).
-pub const WAKE_LIMIT: u32 = 6;
+pub const WAKE_LIMIT: u32 = 10;
 
 #[derive(Default)]
 struct Limit {
@@ -1148,7 +1148,7 @@ mod tests {
         for _ in 0..4 {
             assert!(!post(p, "g1/dev", "@user done").held && !post(p, "g1/dev", "note").held);
         }
-        for _ in 0..5 {
+        for _ in 0..WAKE_LIMIT - 1 {
             assert!(!post(p, "g1/dev", "@g1/rev hi").held);
         }
         assert!(chats.paused(p).is_empty());
@@ -1172,7 +1172,7 @@ mod tests {
         assert!(chats.wake_items(p, Some(&held), &[]).is_empty(), "보류한 메시지를 깨움");
         assert_eq!(taken(), [r#"message user released [("g1/dev", "g1/rev")]"#, "limits"]);
         assert!(chats.paused(p).is_empty() && !post(p, "g1/rev", "@g1/dev ok").held);
-        for _ in 0..5 {
+        for _ in 0..WAKE_LIMIT - 1 {
             post(p, "g2/dev", "@g1/dev x");
         }
         assert_eq!(chats.paused(p), ["g2"]);
@@ -1184,7 +1184,7 @@ mod tests {
         assert_eq!(taken(), [r#"released [("g1/rev", "g2/dev")]"#, "limits"]);
         assert!(chats.paused(p).is_empty());
         // 사용자가 그 작업그룹 세션의 터미널에 입력해도 다시 센다 (다른 그룹·프로젝트는 그대로, 셈이 없으면 아무것도 안 함)
-        for _ in 0..6 {
+        for _ in 0..WAKE_LIMIT {
             post(p, "g1/dev", "@g1/rev z");
         }
         assert!(post(p, "g1/dev", "@g1/rev held").held);

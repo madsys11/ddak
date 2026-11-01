@@ -13,7 +13,7 @@ const USER = "user";
 // src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
 const NO_RECIPIENT = "no-recipient";
 // src-tauri/src/chat.rs WAKE_LIMIT
-const WAKE_LIMIT = 6;
+export const WAKE_LIMIT = 10;
 
 // 참여자 상태 (src-tauri/src/pty.rs statuses): 작업 중이거나 사용자를 기다리는 종류
 const STATUS: Record<string, MessageKey> = {

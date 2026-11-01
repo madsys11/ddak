@@ -14,7 +14,7 @@ import { Resizer } from "./Resizer";
 export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string; prompt?: Prompt; answer?: Answer; mode?: ModeChange };
 
 // src-tauri/src/chat.rs WAKE_LIMIT
-const WAKE_LIMIT = 6;
+export const WAKE_LIMIT = 10;
 
 const USER = "user";
 // src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
