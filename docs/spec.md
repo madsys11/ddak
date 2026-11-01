@@ -285,6 +285,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   입력기 글자는 xterm에 넘기지 않고 직접 보낸다 (바꾸기 = 바뀐 코드 포인트 수만큼 DEL + 새 글자).
   xterm이 이미 보낸 키는 건너뛰고(`onKey`로 셈), keyCode 229 keydown은 xterm에 넘기지 않는다.
   composition 이벤트를 쓰는 입력기는 xterm에 맡긴다. 입력 전송은 줄 세운다 (invoke 순서가 보장되지 않는다).
+  - Windows(WebView2)는 이 보정을 쓰지 않고 xterm 기본 처리다 (`IME_FIX`). 보통은 composition 이벤트로 조합한다.
+    다른 WebView2 창이 조합 중에 포커스를 가져갔다 닫히면, 돌아온 창은 조합 이벤트 없이 끝낸 음절을 keypress + insertText로
+    받는다 (그 창의 다른 곳을 눌렀다 돌아올 때까지). 보정이 있으면 이때 음절이 두 번씩 들어갔다. xterm은 keypress로 한 번 보낸다.
 - 키 (`Terminal.tsx`의 `terminalKey`): ⌘⌫ → Ctrl+U, ⇧↩ → 세션 구성의 `shiftEnter` (기본 claude·codex는 ESC CR).
   xterm의 키 처리 함수는 하나만 걸 수 있어 한글 보정과 합쳐 둔다.
 - 링크 (`src/terminalLinks.ts`, `links.rs`): 화면의 URL(http·https)과 파일 경로를 ⌘+클릭하면 기본 앱으로 연다 (.html은

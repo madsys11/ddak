@@ -69,7 +69,7 @@
 | 파이썬 가상 환경 | `bin/python` | `Scripts\python.exe` | 2 |
 | 앱 밖 파일 끌어 놓기 | 맥 끌기 대지 | 따로 정함 (WebView2의 drop도 이름만 준다) | 2 |
 | 모바일 연결 | Tailscale.app CLI | `C:\Program Files\Tailscale\tailscale.exe`, 컴퓨터 이름 | 2 |
-| 한글 입력 | WebKit 보정 (`hangul.ts`) | WebView2(Chromium)는 composition 이벤트를 쓰므로 xterm 기본 처리. 실제 입력기로 확인 | 1 |
+| 한글 입력 | WebKit 보정 (`hangul.ts`) | xterm 기본 처리 (`hangul.ts` `IME_FIX`로 보정을 끈다). 실제 입력기로 확인함 (`docs/reviews/2026-11-01-windows-ime.md`) | 1 |
 | 설치 | `install.sh` (.app 교체) | NSIS 설치 파일 (서명 없음: SmartScreen 경고) | 0 |
 | 자체 테스트 | `selftest.sh` (zsh) | Windows용 실행 스크립트 (node), 시나리오는 Git Bash 셸 기준 | 2 |
 

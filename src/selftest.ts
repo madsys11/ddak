@@ -8,7 +8,7 @@ import { Terminal, type ILink } from "@xterm/xterm";
 import { devHooks, liveTerms } from "./devHooks";
 import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
-import { fixImeInput } from "./hangul";
+import { IME_FIX, fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, watchAltLoss, readMode, driveMode, type Dialog, type PermissionMode } from "./programStatus";
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
@@ -419,7 +419,8 @@ async function testTerminal(root: string, term: Terminal) {
     }
     check(name, false, detail);
   };
-  for (const fast of [false, true]) {
+  // 이 WebKit 이벤트는 보정(hangul.ts)이 받는다. Windows는 보정을 쓰지 않아 (IME_FIX) 이 검사들을 건너뛴다 (imeTerminal이 본다)
+  for (const fast of IME_FIX ? [false, true] : []) {
     await typed(`터미널: 한글 입력 (WebKit 바꾸기 이벤트로 조합${fast ? ", 빠르게 쳐서 키가 겹침" : ""})`, () => ime(hangul, fast), "[한글]");
   }
   // 실제 앱에서 기록한 "마찬가지로" 빠른 입력 (2026-10-23). 받침이 다음 음절로 넘어갈 때
@@ -432,7 +433,7 @@ async function testTerminal(root: string, term: Terminal) {
     ["r", "갖"], ["d", "ㅈ"], ["r", "가"], ["i", "지"], ["d", "ㅣ"], ["u", "ㅈ"],
     ["r", "질"], ["d", "ㄹ"], ["u", "ㅣ"], ["r", "지"], ["i", "로"], ["d", "ㅗ"], ["u", "ㄹ"], ["u", "ㅗ"],
   ];
-  await typed(
+  if (IME_FIX) await typed(
     "터미널: 실제로 기록한 빠른 한글 입력 재현 (받침이 넘어감)",
     async () => {
       for (const [kind, v] of recorded) {
@@ -468,16 +469,18 @@ async function testTerminal(root: string, term: Terminal) {
     () => check("터미널: ⇧↩는 셸에서 실행하지 않고 줄바꿈 (Enter에 두 줄이 함께 실행)", false, screen(term).slice(-6).join("|")),
   );
 
-  // 영문·스페이스는 xterm이 키 이벤트로 보낸다. 입력란 보정이 한 번 더 보내면 안 된다.
-  term.input("echo '[", true);
-  await plain("ab ");
-  await ime(hangul, true);
-  await plain(" c");
-  term.input("]'\r", true);
-  await waitFor("영문·한글 섞어 입력", () => screen(term).some((l) => l.trim() === "[ab 한글 c]"), 5000).then(
-    () => check("터미널: 영문·스페이스·한글을 섞어 쳐도 겹치거나 빠지지 않음", true),
-    () => check("터미널: 영문·스페이스·한글을 섞어 쳐도 겹치거나 빠지지 않음", false, screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")),
-  );
+  // 영문·스페이스는 xterm이 키 이벤트로 보낸다. 입력란 보정이 한 번 더 보내면 안 된다 (보정을 쓰는 곳만)
+  if (IME_FIX) {
+    term.input("echo '[", true);
+    await plain("ab ");
+    await ime(hangul, true);
+    await plain(" c");
+    term.input("]'\r", true);
+    await waitFor("영문·한글 섞어 입력", () => screen(term).some((l) => l.trim() === "[ab 한글 c]"), 5000).then(
+      () => check("터미널: 영문·스페이스·한글을 섞어 쳐도 겹치거나 빠지지 않음", true),
+      () => check("터미널: 영문·스페이스·한글을 섞어 쳐도 겹치거나 빠지지 않음", false, screen(term).filter((l) => l.trim().startsWith("[")).slice(-1).join("|")),
+    );
+  }
 
   const locale = await run(term, "locale charmap");
   check("터미널: UTF-8 로캘", locale.some((l) => l.trim() === "UTF-8"), locale.join("|"));
@@ -3319,6 +3322,60 @@ function typeKeys(term: Terminal, text: string) {
   return sent.join("");
 }
 
+// 실제 터미널(Terminal.tsx 연결)에 Windows WebView2의 한글 입력 이벤트를 넣는다 (실제 입력기 기록 2026-11-01 순서, hangul.ts IME_FIX).
+// - 보통: 첫 keydown 229(isComposing=false) → compositionstart → update → input(insertCompositionText) → compositionend → keyup.
+// - 다른 WebView2 창이 조합 중에 닫힌 뒤: 조합 이벤트 없이 keydown 229·keyup만 오고, 끝낸 음절은 키 구간 밖에서
+//   keypress(그 글자) + insertText로 온다. 보정이 붙어 있으면 xterm(keypress)과 보정(insertText)이 둘 다 보내 "난난"이 됐다.
+async function testImeTerminal(term: Terminal) {
+  const ta = term.textarea!;
+  const sent: string[] = [];
+  const d = term.onData((x) => sent.push(x));
+  const key = (type: string, isComposing: boolean, code = 229, keyName = "Process") => {
+    const ev = new KeyboardEvent(type, { key: keyName, isComposing, bubbles: true, cancelable: true });
+    for (const prop of ["keyCode", "which"]) Object.defineProperty(ev, prop, { get: () => code });
+    Object.defineProperty(ev, "charCode", { get: () => (type === "keypress" ? code : 0) });
+    ta.dispatchEvent(ev);
+  };
+  const input = (inputType: string, data: string, isComposing: boolean) => {
+    const before = new InputEvent("beforeinput", { inputType, data, isComposing, bubbles: true, cancelable: true, composed: true });
+    ta.dispatchEvent(before);
+    if (before.defaultPrevented) return;
+    ta.value += data;
+    ta.dispatchEvent(new InputEvent("input", { inputType, data, isComposing, bubbles: true, composed: true }));
+  };
+  const reset = () => {
+    ta.value = "";
+    sent.length = 0;
+  };
+  try {
+    reset();
+    key("keydown", false);
+    ta.dispatchEvent(new CompositionEvent("compositionstart", { data: "", bubbles: true }));
+    ta.dispatchEvent(new CompositionEvent("compositionupdate", { data: "난", bubbles: true }));
+    input("insertCompositionText", "난", true);
+    ta.dispatchEvent(new CompositionEvent("compositionend", { data: "난", bubbles: true }));
+    key("keyup", false);
+    await sleep(50);
+    check("한글 조합: compositionend에서 음절을 한 번 보냄", sent.join("") === "난", JSON.stringify(sent));
+    if (!IME_FIX) {
+      reset();
+      for (let i = 0; i < 3; i++) {
+        key("keydown", false);
+        await sleep(10);
+        key("keyup", false);
+        await sleep(10);
+      }
+      key("keypress", false, "난".charCodeAt(0), "난");
+      input("insertText", "난", false);
+      await sleep(50);
+      check("한글 입력 (Windows, 조합 이벤트 없이 keypress + insertText로 옴): 한 번만 보냄", sent.join("") === "난", JSON.stringify(sent));
+    }
+  } finally {
+    d.dispose();
+    term.input("\x15", true); // 셸 입력 줄에 들어간 글자를 지운다
+  }
+}
+
 async function testImeUnit() {
   const box = document.createElement("div");
   box.style.cssText = "position:fixed; left:-2000px; top:0; width:400px; height:200px";
@@ -5880,6 +5937,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["rename", () => testRename(root, t())],
     ["trashDrag", () => testTrashAndDrag(root, t())],
     ["imeUnit", testImeUnit],
+    ["imeTerminal", () => testImeTerminal(t())],
     ["terminalReplyUnit", testTerminalReplyUnit],
     ["workspaceStateUnit", testWorkspaceStateUnit],
     ["stepPlanUnit", testStepPlanUnit],

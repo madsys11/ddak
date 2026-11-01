@@ -9,7 +9,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
 import { draggedPath, droppedFiles, isFileDrag, isPathDrag, noteFileDrag, shellQuote } from "./dragPath";
-import { fixImeInput, passesImeKey } from "./hangul";
+import { IME_FIX, fixImeInput, passesImeKey } from "./hangul";
 import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, readMode, watchAltLoss, driveAnswer, driveMode, AnswerRuns, type Dialog, type PermissionMode, type ProgramStatus, type SendKey } from "./programStatus";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
@@ -144,8 +144,8 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
     }
     fit.fit();
     if (import.meta.env.DEV) liveTerms.set(el, term);
-    // 한글 입력기 글자 보정 (macOS WebKit은 composition 이벤트 없이 "바꾸기"로 조합한다. src/hangul.ts)
-    const unfixIme = term.textarea ? fixImeInput(term, el, term.textarea) : () => {};
+    // 한글 입력기 글자 보정 (macOS WebKit은 composition 이벤트 없이 "바꾸기"로 조합한다. Windows는 xterm 기본. src/hangul.ts)
+    const unfixIme = term.textarea && IME_FIX ? fixImeInput(term, el, term.textarea) : () => {};
     term.attachCustomKeyEventHandler((ev) => {
       const clip = clipboardKey(ev, term.hasSelection());
       if (clip === "copy") {
@@ -167,7 +167,7 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
         sendShiftEnter();
         return false;
       }
-      return passesImeKey(ev);
+      return !IME_FIX || passesImeKey(ev);
     });
 
     let id: number | undefined;

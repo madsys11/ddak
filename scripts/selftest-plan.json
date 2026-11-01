@@ -94,7 +94,7 @@
       "steps": ["tree", "watch", "create", "rename", "trashDrag", "docView"]
     },
     { "files": ["src/dragPath.ts"], "steps": ["trashDrag"] },
-    { "files": ["src/hangul.ts"], "steps": ["imeUnit", "terminal"] },
+    { "files": ["src/hangul.ts"], "steps": ["imeUnit", "imeTerminal", "terminal"] },
     { "files": ["src/TerminalSearch.tsx"], "steps": ["terminalSearch"] },
     {
       "files": ["src/terminalLinks.ts", "src-tauri/src/links.rs"],

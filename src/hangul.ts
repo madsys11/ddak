@@ -1,4 +1,5 @@
 import type { Terminal } from "@xterm/xterm";
+import { IS_WINDOWS } from "./platform";
 
 // macOS WebKit(WKWebView)에서 한글 등 입력기 글자를 터미널로 보내는 보정.
 //
@@ -19,6 +20,15 @@ import type { Terminal } from "@xterm/xterm";
 // - keyCode 229 keydown은 xterm에 넘기지 않는다. xterm은 이때 입력란 값을 비교해서 따로 보내는데
 //   (CompositionHelper `_handleAnyTextareaChanges`), 여기서 보낸 것과 겹친다.
 //
+// 이 보정을 쓰는 웹뷰인지 (Terminal.tsx가 본다). Windows WebView2(Chromium)는 xterm 기본 처리에 맡긴다
+// (docs/windows-plan.md "한글 입력"). 실제 입력기 기록 (2026-11-01, Microsoft 한국어 입력기, SendInput):
+// - 보통은 음절마다 compositionstart → update → compositionend이고 xterm이 compositionend에서 한 번 보낸다.
+// - 다른 WebView2 창이 조합 중에 포커스를 가져갔다가 닫히면, 돌아온 창의 입력기는 조합 이벤트 없이 끝낸 음절을
+//   keypress(그 글자) + insertText로 보낸다 (그 창에 다른 곳을 눌렀다 돌아올 때까지). xterm은 keypress로 보내고
+//   insertText는 버리는데 (`_keyPressHandled`), 이 보정은 keypress가 키 구간 밖이라 xterm이 보낸 줄 모르고 insertText를
+//   또 보내서 음절이 두 번씩 들어갔다 ("난난 실실").
+export const IME_FIX = !IS_WINDOWS;
+
 // xterm에 넘길 키인지 (Terminal이 attachCustomKeyEventHandler로 쓴다. 이 함수는 xterm에 하나만 걸 수 있다)
 export const passesImeKey = (ev: KeyboardEvent) => !(ev.type === "keydown" && ev.keyCode === 229 && !ev.isComposing);
 
