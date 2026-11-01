@@ -15,6 +15,7 @@ const ERRORS: Record<string, MessageKey> = {
   notFound: "repo.error.notFound",
   notRepo: "repo.error.notRepo",
   insideProject: "repo.error.insideProject",
+  linkPrivilege: "repo.error.linkPrivilege",
   git: "repo.error.git",
 };
 

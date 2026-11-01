@@ -48,6 +48,12 @@ pub fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
+// 링크를 만들 권한이 없어서 실패했는지. Windows 일반 사용자는 개발자 모드가 꺼져 있으면 ERROR_PRIVILEGE_NOT_HELD(1314)다.
+// 그때는 OS 오류 대신 개발자 모드를 켜라고 알린다 (docs/windows-plan.md)
+pub fn link_privilege_missing(e: &std::io::Error) -> bool {
+    cfg!(windows) && e.raw_os_error() == Some(1314)
+}
+
 // 홈 폴더. Windows 앱에는 HOME이 없다 (Git Bash는 USERPROFILE로 정한다)
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").or_else(|| if cfg!(windows) { std::env::var_os("USERPROFILE") } else { None }).map(PathBuf::from)
@@ -329,6 +335,14 @@ pub fn is_device_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Windows 링크 권한 없음(1314)만 개발자 모드 안내로 바꾼다. 다른 오류는 그대로 (유닉스의 1은 EPERM이라 해당 없음)
+    #[test]
+    fn link_privilege_missing_only_for_1314_on_windows() {
+        assert_eq!(link_privilege_missing(&std::io::Error::from_raw_os_error(1314)), cfg!(windows));
+        assert!(!link_privilege_missing(&std::io::Error::from_raw_os_error(5)));
+        assert!(!link_privilege_missing(&std::io::Error::other("x")));
+    }
 
     #[test]
     fn random_below_stays_in_range() {

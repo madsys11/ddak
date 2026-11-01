@@ -15,7 +15,7 @@ pub fn repo_link(project: String, target: String, name: String) -> Result<String
         return Err(err("insideProject", &target));
     }
     let dest = dest(&project, &name)?;
-    crate::platform::symlink(&real, &dest).map_err(|e| err("io", e))?;
+    crate::platform::symlink(&real, &dest).map_err(|e| if crate::platform::link_privilege_missing(&e) { err("linkPrivilege", &name) } else { err("io", e) })?;
     Ok(dest.to_string_lossy().into_owned())
 }
 

@@ -83,7 +83,7 @@
     },
     {
       "files": ["src/FileTree.tsx", "src/Sidebar.tsx"],
-      "steps": ["tree", "watch", "treeGit", "repos", "create", "rename", "trashDrag", "docView", "projects", "groupWorktree", "addSession"]
+      "steps": ["tree", "watch", "treeGit", "repos", "create", "rename", "trashDrag", "docView", "projects", "groupWorktree", "addSession", "groupErrorClear"]
     },
     {
       "files": ["src/watchDir.ts", "src-tauri/src/watch.rs"],
@@ -131,7 +131,7 @@
     },
     {
       "files": ["src/AddRepoDialog.tsx", "src-tauri/src/repos.rs"],
-      "steps": ["repos", "groupWorktree", "groupClone", "groupEnd", "gitGraph"]
+      "steps": ["repos", "groupWorktree", "groupClone", "groupEnd", "gitGraph", "groupErrorClear"]
     },
     {
       "files": [
@@ -142,7 +142,7 @@
         "src-tauri/src/setup.rs",
         "src-tauri/src/claude_trust.rs"
       ],
-      "steps": ["groupWorktree", "groupClone", "groupEnd", "gitGraph", "addSession"]
+      "steps": ["groupWorktree", "groupClone", "groupEnd", "gitGraph", "addSession", "groupErrorClear"]
     },
     { "files": ["src/EndGroupDialog.tsx"], "steps": ["groupEnd"] },
     { "files": ["src/AddSessionDialog.tsx"], "steps": ["addSession"] },

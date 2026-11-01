@@ -306,7 +306,10 @@ type Props = {
   shiftEnterFor: Record<string, string>;
   // 보고 있는 탭의 폴더가 바뀌면 알린다 (파일 트리가 그 폴더를 보여 준다). worktree: 작업그룹 이름 또는 null(원본)
   onTreeRoot: (cwd: string, worktree: string | null) => void;
-  onError: (message: string) => void;
+  // 오류를 띄운다. 돌려준 값으로 그 오류만 지울 수 있다
+  onError: (message: string) => object;
+  // onError가 돌려준 그 오류가 아직 보이면 지운다 (다른 곳이 그 뒤에 띄운 오류는 그대로 둔다)
+  onClearError: (id: object) => void;
   // 채팅 패널 (src/ChatPanel.tsx, App이 둔다): 열렸는지, 닫혀 있는 동안 나에게 온 메시지가 있는지, 여닫기
   chatOpen: boolean;
   chatUnread: boolean;
@@ -341,13 +344,13 @@ function StatusBadge({ status, awaiting }: { status?: ProgramStatus; awaiting: b
   );
 }
 
-export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRoot, onError, chatOpen, chatUnread, onToggleChat, docRequest }: Props) {
+export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRoot, onError, onClearError, chatOpen, chatUnread, onToggleChat, docRequest }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
   const [s, dispatch] = useReducer(reducer, cwd, initial);
-  const latest = useRef({ group, onError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs });
-  latest.current = { group, onError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs };
+  const latest = useRef({ group, onError, onClearError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs });
+  latest.current = { group, onError, onClearError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs };
   const creating = useRef(false);
   const bodies = useRef<Record<number, HTMLDivElement | null>>({});
   const root = useRef<HTMLDivElement>(null);
@@ -452,21 +455,28 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   const focusPane = (pane: number) =>
     root.current?.querySelector<HTMLElement>(`.pane[data-pane="${pane}"] .xterm-helper-textarea`)?.focus();
 
+  // 마지막으로 띄운 작업그룹 만들기 오류 (성공하면 지운다)
+  const groupError = useRef<object | null>(null);
   // 새 작업그룹: 저장소마다 worktree를 만들고 (src-tauri/src/worktrees.rs) 그 폴더에서 기본 그룹을 띄운다.
   // git이 몇 초 걸릴 수 있어 끝나면 탭을 연다. 만드는 중에 또 누르면 무시한다.
   async function createGroup() {
     // 저장한 상태를 읽기 전에는 만들지 않는다: 만들어도 그 결과를 읽은 상태가 덮어 탭이 생기지 않는다 (리뷰 P2)
     if (creating.current || !latest.current.loaded) return;
     creating.current = true;
-    const { group, onError, t, tabs } = latest.current;
+    const { group, onError, onClearError, t, tabs } = latest.current;
     try {
       // 탭이 쓰는 폴더는 넘긴다: Rust는 쓰지 않는 남은 작업그룹 폴더를 다시 쓴다 (worktrees.rs reuse)
       const inUse = tabs.map((tab) => tab.cwd);
       const made = await invoke<Created>("group_create", { project: cwd, prefix: group?.id ?? "shell", inUse });
       dispatch({ type: "newGroupTab", group, cwd: made.path, made });
+      // 만들었으면 앞서 실패한 오류는 지운다 (원인을 고친 뒤에도 파일 트리 위에 남았다)
+      if (groupError.current) onClearError(groupError.current);
+      groupError.current = null;
     } catch (raw) {
       const { code, detail } = codeError(raw);
-      onError(t("group.createFailed", { detail: code === "noRepos" ? t("group.noRepos") : detail }));
+      // 링크를 만들 권한이 없음: Windows 개발자 모드 (worktrees.rs, platform::link_privilege_missing)
+      const reason = code === "noRepos" ? t("group.noRepos") : code === "linkPrivilege" ? t("group.linkPrivilege", { name: detail }) : detail;
+      groupError.current = onError(t("group.createFailed", { detail: reason }));
     } finally {
       creating.current = false;
     }

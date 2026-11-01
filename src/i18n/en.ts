@@ -66,6 +66,7 @@ export const en = {
   "repo.error.notFound": "Folder not found: {path}",
   "repo.error.notRepo": "Not a git repository: {path}",
   "repo.error.insideProject": "This folder is already inside the project.",
+  "repo.error.linkPrivilege": "Windows did not allow the link. Turn on Developer Mode (Settings → System → For developers), then try again.",
   "repo.error.git": "git clone failed. If it needs a password or host key confirmation, clone it once in a terminal.\n\n{detail}",
 
   "workspace.newTerminal": "New Terminal (⌘T)",
@@ -251,6 +252,7 @@ export const en = {
 
   "group.createFailed": "Could not create the work group: {detail}",
   "group.noRepos": "This project has no git repository to make a worktree from.",
+  "group.linkPrivilege": "Windows did not allow a link to “{name}”. Turn on Developer Mode (Settings → System → For developers), then try again.",
 
   "terminal.linkHint": "⌘-click to open",
   "terminal.spawnFailed": "Failed to start terminal: {error}",

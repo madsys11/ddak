@@ -242,6 +242,9 @@ fn create(home: &Path, project: &str, prefix: &str, in_use: &dyn Fn(&Path) -> bo
     for other in &others {
         if let Err(e) = crate::platform::symlink(&root.join(other), &dest.join(other)) {
             undo.run();
+            if crate::platform::link_privilege_missing(&e) {
+                return Err(code_err("linkPrivilege", other));
+            }
             return Err(code_err("io", format!("{other}: {e}")));
         }
     }

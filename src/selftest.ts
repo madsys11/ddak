@@ -4211,6 +4211,68 @@ async function testAddSession(root: string, first: Terminal) {
 // {session}(과 주소)을 파일에 쓰고, follower는 claude처럼 그 ID를 startup으로 알린다. 이어서 하기는 받은 {session}을 파일에 쓰고
 // 실패한다 → [y/N]에 y → 처음 인자.
 // (창이 좁아 긴 줄이 접히므로 값은 파일로 받는다. 설정은 셸 작은따옴표로 쓰므로 작은따옴표를 쓰지 않는다)
+// 작업그룹 만들기에 실패한 오류는 원인을 고쳐 다음 만들기가 성공하면 사라진다 (파일 트리 위에 계속 남았다).
+// 자기가 띄운 오류만 지운다: 다른 프로젝트가 같은 문구로 띄운 오류(리뷰 R1)도, 그 사이 다른 곳이 띄운 오류도 남긴다.
+// 따로 만든 프로젝트에서 해서 root의 작업그룹 번호에 끼어들지 않는다.
+async function testGroupErrorClear(root: string, first: Terminal) {
+  const projA = root.replace(/\/proj$/, "/group-error-a");
+  const projB = root.replace(/\/proj$/, "/group-error-b");
+  const commit = (dir: string) => run(first, `git init -q '${dir}' && git -C '${dir}' -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init`);
+  const errors = () => [...document.querySelectorAll(".sidebar .sidebar-error")].map((e) => e.textContent ?? "");
+  const groupErr = () => errors().find((e) => e.startsWith("Could not create the work group"));
+  const open = async (proj: string) => {
+    await run(first, `mkdir -p '${proj}'`);
+    await devHooks.addProject!(proj);
+    const ws = () => document.querySelector(`.project-workspace[data-project="${CSS.escape(proj)}"]`);
+    const btn = await waitFor(`${proj} 탭 바`, () => ws()?.querySelector<HTMLElement>("[data-action=new-group]"));
+    await waitFor(`${proj} 첫 탭`, () => tabsIn(proj) === 1, 15000);
+    return btn;
+  };
+  // A·B 모두 저장소가 없어 같은 문구로 실패한다
+  const newA = await open(projA);
+  newA.click();
+  const errA = await waitFor("A 실패 오류", groupErr, 15000).catch(() => "");
+  check("작업그룹 오류: 실패하면 표시", errA.includes("no git repository"), errors().join("|"));
+  const newB = await open(projB);
+  // B가 띄웠는지 알 수 있게 먼저 다른 문구로 바꿔 둔다 (없는 폴더 추가)
+  const missing = root.replace(/\/proj$/, "/group-error-nope");
+  await devHooks.addProject!(missing);
+  await waitFor("다른 오류로 바뀜", () => !groupErr() && errors().some((e) => e.includes(missing)), 5000);
+  newB.click();
+  await waitFor("B 실패 오류", () => groupErr() === errA, 15000);
+  // A를 고쳐 성공해도 B가 나중에 띄운 같은 문구의 오류는 남는다
+  await commit(`${projA}/r`);
+  newA.click();
+  await waitFor("A 성공", () => tabsIn(projA) === 2, 15000).catch(() => null);
+  check("작업그룹 오류: 다른 프로젝트가 같은 문구로 띄운 오류는 지우지 않음", tabsIn(projA) === 2 && groupErr() === errA, errors().join("|"));
+  // B를 고쳐 성공하면 자기 오류가 사라진다
+  await commit(`${projB}/r`);
+  newB.click();
+  await waitFor("B 성공", () => tabsIn(projB) === 2, 15000).catch(() => null);
+  check("작업그룹 오류: 다음 만들기가 성공하면 사라짐", tabsIn(projB) === 2 && !groupErr(), errors().join("|"));
+
+  // 실패 → 다른 오류(없는 폴더 추가) → 성공: 다른 오류는 남는다
+  await run(first, `git init -q '${projB}/empty'`);
+  newB.click();
+  await waitFor("B 두 번째 실패 오류", groupErr, 15000).catch(() => "");
+  await devHooks.addProject!(missing);
+  const other = await waitFor("다른 오류", () => errors().find((e) => e.includes(missing)), 5000).catch(() => "");
+  await run(first, `git -C '${projB}/empty' -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init`);
+  newB.click();
+  await waitFor("B 두 번째 성공", () => tabsIn(projB) === 3, 15000).catch(() => null);
+  check("작업그룹 오류: 다른 곳이 띄운 오류는 지우지 않음", tabsIn(projB) === 3 && !!other && errors().includes(other), errors().join("|"));
+
+  const realConfirm = devHooks.confirm;
+  devHooks.confirm = async () => true;
+  for (const proj of [projA, projB]) {
+    projectRow(proj)!.querySelector<HTMLElement>("[data-action=remove]")!.click();
+    await waitFor(`${proj} 빼기`, () => !projectRow(proj));
+  }
+  devHooks.confirm = realConfirm;
+  projectRow(root)?.click();
+  await waitFor("첫 프로젝트로", () => visiblePanes()[0]?.term === first);
+}
+
 async function testSessionFollow(root: string, first: Terminal) {
   const file = await groupsFile();
   const [ff, fr, pf] = ["follow-first", "follow-resumed", "plain-first"].map((n) => `${root}/${n}.txt`);
@@ -5862,6 +5924,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["tabScroll", testTabScroll],
     ["manyTerminals", () => testManyTerminals(20)],
     ["projects", () => testProjects(root, t())],
+    ["groupErrorClear", () => testGroupErrorClear(root, t())],
     ["lastExit", () => testLastExit(t())],
   ];
   const order = steps.map(([n]) => n);

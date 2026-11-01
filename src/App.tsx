@@ -31,6 +31,21 @@ function App() {
   const { projects, active, error, loadError, setError, add, remove, activate } = useProjects();
   // 목록 파일 읽기 실패는 다른 오류로 지워지지 않게 따로 계속 보여 준다.
   const shownError = loadError ? t("sidebar.loadFailed", { error: loadError }) : error;
+  // Workspace가 띄운 오류와 그것을 띄운 호출 (작업그룹 만들기가 성공하면 자기가 띄운 오류만 지운다. 문구만 보면 다른 프로젝트가
+  // 띄운 같은 문구의 오류까지 지웠다: 리뷰 R1). 그 뒤 다른 곳이 띄운 오류는 문구가 달라서 지우지 않는다
+  const workspaceError = useRef<{ id: object; message: string } | null>(null);
+  const showError = (message: string) => {
+    const id = {};
+    workspaceError.current = { id, message };
+    setError(message);
+    return id;
+  };
+  const clearError = (id: object) => {
+    const shown = workspaceError.current;
+    if (shown?.id !== id) return;
+    workspaceError.current = null;
+    setError((e) => (e === shown.message ? null : e));
+  };
   const { groups, error: groupsError } = useGroups();
   const groupsMessage =
     groupsError &&
@@ -198,7 +213,8 @@ function App() {
                 onTreeRoot={(cwd, worktree) =>
                   setTreeRoots((r) => (r[path]?.cwd === cwd && r[path]?.worktree === worktree ? r : { ...r, [path]: { cwd, worktree } }))
                 }
-                onError={setError}
+                onError={showError}
+                onClearError={clearError}
                 chatOpen={!!chatOpen[path]}
                 chatUnread={!!chatUnread[path]}
                 onToggleChat={() => setChatOpen((o) => ({ ...o, [path]: !o[path] }))}

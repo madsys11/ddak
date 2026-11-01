@@ -66,6 +66,7 @@ export const ko: Messages = {
   "repo.error.notFound": "폴더가 없습니다: {path}",
   "repo.error.notRepo": "git 저장소가 아닙니다: {path}",
   "repo.error.insideProject": "이미 프로젝트 안에 있는 폴더입니다.",
+  "repo.error.linkPrivilege": "Windows가 링크를 허용하지 않았습니다. 개발자 모드를 켠 뒤(설정 → 시스템 → 개발자용) 다시 시도하세요.",
   "repo.error.git": "git clone 실패. 비밀번호나 호스트 키 확인이 필요하면 터미널에서 한 번 직접 clone 하세요.\n\n{detail}",
 
   "workspace.newTerminal": "새 터미널 (⌘T)",
@@ -251,6 +252,7 @@ export const ko: Messages = {
 
   "group.createFailed": "작업그룹을 만들지 못했습니다: {detail}",
   "group.noRepos": "이 프로젝트에 worktree를 만들 git 저장소가 없습니다.",
+  "group.linkPrivilege": "Windows가 “{name}” 링크를 허용하지 않았습니다. 개발자 모드를 켠 뒤(설정 → 시스템 → 개발자용) 다시 시도하세요.",
 
   "terminal.linkHint": "⌘+클릭으로 열기",
   "terminal.spawnFailed": "터미널 실행 실패: {error}",
