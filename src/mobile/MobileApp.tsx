@@ -8,6 +8,11 @@ import { FONT_SCALES, applySettings, loadSettings, resolveLocale, saveSettings, 
 import { MessageView, ReadMark, readTarget } from "./sync";
 import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 import { ModePicker, modeLabel, modeText } from "../ModePicker";
+import { ChatFilterBar } from "../ChatFilterBar";
+import { applyFilter, groupsIn, loadFilter, saveFilter, type ChatFilter } from "../chatFilter";
+
+// 컴퓨터·프로젝트마다 기억하는 채팅 필터 (src/chatFilter.ts)
+export const PHONE_FILTER_KEY = "ddak.phone.chatFilter";
 
 const USER = "user";
 // src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
@@ -495,6 +500,10 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const atBottom = useRef(true);
+  // 보이는 것만 거른다. 받은 페이지들에만 건다 (적으면 "이전 메시지"로 더 받는다). 읽음은 그대로 (readTarget)
+  const filterId = `${computer.id}/${project}`;
+  const [filter, setFilterState] = useState<ChatFilter>(() => loadFilter(PHONE_FILTER_KEY, filterId));
+  useEffect(() => setFilterState(loadFilter(PHONE_FILTER_KEY, filterId)), [filterId]);
   // 여기까지 읽었다고 맥에 알린다 (맥의 배지와 목록의 안 읽은 수): 화면이 보이고, 맨 아래(최신)를 보고 있고, 서버와 맞춘
   // 상태일 때만 (src/mobile/sync.ts readable, ReadMark. 3단계 리뷰 R1·R2). 실패하면 ReadMark가 다시 보낸다
   const reads = useRef<ReadMark | null>(null);
@@ -506,6 +515,13 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
   const markRead = useCallback(() => {
     reads.current?.mark(readTarget(view.current, !document.hidden, atBottom.current));
   }, []);
+  // 필터를 바꾸면 맨 아래(최신)로 가므로 읽음도 알린다 (프로그램으로 내려가 onScroll이 알리지 않는다: send와 같다. 리뷰 R1)
+  const setFilter = (f: ChatFilter) => {
+    setFilterState(f);
+    saveFilter(PHONE_FILTER_KEY, filterId, f);
+    atBottom.current = true;
+    markRead();
+  };
   // 최신 페이지로 바꾼다 (처음, 다시 이어짐, 지움, 이 채팅의 알림이 옴). 화면에 적용했으면 true
   const loadLatest = useCallback(() => {
     const load = view.current.begin();
@@ -580,7 +596,7 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
   useLayoutEffect(() => {
     const el = list.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [messages, filter]);
 
   const earlier = async () => {
     const { before, gen } = view.current.older();
@@ -626,8 +642,9 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
   };
   const time = (ms: number) => new Date(ms).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
   const who = (n: string) => (n === USER ? t("chat.you") : n);
-  // 선택 창마다 마지막 답 기록
+  // 선택 창마다 마지막 답 기록 (필터 전 전체로)
   const answers = lastAnswers(messages);
+  const { shown, hidden, hiddenToMe } = applyFilter(messages, filter);
 
   return (
     <div className="screen chat">
@@ -664,6 +681,7 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
       )}
       {!outdated && (
         <>
+          <ChatFilterBar filter={filter} groups={groupsIn(messages, members.members, filter.group)} hidden={hidden} hiddenToMe={hiddenToMe} t={t} onChange={setFilter} />
           <div
             ref={list}
             className="messages"
@@ -681,7 +699,12 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
               </button>
             )}
             {messages.length === 0 && !error && <p className="hint">{t("chat.empty")}</p>}
-            {messages.map((m) => (
+            {messages.length > 0 && shown.length === 0 && (
+              <p className="hint" data-filter-empty>
+                {t("chat.filterEmpty")}
+              </p>
+            )}
+            {shown.map((m) => (
               <div key={m.id} className={`msg${m.from === USER ? " mine" : ""}${m.to.includes(USER) ? " to-me" : ""}`}>
                 <div className="meta">
                   <span className="from">{who(m.from)}</span>

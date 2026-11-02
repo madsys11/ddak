@@ -105,12 +105,16 @@
     { "files": ["src/zoom.ts"], "steps": ["zoom", "zoomIme"] },
     {
       "files": ["src/ChatPanel.tsx", "src-tauri/src/chat.rs"],
-      "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects", "sessionFollow"]
+      "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects", "sessionFollow", "chatFilter"]
+    },
+    {
+      "files": ["src/chatFilter.ts", "src/ChatFilterBar.tsx"],
+      "steps": ["chatFilterUnit", "chatFilter", "mobileChatFilterUnit"]
     },
     {
       "files": ["src/MobileDialog.tsx", "src/mobile/**", "src-tauri/src/mobile.rs", "src-tauri/src/push.rs"],
       "why": "src/mobile/public/sw.js는 mobilePushUnit이 가짜 self로 실행한다",
-      "steps": ["mobile", "mobileSyncUnit", "mobilePushUnit", "mobileThemeUnit", "mobileChatUnit", "mobileSettingsUnit"]
+      "steps": ["mobile", "mobileSyncUnit", "mobilePushUnit", "mobileThemeUnit", "mobileChatUnit", "mobileSettingsUnit", "mobileChatFilterUnit"]
     },
     {
       "files": ["src/PromptChoices.tsx", "src/programStatus.ts", "src-tauri/src/prompts.rs"],

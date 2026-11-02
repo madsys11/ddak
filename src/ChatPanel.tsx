@@ -7,6 +7,8 @@ import { PANEL_SIZES, usePrefs } from "./prefs";
 import { PromptChoices, answerText, lastAnswers, type Answer, type Prompt } from "./PromptChoices";
 import { modeText, type ModeChange } from "./ModePicker";
 import { Resizer } from "./Resizer";
+import { ChatFilterBar } from "./ChatFilterBar";
+import { applyFilter, groupsIn, loadFilter, saveFilter, type ChatFilter } from "./chatFilter";
 
 // src-tauri/src/chat.rs Message
 // held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음. via: 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
@@ -17,6 +19,8 @@ export type ChatMessage = { id: number; time: number; from: string; text: string
 export const WAKE_LIMIT = 10;
 
 const USER = "user";
+// 프로젝트마다 기억하는 채팅 필터 (src/chatFilter.ts)
+export const FILTER_KEY = "ddak.chatFilter";
 // src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
 const NO_RECIPIENT = "no-recipient";
 
@@ -60,10 +64,18 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   const [sending, setSending] = useState(false);
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
+  const atBottom = useRef(true);
   // 마지막으로 받은 메시지 번호 (보게 되면 여기까지 본 것으로)
   const last = useRef(0);
   const latest = useRef({ watching, onUnread });
   latest.current = { watching, onUnread };
+  // 보이는 것만 거른다 (읽음은 그대로: 보고 있으면 마지막 메시지까지)
+  const [filter, setFilterState] = useState<ChatFilter>(() => loadFilter(FILTER_KEY, project));
+  const setFilter = (f: ChatFilter) => {
+    setFilterState(f);
+    saveFilter(FILTER_KEY, project, f);
+    atBottom.current = true;
+  };
 
   useEffect(() => {
     let alive = true;
@@ -165,12 +177,11 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watching]);
 
-  // 맨 아래를 보고 있었으면 새 메시지를 따라 내려간다
-  const atBottom = useRef(true);
+  // 맨 아래를 보고 있었으면 새 메시지를 따라 내려간다 (필터를 바꾸면 맨 아래로)
   useLayoutEffect(() => {
     const el = list.current;
     if (el && atBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages, open]);
+  }, [messages, open, filter]);
 
   async function send() {
     const sent = draft;
@@ -203,8 +214,9 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
     setDraft((d) => `${d}${d && !d.endsWith(" ") ? " " : ""}@${name} `);
     input.current?.focus();
   };
-  // 선택 창마다 마지막 답 기록
+  // 선택 창마다 마지막 답 기록 (필터 전 전체로: 답 기록이 숨어도 질문의 상태는 그대로)
   const answers = lastAnswers(messages);
+  const { shown, hidden, hiddenToMe } = applyFilter(messages, filter);
   // 앱 언어로 (시스템 언어가 아니라)
   const time = (ms: number) => new Date(ms).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
 
@@ -220,6 +232,7 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
           ×
         </button>
       </div>
+      <ChatFilterBar filter={filter} groups={groupsIn(messages, members, filter.group)} hidden={hidden} hiddenToMe={hiddenToMe} t={t} onChange={setFilter} />
       <div
         ref={list}
         className="chat-list"
@@ -229,7 +242,8 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
         }}
       >
         {messages.length === 0 && !error && <div className="chat-none">{t("chat.empty")}</div>}
-        {messages.map((m) => (
+        {messages.length > 0 && shown.length === 0 && <div className="chat-none" data-filter-empty>{t("chat.filterEmpty")}</div>}
+        {shown.map((m) => (
           <div key={m.id} className={`chat-msg${m.from === USER ? " mine" : ""}${m.to.includes(USER) ? " to-me" : ""}`} data-id={m.id}>
             <div className="chat-meta">
               <span className="chat-from">{m.from === USER ? t("chat.you") : m.from}</span>

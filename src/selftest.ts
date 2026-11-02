@@ -32,6 +32,9 @@ import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { type PaneSession, commandOf, followSession, fromSaved } from "./workspaceState";
 import { screenPixelRatio, setZoomFactor } from "./zoom";
+import { NO_FILTER, applyFilter, groupOf, groupsIn, loadFilter, saveFilter } from "./chatFilter";
+import { FILTER_KEY as CHAT_FILTER_KEY } from "./ChatPanel";
+import { PHONE_FILTER_KEY } from "./mobile/MobileApp";
 import { MONO_FONT, monoFaces } from "./monoFont";
 import { ZOOM_LEVELS } from "./prefs";
 
@@ -748,6 +751,186 @@ function testMobileSyncUnit() {
 
 // 폰 채팅 화면의 읽음 (src/mobile/MobileApp.tsx Chat): 실제 화면을 iframe에 그리고 맥 API만 대역으로 바꾼다. 위로 올려 읽다가
 // 보내면 맨 아래로 가서 최신을 보게 되므로 읽음을 알린다 (3단계 재리뷰 R4: 스크롤로 내려온 것이 아니라 알리지 않았다)
+// 채팅 필터 (src/chatFilter.ts): 나와 관련된 것만 (보냈거나 받은 사람에 user), 작업그룹 (관계된 참여자: 보낸 사람, 받은 사람,
+// 선택 창 답·권한 모드 기록의 member. 이 기록은 실제로 from user, to []로 저장된다), 둘 다면 AND. 숨긴 수와 그중 나에게 온 수.
+async function testChatFilterUnit() {
+  const msgs = [
+    { id: 1, from: "user", to: ["origin/dev"] },
+    { id: 2, from: "origin/dev", to: ["origin/rev"] },
+    { id: 3, from: "origin/dev", to: ["user"] },
+    { id: 4, from: "web/dev", to: ["origin/dev", "origin/rev", "user", "web/rev"] }, // @all
+    { id: 5, from: "web/dev", to: ["web/rev"] },
+    { id: 6, from: "web/dev", to: ["origin/rev"] }, // 그룹 사이
+    { id: 7, from: "user", to: [], answer: { member: "origin/dev" } }, // 선택 창 답 기록 (prompts.rs prompt_result)
+    { id: 8, from: "user", to: [], mode: { member: "web/dev" } }, // 권한 모드 기록 (modes.rs mode_result)
+    { id: 9, from: "origin/dev", to: ["user"], prompt: { id: "q" } }, // 선택 창
+  ];
+  const ids = (mine: boolean, group: string | null) => applyFilter(msgs, { mine, group }).shown.map((m) => m.id).join(",");
+  const got = [ids(false, null), ids(true, null), ids(false, "origin"), ids(false, "web"), ids(true, "web")];
+  check("채팅 필터: 없음·나와 관련·작업그룹(origin, web)·둘 다", got.join(" / ") === "1,2,3,4,5,6,7,8,9 / 1,3,4,7,8,9 / 1,2,3,4,6,7,9 / 4,5,6,8 / 4,8", got.join(" / "));
+  const web = applyFilter(msgs, { mine: false, group: "web" });
+  const mine = applyFilter(msgs, { mine: true, group: null });
+  check("채팅 필터: 숨긴 수와 그중 나에게 온 수", web.hidden === 5 && web.hiddenToMe === 2 && mine.hidden === 3 && mine.hiddenToMe === 0, `${web.hidden}/${web.hiddenToMe} ${mine.hidden}/${mine.hiddenToMe}`);
+  const groups = groupsIn(msgs, ["user", "ops/x"]).join(",");
+  const kept = groupsIn([], [], "gone").join(",");
+  // 답·모드 기록에만 나오는 그룹도 고를 수 있다 (from user, to [])
+  const fromRecords = groupsIn([{ from: "user", to: [], answer: { member: "ans/x" } }, { from: "user", to: [], mode: { member: "mod/x" } }], ["user"]).join(",");
+  check(
+    "채팅 필터: 고를 그룹은 참여자와 메시지(답·모드 기록의 member 포함)에서, 고른 그룹은 없어져도 남김",
+    groups === "ops,origin,web" && fromRecords === "ans,mod" && kept === "gone" && groupOf("user") === null && groupOf("a/b/c") === "a",
+    `${groups} ${fromRecords} ${kept}`,
+  );
+  const key = "ddak.selftest.chatFilter";
+  saveFilter(key, "p", { mine: true, group: "web" });
+  const back = loadFilter(key, "p");
+  saveFilter(key, "p", NO_FILTER);
+  const removed = localStorage.getItem(key);
+  localStorage.setItem(key, "{broken");
+  const broken = loadFilter(key, "p");
+  localStorage.removeItem(key);
+  check("채팅 필터: 기억 (끄면 지움, 깨졌으면 필터 없음)", back.mine && back.group === "web" && removed === "{}" && !broken.mine && broken.group === null, `${JSON.stringify(back)} ${removed} ${JSON.stringify(broken)}`);
+}
+
+// 맥 채팅 패널의 필터 줄 (ChatFilterBar): 토글·작업그룹을 바꾸면 보이는 메시지와 숨긴 수가 바뀌고 프로젝트마다 기억한다.
+// 앞 단계가 남긴 메시지가 있을 수 있어 이 단계의 표시(F1…)만 비교한다.
+async function testChatFilter(root: string) {
+  const ws = () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(root)}"]`)!;
+  const panel = () => ws().querySelector<HTMLElement>(".chat-panel")!;
+  const shown = () => !!ws().querySelector(".chat-panel") && panel().style.display !== "none";
+  if (!shown()) ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  await waitFor("채팅 패널", shown, 3000);
+  const names = ["origin/fa", "origin/fb", "web/fa", "solo/fa"];
+  const tokens = await Promise.all(names.map((name) => invoke<string>("selftest_chat_join", { project: root, name })));
+  try {
+    await invoke("chat_post", { project: root, text: "@origin/fa F1" });
+    for (const [from, text] of [["origin/fa", "@origin/fb F2"], ["origin/fa", "@user F3"], ["web/fa", "@origin/fb F4"], ["web/fa", "@user F5"]]) {
+      await invoke("selftest_chat_post", { project: root, from, text });
+    }
+    const marks = () => [...panel().querySelectorAll(".chat-text")].map((e) => (e.textContent ?? "").match(/\bF\d\b/)?.[0]).filter(Boolean).join(",");
+    await waitFor("필터 메시지", () => marks() === "F1,F2,F3,F4,F5", 5000).catch(() => null);
+    const total = (await invoke<unknown[]>("chat_messages", { project: root })).length;
+    const hidden = () => Number(panel().querySelector<HTMLElement>(".chat-filter-hidden")?.dataset.hidden ?? 0);
+    const hiddenToMe = () => Number(panel().querySelector<HTMLElement>(".chat-filter-hidden")?.dataset.hiddenToMe ?? 0);
+    const mineBtn = () => panel().querySelector<HTMLButtonElement>("[data-action=chat-filter-mine]")!;
+    const select = () => panel().querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")!;
+    const pick = (g: string) => {
+      select().value = g;
+      select().dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    const options = [...select().options].map((o) => o.value).filter(Boolean);
+    const settle = () => sleep(100);
+    mineBtn().click();
+    await settle();
+    const onlyMine = { marks: marks(), shown: panel().querySelectorAll(".chat-msg").length, hidden: hidden(), pressed: mineBtn().getAttribute("aria-pressed") };
+    pick("web");
+    await settle();
+    const mineWeb = marks();
+    mineBtn().click();
+    await settle();
+    const webOnly = { marks: marks(), toMe: hiddenToMe() };
+    const stored = JSON.parse(localStorage.getItem(CHAT_FILTER_KEY) ?? "{}")[root];
+    pick("solo");
+    await settle();
+    const empty = !!panel().querySelector("[data-filter-empty]") && marks() === "";
+    pick("");
+    await settle();
+    const cleared = { marks: marks(), noHidden: !panel().querySelector(".chat-filter-hidden"), stored: JSON.parse(localStorage.getItem(CHAT_FILTER_KEY) ?? "{}")[root] ?? null };
+    check("채팅 필터 (맥): 작업그룹 목록은 참여자와 메시지에서", ["origin", "solo", "web"].every((g) => options.includes(g)), options.join(","));
+    check(
+      "채팅 필터 (맥): 나와 관련된 것만 → 내가 보낸 것과 나에게 온 것, 숨긴 수는 받은 메시지 전체 기준",
+      onlyMine.marks === "F1,F3,F5" && onlyMine.hidden === total - onlyMine.shown && onlyMine.hidden > 0 && onlyMine.pressed === "true",
+      `${JSON.stringify(onlyMine)} total=${total}`,
+    );
+    check("채팅 필터 (맥): 작업그룹(web)과 함께 켜면 둘 다 맞는 것만, web만이면 그룹 사이 메시지도", mineWeb === "F5" && webOnly.marks === "F4,F5" && webOnly.toMe >= 1, `${mineWeb} ${JSON.stringify(webOnly)}`);
+    check("채팅 필터 (맥): 프로젝트마다 기억 (켠 것만 저장, 다 끄면 지움)", stored?.group === "web" && stored?.mine === false && cleared.stored === null, `${JSON.stringify(stored)} ${JSON.stringify(cleared.stored)}`);
+    check("채팅 필터 (맥): 맞는 메시지가 없으면 안내, 끄면 모두 보임", empty && cleared.marks === "F1,F2,F3,F4,F5" && cleared.noHidden, `${empty} ${JSON.stringify(cleared)}`);
+  } finally {
+    for (const token of tokens) await invoke("selftest_chat_leave", { token });
+  }
+}
+
+// 폰 채팅의 필터 (src/mobile/MobileApp.tsx Chat): 받은 페이지에만 건다. 최신 페이지에 맞는 것이 없으면 안내와 "이전 메시지"가
+// 보이고, 이전 페이지를 받으면 나타난다. 컴퓨터/프로젝트마다 따로 기억한다. 숨긴 메시지가 있어도 읽음 알림은 그대로.
+async function testMobileChatFilterUnit() {
+  const frame = document.createElement("iframe");
+  frame.style.cssText = "position:fixed;left:-10000px;top:0;width:400px;height:400px";
+  document.body.appendChild(frame);
+  const vars = Object.entries(THEMES.dark.ui).map(([k, v]) => `${k}:${v}`).join(";");
+  const loaded = new Promise((r) => (frame.onload = r));
+  frame.srcdoc = `<style>:root{${vars}}${mobileCss}</style><div id="root"></div>`;
+  await loaded;
+  const doc = frame.contentDocument!;
+  const saved = { ...phoneApi };
+  const savedFilter = localStorage.getItem(PHONE_FILTER_KEY);
+  localStorage.setItem(PHONE_FILTER_KEY, JSON.stringify({ "c/p": { mine: true, group: null }, "c/q": { mine: false, group: "web" } }));
+  const reads: number[] = [];
+  // 최신 페이지: 세션끼리만 (나와 관련 없음, 50·51). 이전 페이지: 나에게 온 것 (40)
+  const latest = [
+    { id: 50, time: 0, from: "origin/dev", text: "P50", to: ["origin/rev"] },
+    { id: 51, time: 0, from: "web/dev", text: "P51", to: ["web/rev"] },
+  ];
+  const older = [{ id: 40, time: 0, from: "origin/dev", text: "P40", to: ["user"] }];
+  Object.assign(phoneApi, {
+    info: async () => ({ id: "c", name: "Mac", version: "", api: PHONE_API }),
+    messages: async (_c: unknown, _p: unknown, before?: number) => (before ? { name: "proj", messages: older, more: false } : { name: "proj", messages: latest, more: true }),
+    members: async () => ({ members: ["user", "origin/dev", "origin/rev"], waiting: [], paused: [], open: true }),
+    read: async (_c: unknown, _p: unknown, id: number) => void reads.push(id),
+  });
+  let root = createRoot(doc.getElementById("root")!);
+  const texts = () => [...doc.querySelectorAll(".msg .text")].map((e) => e.textContent).join(",");
+  const computer = { id: "c", name: "Mac", api: "http://127.0.0.1:9", token: "t" };
+  try {
+    root.render(createElement(Chat, { computer, project: "p" }));
+    await waitFor("폰 필터 첫 페이지", () => !!doc.querySelector(".chat-filter") && reads.length > 0, 5000).catch(() => null);
+    const mineOn = doc.querySelector("[data-action=chat-filter-mine]")?.getAttribute("aria-pressed") === "true";
+    const empty = !!doc.querySelector("[data-filter-empty]") && texts() === "" && !!doc.querySelector(".earlier");
+    const hiddenFirst = doc.querySelector<HTMLElement>(".chat-filter-hidden")?.dataset.hidden;
+    doc.querySelector<HTMLElement>(".earlier")?.click();
+    await waitFor("이전 페이지", () => texts() === "P40", 3000).catch(() => null);
+    check("폰 채팅 필터: 기억한 필터로 시작, 최신 페이지에 맞는 것이 없으면 안내와 이전 메시지, 받으면 나타남", mineOn && empty && hiddenFirst === "2" && texts() === "P40", `${mineOn} ${empty} hidden=${hiddenFirst} ${texts()}`);
+    check("폰 채팅 필터: 숨겨도 읽음 알림은 그대로 (최신 51)", reads[0] === 51, reads.join(","));
+    root.render(createElement(Chat, { computer, project: "q" }));
+    await waitFor("다른 프로젝트", () => doc.querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")?.value === "web", 3000).catch(() => null);
+    const q = [doc.querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")?.value, doc.querySelector("[data-action=chat-filter-mine]")?.getAttribute("aria-pressed")];
+    check("폰 채팅 필터: 컴퓨터/프로젝트마다 따로 기억", q[0] === "web" && q[1] === "false", JSON.stringify(q));
+
+    // 위쪽을 보는 동안 새 메시지(나에게 옴)가 오면 읽지 않는다. 그 뒤 필터를 바꾸면 맨 아래로 가므로 그 번호까지 읽음을 알린다
+    // (결과가 0개인 필터여도. 리뷰 R1: 프로그램으로 내려가 onScroll이 알리지 않았다)
+    const many = (n: number) => Array.from({ length: n }, (_, i) => ({ id: i + 1, time: 0, from: "origin/dev", text: `R${i + 1}`, to: i + 1 === 61 ? ["user"] : ["origin/rev"] }));
+    let page = many(60);
+    Object.assign(phoneApi, {
+      messages: async () => ({ name: "proj", messages: page, more: false }),
+      members: async () => ({ members: ["user", "origin/dev", "origin/rev", "web/x"], waiting: [], paused: [], open: true }),
+    });
+    reads.length = 0;
+    root.unmount();
+    root = createRoot(doc.getElementById("root")!);
+    root.render(createElement(Chat, { computer, project: "r" }));
+    await waitFor("r 첫 읽음", () => reads.includes(60), 5000).catch(() => null);
+    const list = doc.querySelector<HTMLElement>(".messages")!;
+    list.scrollTop = 0;
+    list.dispatchEvent(new Event("scroll"));
+    await sleep(100);
+    page = many(61);
+    dispatchEvent(new CustomEvent("ddak-shown", { detail: { tag: "c/r", kind: "message", id: "n61" } }));
+    await waitFor("새 메시지", () => texts().includes("R61"), 3000).catch(() => null);
+    await sleep(100);
+    const beforeFilter = reads.join(",");
+    const group = doc.querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")!;
+    group.value = "web";
+    group.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitFor("필터 뒤 읽음", () => reads.includes(61), 3000).catch(() => null);
+    const zero = !!doc.querySelector("[data-filter-empty]");
+    check("폰 채팅 필터: 위쪽을 보다가 필터를 바꾸면 (결과 0개여도) 맨 아래로 가며 최신까지 읽음을 알림", beforeFilter === "60" && zero && reads.at(-1) === 61, `${beforeFilter} → ${reads.join(",")} zero=${zero}`);
+  } finally {
+    root.unmount();
+    frame.remove();
+    Object.assign(phoneApi, saved);
+    if (savedFilter === null) localStorage.removeItem(PHONE_FILTER_KEY);
+    else localStorage.setItem(PHONE_FILTER_KEY, savedFilter);
+  }
+}
+
 async function testMobileChatUnit() {
   const frame = document.createElement("iframe");
   frame.style.cssText = "position:fixed;left:-10000px;top:0;width:400px;height:400px";
@@ -5952,6 +6135,8 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["mobilePushUnit", testMobilePushUnit],
     ["mobileThemeUnit", testMobileThemeUnit],
     ["mobileChatUnit", testMobileChatUnit],
+    ["chatFilterUnit", testChatFilterUnit],
+    ["mobileChatFilterUnit", testMobileChatFilterUnit],
     ["mobileSettingsUnit", testMobileSettingsUnit],
     ["panels", testPanels],
     ["zoom", () => testZoom(t())],
@@ -5986,6 +6171,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["manyTerminals", () => testManyTerminals(20)],
     ["projects", () => testProjects(root, t())],
     ["groupErrorClear", () => testGroupErrorClear(root, t())],
+    ["chatFilter", () => testChatFilter(root)],
     ["lastExit", () => testLastExit(t())],
   ];
   const order = steps.map(([n]) => n);
