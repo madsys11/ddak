@@ -31,7 +31,7 @@ pub struct Message {
     pub text: String,
     // 멘션된 참여자 (보낼 때 있던 참여자 중에서. @all이면 보낸 사람 말고 모두)
     pub to: Vec<String>,
-    // 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않았다 (to는 원래 받는 사람 그대로. WAKE_LIMIT)
+    // 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않았다 (to는 원래 받는 사람 그대로. wake_limit)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
     // 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
@@ -124,17 +124,19 @@ struct Inner {
     // 프로젝트 → 지운 지점의 번호 (새 번호는 이것과 남은 메시지 중 큰 것 + 1)
     floors: HashMap<PathBuf, u64>,
     names: HashMap<PathBuf, Names>,
-    // (프로젝트, 작업그룹) → 자동 깨우기 셈 (WAKE_LIMIT). 메모리에만 둔다: 앱을 다시 켜면 처음부터 센다.
+    // (프로젝트, 작업그룹) → 자동 깨우기 셈 (wake_limit). 메모리에만 둔다: 앱을 다시 켜면 처음부터 센다.
     limits: HashMap<(PathBuf, String), Limit>,
+    // 자동 깨우기 제한의 지금 값 (협업 제한 limits.rs. 앱을 켤 때와 바꿀 때 set_wake_limit)
+    wake_limit: u32,
     // 프로젝트 → 사용자가 본 마지막 번호 (안 읽은 수, unread). 메모리에만 둔다: 없으면 앱을 켜기 전 것까지 본 것으로 친다.
     seen: HashMap<PathBuf, u64>,
 }
 
 // 자동 깨우기 제한 (docs/spec.md "작업그룹 협업 규약"). 세션끼리 끝없이 주고받지 않도록, 사용자 메시지 없이 한 작업그룹의
-// 세션이 다른 세션에게 보낸 메시지를 센다 (@all도 1개). WAKE_LIMIT개까지는 깨우고, 그 뒤 메시지는 저장만 하고 깨우지 않는다
+// 세션이 다른 세션에게 보낸 메시지를 센다 (@all도 1개). 제한(wake_limit)개까지는 깨우고, 그 뒤 메시지는 저장만 하고 깨우지 않는다
 // (held). 사용자 메시지가 그 작업그룹에 닿거나 사용자가 재개하면 다시 세고, 보류된 알림을 받는 사람마다 한 번 알린다.
-// 이미 깨운 세션의 작업은 멈추지 않는다 (새 알림을 넣지 않을 뿐).
-pub const WAKE_LIMIT: u32 = 10;
+// 이미 깨운 세션의 작업은 멈추지 않는다 (새 알림을 넣지 않을 뿐). 제한은 앱 메뉴 "협업 제한…"에서 바꾼다 (limits.rs).
+pub const DEFAULT_WAKE_LIMIT: u32 = 10;
 
 #[derive(Default)]
 struct Limit {
@@ -165,8 +167,8 @@ pub enum Change<'a> {
     Cleared,
     // 사용자가 본 마지막 번호가 올라감 (데스크톱 채팅 패널이나 폰에서 읽음. 안 읽은 수가 바뀐다)
     Seen,
-    // 이 작업그룹의 자동 깨우기가 막 멈춤 (사용자에게 알린다)
-    Paused(&'a str),
+    // 이 작업그룹의 자동 깨우기가 막 멈춤 (사용자에게 알린다). 그때의 제한 수
+    Paused(&'a str, u32),
     // 이 참여자가 사용자를 기다림 (사용자에게 알린다). kind: permission·question·auth (OSC 7501 blocked의 종류), blocked
     // (종류 없음), dialog (화면의 선택 창).
     // hook: claude의 권한 확인 훅(/attention/<토큰>)에서 옴. 아니면 터미널의 프로그램 상태(pty_awaiting, 대기가 켜질 때마다).
@@ -261,7 +263,7 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
 impl Chats {
     // 서버 없이 (저장·참여만. 테스트용)
     pub(crate) fn new(dir: PathBuf, on_message: OnMessage, port: u16) -> Arc<Chats> {
-        Arc::new(Chats { inner: Mutex::new(Inner::default()), dir, port, on_message, started: now_ms() })
+        Arc::new(Chats { inner: Mutex::new(Inner { wake_limit: DEFAULT_WAKE_LIMIT, ..Inner::default() }), dir, port, on_message, started: now_ms() })
     }
 
     // 서버를 띄운다. 포트를 못 열면 오류 (채팅 없이 세션은 뜬다: {chat}이 빈 값이 된다)
@@ -492,7 +494,8 @@ impl Chats {
             }
             // 자동 깨우기 제한: 세션이 다른 세션에게 보낸 것만 센다. 셈과 보류는 이 잠금 안에서 정한다 (동시에 보내도 넘지 않게)
             let counted = (from != USER && to.iter().any(|n| n != USER)).then(|| group_of(from)).flatten().map(|g| (project.to_path_buf(), g.to_string()));
-            let held = counted.as_ref().is_some_and(|k| inner.limits.get(k).is_some_and(|l| l.count >= WAKE_LIMIT));
+            let wake_limit = inner.wake_limit;
+            let held = counted.as_ref().is_some_and(|k| inner.limits.get(k).is_some_and(|l| l.count >= wake_limit));
             let file = self.file(project);
             // 처음이면 파일에서 읽는다 (지운 지점도)
             self.room(&mut inner, project)?;
@@ -514,7 +517,7 @@ impl Chats {
                     limit.held.extend(message.to.iter().filter(|n| *n != USER).map(|n| (n.clone(), message.from.clone())));
                 } else {
                     limit.count += 1;
-                    limits_changed = limit.count == WAKE_LIMIT;
+                    limits_changed = limit.count == wake_limit;
                     paused_now = limits_changed.then_some(group);
                 }
             } else if from == USER {
@@ -522,14 +525,14 @@ impl Chats {
                 let groups: Vec<String> = message.to.iter().filter_map(|n| group_of(n)).map(str::to_string).collect();
                 for g in groups {
                     if let Some(limit) = inner.limits.remove(&(project.to_path_buf(), g)) {
-                        limits_changed |= limit.count >= WAKE_LIMIT;
+                        limits_changed |= limit.count >= wake_limit;
                         released.extend(limit.held);
                     }
                 }
             }
             released.sort();
             released.dedup();
-            (message, limits_changed, paused_now, released)
+            (message, limits_changed, paused_now.map(|g| (g, wake_limit)), released)
         };
         let (message, limits_changed, paused_now, released) = message;
         (self.on_message)(project, Change::Message(&message, &released));
@@ -537,7 +540,7 @@ impl Chats {
             (self.on_message)(project, Change::Limits);
         }
         if let Some(group) = paused_now {
-            (self.on_message)(project, Change::Paused(&group));
+            (self.on_message)(project, Change::Paused(&group.0, group.1));
         }
         Ok(message)
     }
@@ -578,12 +581,46 @@ impl Chats {
         Ok(())
     }
 
-    // 자동 깨우기가 멈춘 작업그룹 (WAKE_LIMIT에 닿음)
+    // 자동 깨우기가 멈춘 작업그룹 (제한에 닿음)
     pub fn paused(&self, project: &Path) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
-        let mut groups: Vec<String> = inner.limits.iter().filter(|((p, _), l)| p == project && l.count >= WAKE_LIMIT).map(|((_, g), _)| g.clone()).collect();
+        let mut groups: Vec<String> = inner.limits.iter().filter(|((p, _), l)| p == project && l.count >= inner.wake_limit).map(|((_, g), _)| g.clone()).collect();
         groups.sort();
         groups
+    }
+
+    pub fn wake_limit(&self) -> u32 {
+        self.inner.lock().unwrap().wake_limit
+    }
+
+    // 자동 깨우기 제한을 바꾼다 (협업 제한 limits_set, 앱을 켤 때). 값이 바뀌었으면 사용자가 바꾼 것이므로 모든 프로젝트·작업그룹을
+    // 재개한다: 셈을 지우고 보류된 알림을 프로젝트마다 (받는 사람, 보낸 사람)마다 한 번 알린다. 낮추면 이미 넘은 그룹이 알림 없이
+    // 멈추고, 높이면 보류분이 남은 채 멈춤만 풀리는 일이 없게 (docs/reviews/2026-11-03-limits-ui.md). 셈은 post·paused와 같은 잠금
+    // 안에서 바꾸고, 알림은 잠금 밖에서 (resume과 같다). 바뀌었으면 true
+    pub fn set_wake_limit(&self, n: u32) -> bool {
+        let projects = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.wake_limit == n {
+                return false;
+            }
+            inner.wake_limit = n;
+            let mut projects: HashMap<PathBuf, Vec<(String, String)>> = HashMap::new();
+            for ((project, _), limit) in inner.limits.drain() {
+                projects.entry(project).or_default().extend(limit.held);
+            }
+            projects
+        };
+        let mut projects: Vec<_> = projects.into_iter().collect();
+        projects.sort_by(|a, b| a.0.cmp(&b.0));
+        for (project, mut held) in projects {
+            held.sort();
+            held.dedup();
+            if !held.is_empty() {
+                (self.on_message)(&project, Change::Released(&held));
+            }
+            (self.on_message)(&project, Change::Limits);
+        }
+        true
     }
 
     // 사용자가 그 작업그룹의 자동 깨우기를 재개한다: 다시 세고, 보류된 알림을 받는 사람마다 한 번 알린다
@@ -742,9 +779,10 @@ impl Chats {
             "post_message" => match args.get("text").and_then(Value::as_str).map(|t| self.post(&project, &me, t)) {
                 Some(Ok(m)) if m.held => text(
                     format!(
-                        "Posted #{}, but nobody was notified: automatic notifications for your work group are paused after {WAKE_LIMIT} messages between sessions without the user. \
+                        "Posted #{}, but nobody was notified: automatic notifications for your work group are paused after {} messages between sessions without the user. \
                         The message is saved and the user sees it; do not post it again. Notifications resume when the user writes to your work group or resumes them.",
-                        m.id
+                        m.id,
+                        self.wake_limit()
                     ),
                     false,
                 ),
@@ -841,8 +879,8 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
                 let _ = emitter.emit("chat", json!({ "project": project }));
                 crate::mobile::publish(&emitter, Some(project), "cleared", json!({}));
             }
-            Change::Paused(group) => {
-                crate::notify::send(project, crate::notify::Kind::Paused, &crate::notify::text("paused", &[("group", group), ("n", &WAKE_LIMIT.to_string())]), None);
+            Change::Paused(group, n) => {
+                crate::notify::send(project, crate::notify::Kind::Paused, &crate::notify::text("paused", &[("group", group), ("n", &n.to_string())]), None);
             }
             Change::Attention { name, token, kind, hook } => {
                 let ptys = emitter.state::<crate::pty::Ptys>();
@@ -867,7 +905,11 @@ pub fn install(app: &tauri::AppHandle) -> ChatsState {
         }
     });
     match Chats::start(dir, on_message) {
-        Ok(chats) => ChatsState(Some(chats)),
+        Ok(chats) => {
+            // 저장한 협업 제한 (없으면 기본). 아직 셈이 없어 알림도 없다
+            chats.set_wake_limit(crate::limits::load(app).wake_limit);
+            ChatsState(Some(chats))
+        }
         Err(e) => {
             eprintln!("채팅 서버 실패: {e}");
             ChatsState(None)
@@ -1121,8 +1163,55 @@ mod tests {
     }
 
     // 자동 깨우기 제한: 작업그룹마다 세션이 다른 세션에게 보낸 메시지를 세고 (@all도 1개, 사용자에게만 보낸 것·멘션 없는
-    // 것은 세지 않음) WAKE_LIMIT개 뒤부터는 저장만 하고 깨우지 않는다 (held, to는 그대로). 다른 작업그룹·프로젝트는 따로 센다.
+    // 것은 세지 않음) 제한(DEFAULT_WAKE_LIMIT)개 뒤부터는 저장만 하고 깨우지 않는다 (held, to는 그대로). 다른 작업그룹·프로젝트는 따로 센다.
     // 사용자 메시지가 그 작업그룹에 닿거나 재개하면 다시 세고, 보류된 알림을 (받는 사람, 보낸 사람)마다 한 번 알린다.
+    // 협업 제한으로 자동 깨우기 제한을 바꾼다 (limits.rs limits_set): 값이 바뀔 때만 모든 프로젝트·작업그룹을 재개한다 (셈을 지우고
+    // 보류분을 프로젝트마다 (받는 사람, 보낸 사람)마다 한 번 알림, 프로젝트마다 Limits). 같은 값이면 아무것도 하지 않는다.
+    // 낮추면 그 수에서 멈추고, 멈춤 알림·보낸 세션 안내도 지금 값을 쓴다.
+    #[test]
+    fn set_wake_limit_resumes_everything() {
+        let dir = temp("setlimit");
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = log.clone();
+        let chats = Chats::new(dir.clone(), Box::new(move |project, c| {
+            let entry = match c {
+                Change::Paused(g, n) => format!("paused {g} {n}"),
+                Change::Limits => format!("limits {}", project.display()),
+                Change::Released(r) => format!("released {} {r:?}", project.display()),
+                _ => return,
+            };
+            sink.lock().unwrap().push(entry);
+        }), 0);
+        let taken = || std::mem::take(&mut *log.lock().unwrap());
+        let (p, q) = (Path::new("/p/w"), Path::new("/p/q"));
+        for (project, name) in [(p, "g1/dev"), (p, "g1/rev"), (p, "g2/dev"), (q, "g1/dev"), (q, "g1/rev")] {
+            chats.join(project, name, name);
+        }
+        assert_eq!(chats.wake_limit(), DEFAULT_WAKE_LIMIT);
+        // p의 g1을 멈추고 같은 알림을 두 번 보류, q의 g1은 세기만
+        for _ in 0..DEFAULT_WAKE_LIMIT {
+            chats.post(p, "g1/dev", "@g1/rev x").unwrap();
+        }
+        assert!(chats.post(p, "g1/rev", "@g1/dev a").unwrap().held && chats.post(p, "g1/rev", "@g1/dev b").unwrap().held);
+        chats.post(q, "g1/dev", "@g1/rev x").unwrap();
+        taken();
+        // 같은 값: 아무것도 하지 않음
+        assert!(!chats.set_wake_limit(DEFAULT_WAKE_LIMIT));
+        assert!(taken().is_empty() && chats.paused(p) == ["g1"]);
+        // 바꿈: 모두 재개 (보류분은 겹치지 않게 한 번), 프로젝트마다 Limits
+        assert!(chats.set_wake_limit(3));
+        assert_eq!(taken(), [r#"limits /p/q"#.to_string(), r#"released /p/w [("g1/dev", "g1/rev")]"#.to_string(), "limits /p/w".to_string()]);
+        assert!(chats.paused(p).is_empty() && chats.paused(q).is_empty());
+        // 새 값으로 센다: 3번째에 멈추고 알림에 3, 4번째는 보류. 보낸 세션 안내에도 3
+        for _ in 0..3 {
+            assert!(!chats.post(p, "g2/dev", "@g1/dev y").unwrap().held);
+        }
+        assert_eq!(taken(), ["limits /p/w", "paused g2 3"]);
+        assert!(chats.post(p, "g2/dev", "@g1/dev z").unwrap().held);
+        assert_eq!(chats.wake_limit(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn wake_limit_per_work_group() {
         let dir = temp("limit");
@@ -1131,7 +1220,7 @@ mod tests {
         let chats = Chats::new(dir.clone(), Box::new(move |_, c| {
             let entry = match c {
                 Change::Message(_, []) | Change::Members | Change::Cleared | Change::Seen | Change::Attention { .. } | Change::Session { .. } => return,
-                Change::Paused(g) => format!("paused {g}"),
+                Change::Paused(g, n) => format!("paused {g} {n}"),
                 Change::Message(m, r) => format!("message {} released {r:?}", m.from),
                 Change::Limits => "limits".to_string(),
                 Change::Released(r) => format!("released {r:?}"),
@@ -1148,13 +1237,13 @@ mod tests {
         for _ in 0..4 {
             assert!(!post(p, "g1/dev", "@user done").held && !post(p, "g1/dev", "note").held);
         }
-        for _ in 0..WAKE_LIMIT - 1 {
+        for _ in 0..DEFAULT_WAKE_LIMIT - 1 {
             assert!(!post(p, "g1/dev", "@g1/rev hi").held);
         }
         assert!(chats.paused(p).is_empty());
         assert!(!post(p, "g1/dev", "@all hi").held);
         // 막 멈췄을 때 한 번 알린다 (사용자 알림)
-        assert_eq!((chats.paused(p), taken()), (vec!["g1".to_string()], vec!["limits".to_string(), "paused g1".to_string()]));
+        assert_eq!((chats.paused(p), taken()), (vec!["g1".to_string()], vec!["limits".to_string(), format!("paused g1 {DEFAULT_WAKE_LIMIT}")]));
         let held = post(p, "g1/rev", "@g1/dev again");
         assert!(held.held && held.to == ["g1/dev"]);
         assert!(post(p, "g1/rev", "@g1/dev more").held);
@@ -1172,7 +1261,7 @@ mod tests {
         assert!(chats.wake_items(p, Some(&held), &[]).is_empty(), "보류한 메시지를 깨움");
         assert_eq!(taken(), [r#"message user released [("g1/dev", "g1/rev")]"#, "limits"]);
         assert!(chats.paused(p).is_empty() && !post(p, "g1/rev", "@g1/dev ok").held);
-        for _ in 0..WAKE_LIMIT - 1 {
+        for _ in 0..DEFAULT_WAKE_LIMIT - 1 {
             post(p, "g2/dev", "@g1/dev x");
         }
         assert_eq!(chats.paused(p), ["g2"]);
@@ -1184,7 +1273,7 @@ mod tests {
         assert_eq!(taken(), [r#"released [("g1/rev", "g2/dev")]"#, "limits"]);
         assert!(chats.paused(p).is_empty());
         // 사용자가 그 작업그룹 세션의 터미널에 입력해도 다시 센다 (다른 그룹·프로젝트는 그대로, 셈이 없으면 아무것도 안 함)
-        for _ in 0..WAKE_LIMIT {
+        for _ in 0..DEFAULT_WAKE_LIMIT {
             post(p, "g1/dev", "@g1/rev z");
         }
         assert!(post(p, "g1/dev", "@g1/rev held").held);

@@ -7,6 +7,10 @@ import type { Groups } from "./useGroups";
 export const liveTerms = new Map<HTMLElement, Terminal>();
 
 export const devHooks: {
+  // 첫 Workspace를 열 때의 재리뷰 횟수 (협업 제한을 읽은 뒤에 여는지, App.tsx)
+  limitsAtFirstWorkspace?: number;
+  // 협업 제한 읽기(limits_get)를 늦춘다 (창이 읽기 전에 열리는 경우, src/limits.ts)
+  limitsGetDelay?: number;
   // 확인 대화상자. 네이티브 대화상자는 자체 테스트가 누를 수 없어서 테스트가 바꿔 끼운다.
   confirm: (message: string, labels: { okLabel: string; cancelLabel: string }) => Promise<boolean>;
   // 폴더 선택 대화상자 없이 프로젝트를 추가한다 (개발 빌드에서 App이 채운다).

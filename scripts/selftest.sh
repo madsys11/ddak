@@ -54,6 +54,8 @@ printf '{"projects": [' > "$base/data-corrupt/projects.json"
 # main: 셸 하나 (기존 시나리오가 터미널 하나로 시작한다고 가정)
 # (shiftEnter: 셸에서 ⇧↩ 동작을 보려고 켠다)
 printf '%s' '{"default":"test","shiftEnterFor":{"cat":"\u001b\r"},"groups":[{"id":"test","name":"Test","sessions":[{"name":"shell","shiftEnter":"\u001b\r"}]}]}' > "$base/data-main/groups.json"
+# 협업 제한: 재리뷰 횟수를 기본(2)과 다르게 두고 앱을 켠다 (limitsStartup: 읽은 뒤에 Workspace를 여는지). 대화 제한은 기본 그대로
+printf '%s' '{"wakeLimit":10,"reReviews":3}' > "$base/data-main/limits.json"
 # restart: 세 세션 — 인자 전달(작은따옴표, 공백), 읽기 전용 표시, 없는 명령
 cat > "$base/data-restart/groups.json" <<'JSON'
 {"default":"trio","groups":[{"id":"trio","name":"Trio","sessions":[

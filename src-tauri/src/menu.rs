@@ -41,6 +41,8 @@ const RESET_PANELS: &str = "reset_panels";
 const EDIT_GROUPS: &str = "edit_groups";
 // 앱 메뉴: 모바일 연결 창 (프론트 src/MobileDialog.tsx, src-tauri/src/mobile.rs)
 const MOBILE: &str = "mobile";
+// 앱 메뉴: 협업 제한 창 (프론트 src/LimitsDialog.tsx, src-tauri/src/limits.rs)
+const LIMITS: &str = "limits";
 const THEME_PREFIX: &str = "theme:";
 const LOCALE_PREFIX: &str = "locale:";
 // 앱 메뉴: 알림 소리 (프론트 src/prefs.tsx NOTIFY_SOUNDS, src-tauri/src/notify.rs)
@@ -88,6 +90,7 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         .about_with_text(l("about"), None)
         .separator()
         .item(&MenuItemBuilder::with_id(EDIT_GROUPS, l(EDIT_GROUPS)).build(app)?)
+        .item(&MenuItemBuilder::with_id(LIMITS, l(LIMITS)).build(app)?)
         .item(&MenuItemBuilder::with_id(MOBILE, l(MOBILE)).build(app)?);
     // 알림 소리는 맥 알림 센터의 시스템 소리라 맥에만 (notify.rs)
     if MAC {
@@ -186,7 +189,7 @@ pub fn run<R: Runtime>(app: &AppHandle<R>, id: &str) {
             let _ = window.close();
         }
     } else if TERMINAL_ITEMS.iter().map(|(item, _)| *item).chain(ZOOM_ITEMS.iter().map(|(item, _)| *item)).any(|item| item == id)
-        || [GIT_GRAPH, TOGGLE_SIDEBAR, RESET_PANELS, MOBILE].contains(&id)
+        || [GIT_GRAPH, TOGGLE_SIDEBAR, RESET_PANELS, MOBILE, LIMITS].contains(&id)
         || id.starts_with(THEME_PREFIX)
         || id.starts_with(LOCALE_PREFIX)
         || id.starts_with(SOUND_PREFIX)

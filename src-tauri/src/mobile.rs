@@ -688,7 +688,7 @@ impl Mobile {
                 let prompts = (self.ctx.prompts)(&project);
                 let modes: serde_json::Map<String, Value> = (self.ctx.modes)(&project).into_iter().map(|(n, m)| (n, json!(m))).collect();
                 let open = self.is_open(&project);
-                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "prompts": prompts, "modes": modes, "open": open }))
+                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "wakeLimit": chats.wake_limit(), "prompts": prompts, "modes": modes, "open": open }))
             }
             // 맥에서 연다 (프론트가 열면 set_opened로 알려 와 목록·참여자가 바뀐다)
             (Post, "open") => {

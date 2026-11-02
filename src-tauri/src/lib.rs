@@ -8,6 +8,7 @@ mod conpty;
 mod fs;
 mod git;
 mod groups;
+mod limits;
 mod links;
 mod menu;
 mod mobile;
@@ -162,6 +163,8 @@ pub fn run() {
             chat::chat_paused,
             chat::chat_clear,
             chat::chat_resume,
+            limits::limits_get,
+            limits::limits_set,
             chat::selftest_chat_join,
             chat::selftest_chat_leave,
             chat::selftest_chat_post,

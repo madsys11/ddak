@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ChatPanel } from "./ChatPanel";
 import { MobileDialog } from "./MobileDialog";
+import { LimitsDialog } from "./LimitsDialog";
+import { currentLimits, loadLimits } from "./limits";
 import { Sidebar } from "./Sidebar";
 import { Workspace } from "./Workspace";
 import { StoreBroken, baseName, useProjects } from "./useProjects";
@@ -53,7 +55,13 @@ function App() {
       message: GROUP_ERRORS[groupsError.code] ? t(GROUP_ERRORS[groupsError.code], { detail: groupsError.detail }) : groupsError.detail,
     });
   if (import.meta.env.DEV) devHooks.groups = groups;
-  const groupsReady = groups !== null || groupsError !== null;
+  // 협업 제한(재리뷰 횟수)도 읽은 뒤에 Workspace를 연다: 처음 만드는 세션의 규약에 기본 횟수가 들어가지 않게 (src/limits.ts)
+  const [limitsReady, setLimitsReady] = useState(false);
+  useEffect(() => {
+    loadLimits().then(() => setLimitsReady(true));
+  }, []);
+  const groupsReady = (groups !== null || groupsError !== null) && limitsReady;
+  if (import.meta.env.DEV && groupsReady && devHooks.limitsAtFirstWorkspace === undefined) devHooks.limitsAtFirstWorkspace = currentLimits().reReviews;
   const defaultGroup = groups?.groups.find((g) => g.id === groups.default) ?? null;
   // 한 번이라도 연 프로젝트의 터미널은 다른 프로젝트로 옮겨 가도 살려 둔다 (숨기기만 한다).
   // 앱을 켤 때 모든 프로젝트의 터미널을 띄우지 않도록, 처음 열 때 만든다.
@@ -142,7 +150,20 @@ function App() {
       unlisten.then((f) => f());
     };
   }, []);
-  const mobileDialog = mobileOpen && <MobileDialog onClose={() => setMobileOpen(false)} />;
+  // 앱 메뉴 "협업 제한…" (src-tauri/src/menu.rs, src/LimitsDialog.tsx)
+  const [limitsOpen, setLimitsOpen] = useState(false);
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload }) => payload === "limits" && setLimitsOpen(true));
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+  const mobileDialog = (
+    <>
+      {mobileOpen && <MobileDialog onClose={() => setMobileOpen(false)} />}
+      {limitsOpen && <LimitsDialog groups={groups?.groups ?? null} onClose={() => setLimitsOpen(false)} />}
+    </>
+  );
 
   async function addProject(path: string, activate = true) {
     try {

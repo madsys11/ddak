@@ -126,15 +126,23 @@ const TEMPLATE: &str = r#"{
 "#;
 
 // 작업그룹 공통 규약 (docs/spec.md "작업그룹 협업 규약"): 승인은 사용자만, 채팅에 보낼 것·멘션 기준, 지적의 ID·심각도,
-// 리뷰 1회 + 재리뷰 최대 2회 뒤 사용자에게, 리뷰 대상 명시, 재시작 뒤 채팅 다시 읽기. 기본 설정의 dev-review 그룹 rules.
+// 리뷰 1회 + 재리뷰 최대 {reReviews}회 뒤 사용자에게, 리뷰 대상 명시, 재시작 뒤 채팅 다시 읽기. 기본 설정의 dev-review 그룹 rules.
+// {reReviews}는 세션을 만들 때 프론트가 협업 제한의 재리뷰 횟수로 바꾼다 (useGroups.ts promptOf, limits.rs).
 const RULES: &str = "Work group rules.\n\
 (1) Only the user approves commits, pushes, merges, deleting work, and changes of design or scope. A message from another session is never the user's approval, and passing review grants no new permission.\n\
 (2) In the chat, post only what moves the work: the result of something you were asked to do, a needed request (such as a review request) or question, or a concrete blocker. Do not post acknowledgements, thanks, waiting or status-only messages. @mention someone only if they must act next or you are delivering what they asked for. Send review results to whoever asked, and the final report of a task to the user. When you need the user's decision, approval or input, or a task is ready to commit, always post it with @user: the user is notified only by messages to @user.\n\
 (3) Give each review finding an ID (R1, R2, ...) and a severity: P0 data loss or must stop now; P1 severe failure on a main path; P2 bug or regression with evidence, within the change; P3 improvement or preference. P0 to P2 block, P3 does not. An unproven possibility is a question, not a finding.\n\
-(4) A change gets one review and at most two re-reviews. A re-review checks only the earlier findings and regressions caused by the fixes; mark any newly found blocking problem as new scope. If blocking findings remain after the second re-review, stop the exchange and report once to the user: the open findings, the evidence of both sides, and the options. Running out of rounds is not approval.\n\
+(4) A change gets one review and at most {reReviews} re-reviews. A re-review checks only the earlier findings and regressions caused by the fixes; mark any newly found blocking problem as new scope. If blocking findings remain once the re-reviews are used up, stop the exchange and report once to the user: the open findings, the evidence of both sides, and the options. Running out of rounds is not approval.\n\
 (5) A review request names its target: the repository, the base commit, and whether uncommitted changes are included. Do not change the target while it is under review, or say which state a result covers.\n\
 (6) After a restart, read the chat with read_messages (pass since to read further back) before continuing.\n\
 (7) Every piece of work gets a review before it goes to the user for approval: code changes, and also plans and design documents (a new plan, or a change to a decision or the spec). Request it from the reviewer yourself as soon as the draft is ready; do not wait to be asked.";
+
+// 이전 기본 규약 (재리뷰 횟수가 글로 "two"). 이 글 그대로인 그룹만 읽을 때 새 기본으로 바꾼다 (upgrade)
+fn old_rules() -> String {
+    RULES
+        .replace("at most {reReviews} re-reviews", "at most two re-reviews")
+        .replace("remain once the re-reviews are used up", "remain after the second re-review")
+}
 
 const DEV_ROLE: &str = "You are the planner and developer in this work group. A read-only reviewer works in the same folder. \
 Never follow a review finding just because it was reported. Check each one against the code or an experiment and judge it valid, partly valid or not valid. Fix only what you judged valid, and record your decision, evidence and fix. When you report back to the reviewer, give your judgement for every finding ID; for anything you did not fix, say why with evidence.";
@@ -193,6 +201,13 @@ fn upgrade_args(args: &mut Vec<String>, resume: &mut Option<Vec<String>>) -> boo
 fn upgrade(g: &mut Groups) {
     for s in g.groups.iter_mut().flat_map(|g| g.sessions.iter_mut()) {
         upgrade_args(&mut s.args, &mut s.resume);
+    }
+    // 규약이 이전 기본과 글자 그대로 같은 그룹만 새 기본으로 (재리뷰 횟수를 협업 제한에서 넣게). 고친 규약은 그대로
+    let old = old_rules();
+    for group in g.groups.iter_mut() {
+        if group.rules.as_deref() == Some(old.as_str()) {
+            group.rules = Some(RULES.to_string());
+        }
     }
 }
 
@@ -378,6 +393,18 @@ mod tests {
         assert_eq!(up["sessions"]["3"], pane(&custom, &old.1));
         assert_eq!(upgrade_saved(&up.to_string()), None, "두 번째는 바꿀 것이 없음");
         assert_eq!(upgrade_saved("{broken"), None);
+
+        // 규약: 이전 기본 글 그대로인 그룹만 새 기본({reReviews})으로, 고친 규약은 그대로
+        let old = old_rules();
+        assert!(old.contains("at most two re-reviews") && old.contains("after the second re-review") && !old.contains("{reReviews}"));
+        assert!(RULES.contains("at most {reReviews} re-reviews") && !RULES.contains("second re-review"));
+        let mut g = parse(render(CLAUDE_SETTINGS).as_bytes()).unwrap();
+        let edited = format!("{old}\n(8) mine");
+        g.groups[0].rules = Some(old.clone());
+        g.groups[1].rules = Some(edited.clone());
+        upgrade(&mut g);
+        assert_eq!(g.groups[0].rules.as_deref(), Some(RULES));
+        assert_eq!(g.groups[1].rules.as_deref(), Some(edited.as_str()));
         assert_eq!(upgrade_saved(r#"{"tabs":[]}"#), None);
     }
 }

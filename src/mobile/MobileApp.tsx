@@ -17,8 +17,8 @@ export const PHONE_FILTER_KEY = "ddak.phone.chatFilter";
 const USER = "user";
 // src-tauri/src/chat.rs NO_RECIPIENT: 받을 참여자가 없어 보내지 않음
 const NO_RECIPIENT = "no-recipient";
-// src-tauri/src/chat.rs WAKE_LIMIT
-export const WAKE_LIMIT = 10;
+// 자동 깨우기 제한: 맥이 members로 알려 준다 (협업 제한 src-tauri/src/limits.rs). 모르는 예전 ddak이면 그때의 고정값
+export const DEFAULT_WAKE_LIMIT = 10;
 
 // 참여자 상태 (src-tauri/src/pty.rs statuses): 작업 중이거나 사용자를 기다리는 종류
 const STATUS: Record<string, MessageKey> = {
@@ -733,7 +733,7 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
           </div>
           {members.paused.map((g) => (
             <div key={g} className="paused">
-              <span>{t("chat.paused", { group: g, n: WAKE_LIMIT })}</span>
+              <span>{t("chat.paused", { group: g, n: members.wakeLimit ?? DEFAULT_WAKE_LIMIT })}</span>
               <button onClick={() => api.resume(computer, project, g).then(loadMembers, (e) => setError(errorText(e, computer.name)))}>{t("chat.resume")}</button>
             </div>
           ))}

@@ -23,8 +23,11 @@ import { LOCALES, isLocale } from "./i18n";
 import mobileCss from "./mobile/mobile.css?raw";
 import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
-import { Chat, ComputerList, KeyProblem, ProjectList, Settings as PhoneSettingsView, WAKE_LIMIT as PHONE_WAKE_LIMIT } from "./mobile/MobileApp";
-import { WAKE_LIMIT } from "./ChatPanel";
+import { Chat, ComputerList, KeyProblem, ProjectList, Settings as PhoneSettingsView, DEFAULT_WAKE_LIMIT as PHONE_WAKE_LIMIT } from "./mobile/MobileApp";
+import { DEFAULT_LIMITS, currentLimits, devResetLimits, fillRules, saveLimits } from "./limits";
+import { fixedRuleGroups } from "./LimitsDialog";
+import { promptOf } from "./useGroups";
+import { IS_WINDOWS } from "./platform";
 import { locale as phoneLocale, t as phoneT } from "./mobile/i18n";
 import { DEFAULT_SETTINGS as DEFAULT_PHONE_SETTINGS, parseSettings as parsePhoneSettings, resolveLocale as resolvePhoneLocale, resolveTheme as resolvePhoneTheme, type PhoneSettings } from "./mobile/settings";
 import { API_VERSION as PHONE_API, ApiError as PhoneApiError, api as phoneApi } from "./mobile/api";
@@ -922,6 +925,25 @@ async function testMobileChatFilterUnit() {
     await waitFor("필터 뒤 읽음", () => reads.includes(61), 3000).catch(() => null);
     const zero = !!doc.querySelector("[data-filter-empty]");
     check("폰 채팅 필터: 위쪽을 보다가 필터를 바꾸면 (결과 0개여도) 맨 아래로 가며 최신까지 읽음을 알림", beforeFilter === "60" && zero && reads.at(-1) === 61, `${beforeFilter} → ${reads.join(",")} zero=${zero}`);
+
+    // 협업 제한: 멈춤 안내의 수는 맥이 members로 알려 준 값. 열린 화면이 members를 다시 읽으면 새 값, 예전 ddak(필드 없음)이면 기본
+    let wake: number | undefined = 7;
+    Object.assign(phoneApi, { members: async () => ({ members: ["user", "origin/dev"], waiting: [], paused: ["origin"], open: true, ...(wake === undefined ? {} : { wakeLimit: wake }) }) });
+    root.unmount();
+    root = createRoot(doc.getElementById("root")!);
+    root.render(createElement(Chat, { computer, project: "s" }));
+    const pausedText = () => doc.querySelector(".paused span")?.textContent ?? "";
+    const has = (n: number) => pausedText().includes(`exchanged ${n} messages`) || pausedText().includes(`${n}개`);
+    const seven = await waitFor("멈춤 7", () => has(7), 3000).then(() => true, () => false);
+    const reload = async (n: number | undefined) => {
+      wake = n;
+      dispatchEvent(new CustomEvent("ddak-shown", { detail: { tag: "c/s", kind: "members", id: `m${n}` } }));
+    };
+    await reload(3);
+    const three = await waitFor("멈춤 3", () => has(3), 3000).then(() => true, () => false);
+    await reload(undefined);
+    const fallback = await waitFor("멈춤 기본", () => has(PHONE_WAKE_LIMIT), 3000).then(() => true, () => false);
+    check("폰 채팅: 멈춤 안내의 수는 맥이 알려 준 대화 제한, 다시 읽으면 새 값, 모르면 기본", seven && three && fallback, `${seven} ${three} ${fallback} ${pausedText()}`);
   } finally {
     root.unmount();
     frame.remove();
@@ -3559,6 +3581,121 @@ async function testImeTerminal(term: Terminal) {
   }
 }
 
+// 협업 제한 (src/limits.ts): 규약의 {reReviews}만 횟수로 바뀌고 (역할은 그대로), 횟수를 주지 않으면 지금 값. 규약을 고쳐 자리가 없는
+// 그룹을 찾는다 (창의 알림)
+async function testLimitsUnit() {
+  const group = { id: "g", name: "G", rules: "at most {reReviews} re-reviews; {reReviews} again", sessions: [] };
+  const session = { name: "s", command: "", args: [], resume: null, readOnly: false, shiftEnter: null, role: "role {reReviews}" };
+  const filled = promptOf(group, session, 4);
+  const now = promptOf(group, session);
+  check(
+    "협업 제한: 규약의 {reReviews}만 횟수로, 역할은 그대로, 주지 않으면 지금 값",
+    filled === "role {reReviews}\n\nat most 4 re-reviews; 4 again" && now === `role {reReviews}\n\nat most ${currentLimits().reReviews} re-reviews; ${currentLimits().reReviews} again` && fillRules("x", 1) === "x",
+    `${JSON.stringify(filled)} ${JSON.stringify(now)}`,
+  );
+  const fixed = fixedRuleGroups([group, { ...group, id: "e", name: "Edited", rules: "at most two re-reviews" }, { ...group, id: "n", name: "", rules: null }]);
+  check("협업 제한: 규약을 고쳐 {reReviews}가 없는 그룹만 알림 대상 (규약 없는 그룹은 아님)", fixed.join(",") === "Edited", fixed.join(","));
+}
+
+// 앱을 켤 때 협업 제한을 읽은 뒤에 Workspace를 연다 (처음 만드는 세션이 기본 횟수로 만들어지지 않게). 자체 테스트는 앱 데이터에
+// reReviews 3을 넣고 띄운다 (scripts/selftest.sh main)
+async function testLimitsStartup() {
+  const saved = await invoke<{ wakeLimit: number; reReviews: number }>("limits_get");
+  check(
+    "협업 제한: 저장한 재리뷰 횟수를 읽은 뒤에 첫 Workspace를 엶",
+    saved.reReviews === 3 && devHooks.limitsAtFirstWorkspace === 3 && currentLimits().reReviews === 3,
+    `saved=${JSON.stringify(saved)} first=${devHooks.limitsAtFirstWorkspace} now=${currentLimits().reReviews}`,
+  );
+}
+
+// 앱 메뉴 "협업 제한…" 창 (src/LimitsDialog.tsx): 범위 밖은 저장 못 함, 취소하면 그대로, 저장하면 limits.json과 지금 값이 바뀐다.
+// 대화 제한이 바뀌면 모든 작업그룹을 재개하고 (멈춤이 풀림), 재리뷰 횟수만 바꾸면 셈은 그대로. 메뉴: 맥은 실제 메뉴를 누르고, Windows는
+// clickMenu가 없어 항목이 있는지 본 뒤 메뉴 이벤트로 연다 (창 시험이지 메뉴 연결 시험이 아니다. 리뷰 R1)
+async function testLimitsDialog(root: string) {
+  const before = await invoke<{ wakeLimit: number; reReviews: number }>("limits_get");
+  const menuItems = await invoke<string[]>("selftest_menu");
+  const item = menuItems.find((x) => x.endsWith("/Collaboration Limits…"));
+  const dialog = () => document.querySelector<HTMLFormElement>("[data-dialog=limits]");
+  const open = async () => {
+    if (IS_WINDOWS) await emit("menu", "limits");
+    else await clickMenu("ddak", "Collaboration Limits…");
+    return waitFor("협업 제한 창", dialog, 3000);
+  };
+  const setField = (name: string, value: string) => {
+    const input = dialog()!.querySelector<HTMLInputElement>(`[data-field=${name}]`)!;
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const save = () => dialog()!.querySelector<HTMLButtonElement>("[data-action=limits-save]")!;
+  const paused = () => invoke<string[]>("chat_paused", { project: root });
+  const names = ["lim/a", "lim/b"];
+  const tokens = await Promise.all(names.map((name) => invoke<string>("selftest_chat_join", { project: root, name })));
+  try {
+    check("협업 제한: 앱 메뉴에 항목", !!item, menuItems.filter((x) => x.startsWith("ddak/")).join(", "));
+    // 범위 밖이면 저장 못 함, 취소하면 그대로
+    await open();
+    setField("wake", "0");
+    setField("reReviews", "9");
+    await sleep(50);
+    const blocked = save().disabled && !!dialog()!.querySelector("[data-invalid=wake]") && !!dialog()!.querySelector("[data-invalid=reReviews]");
+    setField("wake", "4");
+    setField("reReviews", "3");
+    dialog()!.querySelector<HTMLButtonElement>("button[type=button]")!.click();
+    await waitFor("취소", () => !dialog(), 2000).catch(() => null);
+    const afterCancel = await invoke<{ wakeLimit: number; reReviews: number }>("limits_get");
+    check("협업 제한: 범위 밖은 저장 못 함, 취소하면 그대로", blocked && JSON.stringify(afterCancel) === JSON.stringify(before), `${blocked} ${JSON.stringify(afterCancel)}`);
+
+    // 지금 제한으로 lim 그룹을 멈춘다
+    for (let i = 0; i < before.wakeLimit; i++) await invoke("selftest_chat_post", { project: root, from: "lim/a", text: "@lim/b x" });
+    const pausedBefore = (await paused()).includes("lim");
+    // 대화 제한을 바꾸면 재개 (멈춤이 풀림), 재리뷰 횟수도 저장
+    await open();
+    setField("wake", "4");
+    setField("reReviews", "3");
+    await sleep(50);
+    save().click();
+    await waitFor("저장", () => !dialog(), 3000).catch(() => null);
+    const saved = await invoke<{ wakeLimit: number; reReviews: number }>("limits_get");
+    await waitFor("지금 값", () => currentLimits().wakeLimit === 4, 2000).catch(() => null);
+    const resumed = !(await paused()).includes("lim");
+    const prompt = promptOf({ id: "g", name: "G", rules: "at most {reReviews} re-reviews", sessions: [] }, { name: "s", command: "", args: [], resume: null, readOnly: false, shiftEnter: null });
+    check(
+      "협업 제한: 저장하면 파일과 지금 값이 바뀌고, 대화 제한이 바뀌면 멈춘 작업그룹을 재개, 새 세션 규약에 새 횟수",
+      pausedBefore && saved.wakeLimit === 4 && saved.reReviews === 3 && resumed && currentLimits().reReviews === 3 && prompt === "at most 3 re-reviews",
+      `${pausedBefore} ${JSON.stringify(saved)} resumed=${resumed} now=${JSON.stringify(currentLimits())} ${prompt}`,
+    );
+
+    // 새 제한(4)으로 다시 멈춘다. 앱을 켠 직후처럼 저장한 값을 아직 읽지 않았을 때 창을 열면 읽을 때까지 고치거나 저장하지 못하고,
+    // 읽으면 저장한 값(4/3)이 들어온다 (리뷰 R1: 기본값 10/2를 보이고 저장해서 대화 제한을 덮었다). 재리뷰 횟수만 바꿔 저장하면
+    // 대화 제한은 4 그대로이고 셈도 그대로 (멈춰 있음)
+    for (let i = 0; i < 4; i++) await invoke("selftest_chat_post", { project: root, from: "lim/a", text: "@lim/b y" });
+    const pausedAt4 = (await paused()).includes("lim");
+    devHooks.limitsGetDelay = 1500;
+    const reloading = devResetLimits();
+    await open();
+    const field = (name: string) => dialog()!.querySelector<HTMLInputElement>(`[data-field=${name}]`)!;
+    const whileLoading = !!dialog()!.querySelector("[data-loading]") && field("wake").disabled && save().disabled;
+    await reloading;
+    devHooks.limitsGetDelay = undefined;
+    await waitFor("읽은 값", () => !dialog()!.querySelector("[data-loading]"), 3000).catch(() => null);
+    const shown = [field("wake").value, field("reReviews").value].join("/");
+    setField("reReviews", "1");
+    await sleep(50);
+    save().click();
+    await waitFor("저장", () => !dialog(), 3000).catch(() => null);
+    const kept = await invoke<{ wakeLimit: number; reReviews: number }>("limits_get");
+    const still = (await paused()).includes("lim");
+    check(
+      "협업 제한: 저장한 값을 읽기 전에 연 창은 고치거나 저장하지 못하고, 읽으면 저장한 값. 재리뷰만 바꾸면 대화 제한·셈은 그대로",
+      pausedAt4 && whileLoading && shown === "4/3" && kept.wakeLimit === 4 && kept.reReviews === 1 && still,
+      `${pausedAt4} loading=${whileLoading} shown=${shown} ${JSON.stringify(kept)} still=${still}`,
+    );
+  } finally {
+    for (const token of tokens) await invoke("selftest_chat_leave", { token });
+    await saveLimits(before).catch(() => null);
+  }
+}
+
 async function testImeUnit() {
   const box = document.createElement("div");
   box.style.cssText = "position:fixed; left:-2000px; top:0; width:400px; height:200px";
@@ -4283,7 +4420,7 @@ async function testAddSession(root: string, first: Terminal) {
   const listener = `{"name":"listener","command":"sh","args":["-c","stty -echo; printf \\"\\\\033[6n\\"; while read l; do echo GOT:$l; printf \\"\\\\033[5n\\\\033[?6n\\"; done"],"readOnly":true}`;
   // chatter: 같은 작업그룹(origin)의 listener를 멘션한 메시지를 MCP로 WAKE_LIMIT + 1개 보낸다 (자동 깨우기 제한). $0은 주소, $1은 요청
   const chatRpc = `{\\"jsonrpc\\":\\"2.0\\",\\"id\\":1,\\"method\\":\\"tools/call\\",\\"params\\":{\\"name\\":\\"post_message\\",\\"arguments\\":{\\"text\\":\\"@origin/listener ping\\"}}}`;
-  const chatter = `{"name":"chatter","command":"sh","args":["-c","for i in ${Array.from({ length: WAKE_LIMIT + 1 }, (_, i) => i + 1).join(" ")}; do curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"; echo; done","{chat}","${chatRpc}"],"readOnly":true}`;
+  const chatter = `{"name":"chatter","command":"sh","args":["-c","for i in ${Array.from({ length: currentLimits().wakeLimit + 1 }, (_, i) => i + 1).join(" ")}; do curl -s -H Content-Type:application/json -d \\"$1\\" \\"$0\\"; echo; done","{chat}","${chatRpc}"],"readOnly":true}`;
   // prompter: 역할(role) + 그룹 규약(rules)이 인자의 {prompt}·{prompt:toml}로 들어가는지 찍는다. 역할 안의 {chat}은 바뀌면 안 된다
   const prompter = `{"name":"prompter","role":"R {chat}","command":"sh","args":["-c","printf \\"A:%s|B:%s|\\" \\"$0\\" \\"$1\\"","{prompt}","v={prompt:toml}"],"readOnly":true}`;
   // attn: claude 권한 확인 훅처럼 자기 {attention} 주소로 사용자를 기다린다는 신호를 보낸다 (알림)
@@ -5370,9 +5507,9 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   choose("pick/chatter");
   const chatterPane = await waitFor("chatter 창", () => visiblePanes().find((p) => p.el.querySelector(".pane-label")?.firstChild?.textContent === "chatter"), 5000);
   const pings = async () => (await stored()).filter((m) => m.from === "origin/chatter") as { held?: boolean }[];
-  await waitAsync("chatter 메시지", async () => (await pings()).length === WAKE_LIMIT + 1, 10000).catch(() => null);
+  await waitAsync("chatter 메시지", async () => (await pings()).length === currentLimits().wakeLimit + 1, 10000).catch(() => null);
   const pinged = await pings();
-  const pausedNote = (await invoke<[[string, string][], number]>("selftest_notifications"))[0].find(([, b]) => b.startsWith(`origin: sessions exchanged ${WAKE_LIMIT} messages`));
+  const pausedNote = (await invoke<[[string, string][], number]>("selftest_notifications"))[0].find(([, b]) => b.startsWith(`origin: sessions exchanged ${currentLimits().wakeLimit} messages`));
   await waitFor("멈춤 표시", pausedBar, 3000).catch(() => null);
   await waitFor("허용된 알림", () => fromChatter() > 0, WAKE_IDLE_MS + 4000).catch(() => null);
   await sleep(WAKE_IDLE_MS + 1000);
@@ -5381,12 +5518,12 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   // 깨우지 않음 표시는 마지막(WAKE_LIMIT + 1번째) 메시지에만
   const heldTag = panel()!.querySelectorAll(".chat-msg [data-held]").length === 1 && !!panel()!.querySelector(".chat-msg:last-of-type [data-held]");
   check(
-    `깨우기 제한: 세션끼리 ${WAKE_LIMIT}개까지 깨우고 그다음은 저장만 (보낸 세션에 알림, 패널에 멈춤·깨우지 않음 표시)`,
-    pinged.length === WAKE_LIMIT + 1 && pinged.filter((m) => m.held).length === 1 && !!pinged[WAKE_LIMIT].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar() && !!pausedNote,
+    `깨우기 제한: 세션끼리 ${currentLimits().wakeLimit}개까지 깨우고 그다음은 저장만 (보낸 세션에 알림, 패널에 멈춤·깨우지 않음 표시)`,
+    pinged.length === currentLimits().wakeLimit + 1 && pinged.filter((m) => m.held).length === 1 && !!pinged[currentLimits().wakeLimit].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar() && !!pausedNote,
     `${pinged.map((m) => !!m.held).join(",")} told=${toldChatter} tag=${heldTag} bar=${!!pausedBar()} wakes=${beforeResume} note=${JSON.stringify(pausedNote)}`,
   );
-  // 멈춤 알림 문구(Rust WAKE_LIMIT)와 데스크톱 패널의 수가 맞는 것은 위 pausedNote가 본다. 폰 화면의 수도 같아야 한다
-  check("깨우기 제한: 폰 화면의 수도 같음", PHONE_WAKE_LIMIT === WAKE_LIMIT, `${PHONE_WAKE_LIMIT} ${WAKE_LIMIT}`);
+  // 멈춤 알림 문구(Rust wake_limit)와 데스크톱 패널의 수가 맞는 것은 위 pausedNote가 본다. 폰 화면의 수도 같아야 한다
+  check("깨우기 제한: 폰이 모를 때 쓰는 기본 수가 데스크톱 기본과 같음", PHONE_WAKE_LIMIT === DEFAULT_LIMITS.wakeLimit, `${PHONE_WAKE_LIMIT} ${DEFAULT_LIMITS.wakeLimit}`);
   pausedBar()?.querySelector("button")?.click();
   const resumed = await waitFor("재개 뒤 깨움", () => fromChatter() === beforeResume + 1, WAKE_IDLE_MS + 4000).then(() => true, () => false);
   await sleep(1000);
@@ -6112,6 +6249,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["projectStart", () => testProjectStart(root)],
     ["tree", testTree],
     ["terminalReady", async () => (first = await openFirstTerminal())],
+    ["limitsStartup", testLimitsStartup],
     ["terminal", () => testTerminal(root, t())],
     ["watch", () => testWatch(root, t())],
     ["treeGit", () => testTreeGit(t())],
@@ -6120,6 +6258,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["rename", () => testRename(root, t())],
     ["trashDrag", () => testTrashAndDrag(root, t())],
     ["imeUnit", testImeUnit],
+    ["limitsUnit", testLimitsUnit],
     ["imeTerminal", () => testImeTerminal(t())],
     ["terminalReplyUnit", testTerminalReplyUnit],
     ["workspaceStateUnit", testWorkspaceStateUnit],
@@ -6172,6 +6311,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["projects", () => testProjects(root, t())],
     ["groupErrorClear", () => testGroupErrorClear(root, t())],
     ["chatFilter", () => testChatFilter(root)],
+    ["limitsDialog", () => testLimitsDialog(root)],
     ["lastExit", () => testLastExit(t())],
   ];
   const order = steps.map(([n]) => n);

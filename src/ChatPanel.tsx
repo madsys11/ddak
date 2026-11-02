@@ -9,14 +9,13 @@ import { modeText, type ModeChange } from "./ModePicker";
 import { Resizer } from "./Resizer";
 import { ChatFilterBar } from "./ChatFilterBar";
 import { applyFilter, groupsIn, loadFilter, saveFilter, type ChatFilter } from "./chatFilter";
+import { useLimits } from "./limits";
 
 // src-tauri/src/chat.rs Message
 // held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음. via: 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
 // prompt: 세션이 띄운 선택 창, answer: 그 답의 기록 (prompts.rs), mode: 권한 모드를 바꾼 기록 (modes.rs)
 export type ChatMessage = { id: number; time: number; from: string; text: string; to: string[]; held?: boolean; via?: string; prompt?: Prompt; answer?: Answer; mode?: ModeChange };
 
-// src-tauri/src/chat.rs WAKE_LIMIT
-export const WAKE_LIMIT = 10;
 
 const USER = "user";
 // 프로젝트마다 기억하는 채팅 필터 (src/chatFilter.ts)
@@ -42,6 +41,8 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   onUnread: (unread: number) => void;
 }) {
   const { t, locale, panels, setPanelWidth } = usePrefs();
+  // 자동 깨우기 제한의 지금 값 (협업 제한, 멈춤 문구)
+  const { wakeLimit } = useLimits();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<string[]>([]);
   // 깨우기를 기다리는 참여자 (터미널 이름 줄의 배지와 같은 상태. 채팅을 보는 동안에도 보이게)
@@ -281,7 +282,7 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
         <div className="chat-paused-list">
           {paused.map((g) => (
             <div key={g} className="chat-paused" data-paused={g}>
-              <span>{t("chat.paused", { group: g, n: WAKE_LIMIT })}</span>
+              <span>{t("chat.paused", { group: g, n: wakeLimit })}</span>
               <button onClick={() => invoke("chat_resume", { project, group: g }).catch((e) => setError(String(e)))}>{t("chat.resume")}</button>
             </div>
           ))}
