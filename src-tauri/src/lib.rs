@@ -181,6 +181,7 @@ pub fn run() {
             pty::pty_foreground,
             pty::pty_awaiting,
             pty::selftest_pty_awaiting,
+            pty::selftest_pty_turn,
             pty::selftest_pty_awaiting_kind,
             pty::pty_working,
             pty::pty_mode,

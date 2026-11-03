@@ -122,7 +122,7 @@
     },
     {
       "files": ["src/PromptChoices.tsx", "src/programStatus.ts", "src-tauri/src/prompts.rs"],
-      "steps": ["programStatusUnit", "promptAnswerUnit", "altLossUnit", "permissionModeUnit", "statusContrastUnit", "programStatus", "addSession", "mobileChatUnit"]
+      "steps": ["programStatusUnit", "promptAnswerUnit", "altLossUnit", "permissionModeUnit", "statusContrastUnit", "programStatus", "screenBusy", "addSession", "mobileChatUnit"]
     },
     {
       "files": ["src/ModePicker.tsx", "src-tauri/src/modes.rs"],

@@ -10,7 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 import { devHooks, liveTerms } from "./devHooks";
 import { draggedPath, droppedFiles, isFileDrag, isPathDrag, noteFileDrag, shellQuote } from "./dragPath";
 import { IME_FIX, fixImeInput, passesImeKey } from "./hangul";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, readMode, watchAltLoss, driveAnswer, driveMode, AnswerRuns, type Dialog, type PermissionMode, type ProgramStatus, type SendKey } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, ScreenTurn, awaitingUser, dialogOnScreen, parseProgramStatus, readBusy, readDialog, readMode, watchAltLoss, driveAnswer, driveMode, AnswerRuns, type Dialog, type PermissionMode, type ProgramStatus, type SendKey } from "./programStatus";
 import { usePrefs } from "./prefs";
 import { THEMES } from "./themes";
 import { TerminalSearch } from "./TerminalSearch";
@@ -84,6 +84,8 @@ type Props = {
 
 // 선택 창의 질문을 화면 위 스크롤 기록에서 이어 읽을 때 최대 줄 수 (Terminal 안의 dialogNow)
 const ABOVE_MAX = 500;
+// 상태(OSC 7501)를 보내지 않는 claude가 화면·훅으로 작업 중일 때의 상태 (src/programStatus.ts ScreenTurn)
+const SCREEN_WORKING: ProgramStatus = { state: "working" };
 
 // xterm이 프로그램의 질의에 스스로 보내는 응답 (xterm 6.0 InputHandler·CoreBrowserTerminal의 triggerDataEvent 전부):
 // 장치 속성 CSI ? … c / CSI > … c, 상태 CSI 0 n, 커서 위치 CSI 행;열 R / CSI ? 행;열 R, 창 정보 CSI 8|4|6;…;… t,
@@ -213,13 +215,28 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
       });
     })();
 
+    // claude 훅의 차례 시작·끝 ({ pty, working, seq }, src-tauri/src/chat.rs /turn/). 깨우기 상태와 같은 순서: 등록이 끝난 뒤 띄우고,
+    // 생성 응답보다 먼저 온 것은 PTY별로 가장 새 것만 모았다가 id를 받으면 반영한다. seq가 더 오래된 것은 버린다.
+    type Turn = { pty: number; working: boolean; seq: number };
+    const earlyTurns = new Map<number, Turn>();
+    let turnSeq = 0;
+    const turnNow = (x: Turn) => {
+      if (x.seq <= turnSeq) return;
+      turnSeq = x.seq;
+      turn.turn(x.working);
+      report();
+    };
+    const turns = listen<Turn>("pty-turn", ({ payload }) => {
+      if (disposed) return;
+      if (id === undefined) {
+        if ((earlyTurns.get(payload.pty)?.seq ?? 0) < payload.seq) earlyTurns.set(payload.pty, payload);
+      } else if (payload.pty === id) turnNow(payload);
+    });
+
     const { command, fallback, vars, fallbackVars, shellAfter, chat } = latest.current;
     const args = { cwd, cols: term.cols, rows: term.rows, onData, command: command ?? null, fallback: fallback ?? null, vars: vars ?? null, fallbackVars: fallbackVars ?? null, shellAfter: shellAfter ?? null, chat: chat ?? null };
     // 등록에 실패해도 터미널은 띄운다 (깨우기 배지만 못 본다)
-    wakes.then(
-      () => undefined,
-      () => undefined,
-    ).then(() => (disposed ? new Promise<number>(() => {}) : invoke<number>("pty_spawn", args))).then(
+    Promise.allSettled([wakes, turns]).then(() => (disposed ? new Promise<number>(() => {}) : invoke<number>("pty_spawn", args))).then(
       async (newId) => {
         // 자체 테스트: 생성 응답이 늦게 오는 순서를 만든다 (그 사이 끝난 명령의 종료를 잃지 않는지)
         if (import.meta.env.DEV && devHooks.spawnDelay) await new Promise((r) => setTimeout(r, devHooks.spawnDelay));
@@ -234,6 +251,8 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
         if (import.meta.env.DEV) el.dataset.pty = String(newId);
         if (early.has(newId)) wake(early.get(newId)!);
         early.clear();
+        if (earlyTurns.has(newId)) turnNow(earlyTurns.get(newId)!);
+        earlyTurns.clear();
       },
       (e) => {
         term.write(`\r\n[${latest.current.t("terminal.spawnFailed", { error: String(e) })}]\r\n`);
@@ -293,6 +312,10 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
     };
     // 앞에서 도는 프로그램이 사용자를 기다리는지 (src/programStatus.ts). 기다리는 동안 Rust는 깨우기를 미룬다 (pty_awaiting).
     let status: ProgramStatus | undefined;
+    // 상태를 보내지 않는 claude (Windows): 화면과 훅으로 본 작업 중. 프로그램이 상태를 보내는 동안(status가 있음, 지움까지)은
+    // 상태만 쓴다 (docs/reviews/2026-11-04-windows-working.md)
+    const turn = new ScreenTurn();
+    const current = () => status ?? (turn.working() ? SCREEN_WORKING : undefined);
     let dialogSince: number | undefined;
     let dialogCap: ReturnType<typeof setTimeout> | undefined;
     let awaiting = false;
@@ -316,7 +339,8 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
     // 무엇을 기다리는지 (Rust가 알림 문구를 고른다): OSC 7501 blocked의 종류, 종류가 없으면 blocked, 화면의 선택 창이면 dialog
     const awaitKind = () => (status?.state === "blocked" ? (status.kind ?? "blocked") : "dialog");
     const report = () => {
-      const next = awaitingUser(status, dialogSince, Date.now());
+      const shownStatus = current();
+      const next = awaitingUser(shownStatus, dialogSince, Date.now());
       const kind = awaitKind();
       // 기다리는 동안 종류만 바뀌어도 보낸다 (폰의 참여자 상태, 리뷰 R4). Rust는 이어지는 기다림을 다시 알리지 않는다
       if (next !== awaiting || (next && kind !== awaitingKind)) {
@@ -324,14 +348,14 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
         awaitingKind = kind;
         sendStatus("pty_awaiting", { awaiting: next, kind });
       }
-      const nowWorking = status?.state === "working" && !next;
+      const nowWorking = shownStatus?.state === "working" && !next;
       if (nowWorking !== working) {
         working = nowWorking;
         sendStatus("pty_working", { working });
       }
-      if (shown.status !== status || shown.awaiting !== next) {
-        shown = { status, awaiting: next };
-        latest.current.onStatus?.(status, next);
+      if (shown.status !== shownStatus || shown.awaiting !== next) {
+        shown = { status: shownStatus, awaiting: next };
+        latest.current.onStatus?.(shownStatus, next);
       }
     };
     // OSC 7501: 물음에는 다른 입력과 같은 차례로 답하고 (사용자 입력 아님. claude는 물음 바로 뒤에 장치 속성을 물어서, 그 답보다
@@ -342,6 +366,8 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
         sending = sending.then(() => idReady).then((target) => invoke("pty_write", { id: target, data: PROGRAM_STATUS_REPLY, user: false })).catch(() => {});
       } else if (parsed) {
         status = parsed === "clear" ? undefined : parsed;
+        // 상태를 거둔 프로그램의 훅 차례도 끝난 것으로 (Stop 없이 끝났을 때 이전 차례가 다시 보이지 않게, 코드 리뷰 R1)
+        if (parsed === "clear") turn.reset();
         report();
       }
       return true;
@@ -470,6 +496,7 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
         dialogSince = Date.now();
         dialogCap = setTimeout(report, DIALOG_CAP_MS);
       }
+      turn.screen(readBusy(lines));
       report();
       reportDialog(lines);
       reportMode(lines);
@@ -497,6 +524,7 @@ export function Terminal({ cwd, command, fallback, vars, fallbackVars, shiftEnte
     return () => {
       disposed = true;
       wakes.then((f) => f(), () => {});
+      turns.then((f) => f(), () => {});
       clicks.then((f) => f(), () => {});
       answers.then((f) => f(), () => {});
       modeSets.then((f) => f(), () => {});

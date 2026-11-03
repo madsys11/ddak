@@ -273,6 +273,56 @@ export function readMode(lines: readonly string[]): PermissionMode | null {
   return null;
 }
 
+// claude가 작업 중인지 화면에서 (docs/reviews/2026-11-04-windows-working.md). Windows ConPTY는 OSC 7501 물음의 답을 입력에서
+// 버려서 claude가 상태를 보내지 않는다. claude 2.1.316은 작업하는 동안 입력란 아래 footer(모드 줄)의 `·`로 나뉜 항목에
+// `esc to interrupt`를 넣는다 (`⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt`, 뒤에 `· ← for agents` 등이 더 붙기도
+// 한다). 끝나거나 Esc로 중단하면 빠진다. 작업 중에 입력란에 글을 쓰는 동안에도 빠진다 (한계: 그동안은 작업 중으로 보이지 않는다.
+// Esc 중단 뒤에도 입력란에 질문이 돌아와 화면으로 둘을 가를 수 없다).
+// 일반 출력의 같은 글을 작업 중으로 보지 않게 (리뷰 R1) 화면 맨 아래가 claude 입력란 모양일 때만: 빈 줄을 뺀 맨 아래에서
+// footer(마지막 줄) ← 가로줄 ← 입력 줄들(첫 줄이 `❯`) ← 가로줄.
+const INPUT_RULE = /^\s*─{20,}\s*$/;
+const INPUT_START = /^\s*❯/;
+const busyFooter = (line: string) => line.split("·").some((x) => x.trim() === "esc to interrupt");
+// 입력란의 입력 줄 최대 (넘으면 입력란으로 보지 않는다)
+export const BUSY_INPUT_MAX = 20;
+export function readBusy(lines: readonly string[]): boolean {
+  const l = lines.filter((x) => x.trim() !== "");
+  const n = l.length;
+  if (n < 4 || !busyFooter(l[n - 1]) || !INPUT_RULE.test(l[n - 2])) return false;
+  for (let i = n - 3; i >= Math.max(0, n - 3 - BUSY_INPUT_MAX); i--) {
+    if (INPUT_RULE.test(l[i])) return i < n - 3 && INPUT_START.test(l[i + 1]);
+  }
+  return false;
+}
+
+// 상태(OSC 7501)를 보내지 않는 claude의 작업 중: 화면(readBusy)과 claude 훅의 차례 시작·끝(/turn/, Terminal.tsx "pty-turn")을
+// 합친다. 이번 차례(훅의 시작마다 새로)에 화면에서 작업 중을 봤으면 화면을 따르고 (끝남·Esc 중단에 바로 풀림), 못 봤으면 훅을
+// 따른다 (화면 문구가 바뀌어 읽지 못하는 경우의 보완). 훅이 없으면 (고친 설정) 화면만.
+export class ScreenTurn {
+  private busy = false;
+  private hook = false;
+  private seen = false;
+  // 화면을 읽음
+  screen(busy: boolean) {
+    this.busy = busy;
+    if (busy && this.hook) this.seen = true;
+  }
+  // 훅의 차례 시작(true)·끝(false)
+  turn(working: boolean) {
+    if (working) this.seen = this.busy;
+    this.hook = working;
+  }
+  working() {
+    return this.busy || (this.hook && !this.seen);
+  }
+  // 프로그램이 상태를 거둠 (OSC 지움, 끝남): 그 프로그램의 차례는 끝났다. Stop 없이 끝났어도 이전 차례가 다시 나타나지 않게
+  // 훅 쪽을 지운다 (코드 리뷰 R1). 화면은 다음 읽기가 정한다
+  reset() {
+    this.hook = false;
+    this.seen = false;
+  }
+}
+
 // Shift+Tab (claude가 모드를 다음으로 돌린다)
 export const MODE_KEY = "\x1b[Z";
 // claude 2.1.312에서 Shift+Tab이 도는 순서. bypass를 켤 수 있는 세션은 Rust가 받지 않는다 (modes.rs bypass_possible)

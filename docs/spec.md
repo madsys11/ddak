@@ -274,8 +274,9 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   (작업그룹 끝내기가 기다린다).
 - 작업 폴더가 없으면 띄우지 않는다 (portable-pty는 없는 폴더면 홈 폴더에서 띄운다).
 - WebGL 렌더러. 컨텍스트를 잃으면 DOM 렌더러로 바꾼다 (터미널 20개 남짓에서 실제로 잃는다).
-- 잠자기 막기 (`pty.rs` keep_awake): 앞에서 도는 프로그램이 작업 중(OSC 7501 `working`이고 사용자를 기다리지 않음 — 화면의
-  선택 창도 기다림. 프론트가 `pty_working`으로 알림)인
+- 잠자기 막기 (`pty.rs` keep_awake): 앞에서 도는 프로그램이 작업 중(OSC 7501 `working`, 상태를 보내지 않는 claude는 화면·훅으로
+  본 작업 중(아래 "작업 중 (상태를 보내지 않는 claude)")이고 사용자를 기다리지 않음 — 화면의 선택 창도 기다림. 프론트가
+  `pty_working`으로 알림)인
   터미널이 하나라도 있으면 `caffeinate -i -w <ddak pid>`를 띄워 둔다 (시스템이 저절로 잠들지 않음. 화면은 꺼질 수 있다).
   없어지면 (작업이 끝나거나 기다림·대기로 바뀌거나 터미널이 닫히면) 끝낸다. ddak이 끝나면 caffeinate도 끝난다 (-w).
   0.25초마다 맞춘다 (깨우기 확인과 같은 주기). 누가 caffeinate를 끝냈으면 다시 띄운다.
@@ -479,13 +480,15 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   `{session}` 그 창의 대화 ID (위 "복원"), `{chat}` 그 창의 채팅방 MCP 주소, `{attention}` 그 창이 사용자를 기다린다고 알리는 주소
   (아래 "알림"), `{sessionStart}` 그 창의 CLI가 대화를 시작·전환할 때 새 대화 ID를 알리는 주소
   (`http://127.0.0.1:<포트>/session/<토큰>`, 채팅 서버. 본문은 claude 훅 입력 JSON, `session_id`가 UUID가 아니면 400, 맞으면 204.
-  창 키와 새 ID를 프론트에 `session-id` 이벤트로 알린다), `{prompt}` 역할(`role`) + 빈 줄 + 그 세션이 든 그룹의 규약 (`rules`). `{prompt:toml}`처럼 `:toml`을 붙이면 TOML 문자열 리터럴(따옴표 포함, codex `-c`의 값)로 넣는다.
+  창 키와 새 ID를 프론트에 `session-id` 이벤트로 알린다), `{turn}` 그 창의 CLI가 차례를 시작·끝낼 때 알리는 주소
+  (`/turn/<토큰>`, 본문은 claude 훅 입력 JSON. `hook_event_name`이 `UserPromptSubmit`이면 시작, `Stop`·`StopFailure`면 끝, 그
+  밖은 400. 그 토큰의 터미널에 `pty-turn` 이벤트 `{ pty, working, seq }`로 알린다), `{prompt}` 역할(`role`) + 빈 줄 + 그 세션이 든 그룹의 규약 (`rules`). `{prompt:toml}`처럼 `:toml`을 붙이면 TOML 문자열 리터럴(따옴표 포함, codex `-c`의 값)로 넣는다.
   모르는 이름과 그 밖의 중괄호(JSON 등)는 그대로 둔다.
   - 프롬프트는 세션을 만들 때 정해 그 창의 세션과 함께 저장한다 (`PaneSession.prompt`). 처음·복원·fallback에 같은 값을 쓰고,
     설정을 고쳐도 이미 연 창은 그대로다. 다른 그룹의 세션을 지금 탭에 더하면 그 세션이 든 그룹의 규약을 쓴다.
   - 프론트는 자리표시자를 바꾸지 않고 값(`vars`: session, prompt)을 `pty_spawn`에 넘긴다 (`workspaceState.ts` commandOf).
-- 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt {prompt}`, `--settings`의 권한 확인 훅과
-  대화 ID 훅, 복원은 `--resume {session}`)
+- 기본 설정: `dev-review` = claude(`--session-id {session}`, `--append-system-prompt {prompt}`, `--settings`의 권한 확인 훅,
+  대화 ID 훅과 차례 훅, 복원은 `--resume {session}`)
   + codex(`-s read-only`, `-c developer_instructions={prompt:toml}`, `-c check_for_update_on_startup=false`, readOnly, 복원은
   `resume --last`와 같은 옵션), `shell` = 셸 하나. codex 업데이트 안내를 끄는 이유: 안내에서 업데이트하면 codex가 끝나고, 그
   창에서 손으로 다시 띄우면 ddak이 준 인자(채팅 주소 등)가 빠진다. 업데이트는 ddak 밖에서 (`brew upgrade --cask codex`).
@@ -494,8 +497,11 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
   이미 있는 `groups.json`과 저장된 탭은 바뀌지 않는다 (저장된 탭은 저장할 때의 인자와 프롬프트로 복원된다).
   - 대화 ID 훅: `SessionStart`(matcher 없음, 모든 source)가 훅 입력을 `curl --data-binary @- {sessionStart}`로 보낸다. async가
     아니다 (연달아 온 두 알림의 순서가 바뀌지 않게. 로컬 요청이라 짧고, ddak이 없으면 연결 거부로 바로 끝난다).
-- 이전 기본 인자 바꾸기 (`groups.rs` upgrade): 대화 ID 훅이 없던 이전 기본 claude 인자(args·resume 한 쌍)와 **정확히 같은**
-  세션만 새 기본 인자로 바꾼다. 사용자가 고친 것은 그대로다.
+  - 차례 훅: `UserPromptSubmit`·`Stop`·`StopFailure`가 훅 입력을 `curl --data-binary @- {turn}`로 보낸다 (표준 출력은 버린다:
+    UserPromptSubmit 훅의 출력은 claude가 대화에 넣는다). 같은 이유로 async가 아니다. Esc로 중단하면 `Stop`이 오지 않는다
+    (claude 2.1.316, Windows에서 확인).
+- 이전 기본 인자 바꾸기 (`groups.rs` upgrade): 이전 기본 claude 인자(args·resume 한 쌍) — 권한 확인 훅만 있던 것, 대화 ID 훅까지
+  있던 것 — 중 하나와 **정확히 같은** 세션만 새 기본 인자로 바꾼다. 사용자가 고친 것은 그대로다 (훅이 없어 화면 읽기만 쓴다).
   - `groups.json`은 읽을 때 메모리에서만 바꾸고 파일은 다시 쓰지 않는다 (읽기·저장이 겹치거나 백업·교체가 실패할 일이 없게).
     그래서 파일에는 이전 인자가 보인다. 그 세션 인자를 고칠 때는 새 기본 인자(훅 포함)를 넣는다 (아니면 정확히 같지 않게
     되어 훅이 빠진다).
@@ -797,6 +803,19 @@ ddak 앱
     - 화면 아래쪽(빈 줄을 뺀 14줄)의 선택 창: `(enter|esc) to (select|confirm|cancel|continue|exit)`이나, 커서가 놓인 번호
       선택지(`❯`·`›` + `1.`) 바로 위나 아래의 다른 번호 선택지. 상태를 알리지 않는 창(claude 폴더 신뢰 등)을 잡는다.
       출력 뒤 0.1초 모아서 본다. 같은 글이 대화에 남아 계속 막히지 않게 10분 뒤에는 풀린다.
+  - 작업 중 (상태를 보내지 않는 claude, `programStatus.ts` readBusy·ScreenTurn, `docs/reviews/2026-11-04-windows-working.md`):
+    Windows ConPTY는 입력에서 OSC를 버려 `ESC]7501;?`의 답이 claude에 닿지 않고, 답을 못 받은 claude는 상태를 보내지 않는다.
+    그래서 프로그램이 상태를 보내지 않는 동안(상태를 받았으면 지움 `state=clear`까지는 상태만 쓴다) 화면과 차례 훅을 합친다.
+    지움을 받으면 그 프로그램의 훅 차례도 끝난 것으로 지운다 (Stop 없이 끝났을 때 이전 차례가 셸에 남지 않게).
+    - 화면: 빈 줄을 뺀 맨 아래가 claude 입력란(가로줄 `─` 20자 이상, `❯`로 시작하는 입력 줄 1~20줄, 가로줄)과 그 아래 footer이고,
+      footer를 `·`로 나눈 항목 중 하나가 `esc to interrupt`이면 작업 중. 일반 출력의 같은 글은 이 모양이 아니라 아니다.
+      출력 뒤 0.1초 모아서 본다 (선택 창과 같이).
+    - 합치기: 이번 차례(훅의 시작마다 새로)에 화면에서 작업 중을 봤으면 화면을 따르고 (끝남·Esc 중단에 바로 풀림), 못 봤으면 훅을
+      따른다 (화면 문구가 바뀐 경우). 훅이 없으면 화면만.
+    - 훅의 `pty-turn`은 `chat-wake`처럼 등록이 끝난 뒤 띄우고, 생성 응답 전에 온 것은 모았다가 반영하고, 더 오래된 seq는 버린다.
+    - 결과는 OSC `working`과 같게 이름표 "작업 중", `pty_working`(잠자기 막기·폰 참여자 칩)으로.
+    - 한계: 작업 중에 입력란에 글을 쓰는 동안 claude가 `esc to interrupt`를 감춰 작업 중으로 보이지 않는다 (Esc 중단 뒤에도
+      입력란에 질문이 돌아와 화면으로 가를 수 없다). 화면 문구가 바뀐 채 Esc로 중단하면 다음 차례까지 작업 중으로 남는다.
   - 세션 창 이름표에 프로그램 상태를 보인다: 기다리면 무엇을(권한 확인·답변·로그인·선택 대기), 아니면 작업 중·
     완료·오류. 대기(idle)는 보이지 않는다. 마우스를 올리면 프로그램이 보낸 한 줄(`msg`).
     테두리 칩(깨우기 대기·준비 배지)과 섞이지 않게 상태는 색 점 + 글자다: 작업 중(`--status-working`, 점이 깜빡임), 완료

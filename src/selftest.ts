@@ -10,7 +10,7 @@ import type { Groups } from "./useGroups";
 import { isTerminalReply } from "./Terminal";
 import { IME_FIX, fixImeInput } from "./hangul";
 import { projectForClick } from "./notifyClick";
-import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, awaitingUser, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, watchAltLoss, readMode, driveMode, type Dialog, type PermissionMode } from "./programStatus";
+import { DIALOG_CAP_MS, PROGRAM_STATUS_REPLY, BUSY_INPUT_MAX, ScreenTurn, awaitingUser, readBusy, dialogOnScreen, parseProgramStatus, readDialog, driveAnswer, sameDialog, AnswerRuns, watchAltLoss, readMode, driveMode, type Dialog, type PermissionMode } from "./programStatus";
 import { docPathOf, findLinks, linkProvider } from "./terminalLinks";
 import { renderMarkdown, resolveHref } from "./docs";
 import { baseName as platformBaseName, dirName as platformDirName, fileUrlPath, keyLabels, normalizePath, relativeTo, trimTrailingSep } from "./platform";
@@ -2857,6 +2857,56 @@ function testProgramStatusUnit() {
     awaitingUser({ state: "blocked" }, undefined, now) && !awaitingUser({ state: "working" }, undefined, now) &&
       awaitingUser(undefined, now - 1000, now) && !awaitingUser(undefined, now - DIALOG_CAP_MS, now),
   );
+  // 화면의 claude 작업 중 (readBusy, docs/reviews/2026-11-04-windows-working.md): Windows claude 2.1.316 실제 화면의 맨 아래
+  const rule = "─".repeat(120);
+  const box = (input: string[], footer: string) => ["✻ Baked for 18s · done 7:35 AM", "", rule, ...input, rule, footer, "", ""];
+  const tail = " · esc to interrupt";
+  const autoLine = "  ⏵⏵ auto mode on (shift+tab to cycle)";
+  const busy: [string, string[]][] = [
+    ["자동 모드 작업 중", box(["❯ "], autoLine + tail)],
+    ["입력란에 쓰는 중", box(["❯ next question"], autoLine + tail)],
+    ["여러 줄 입력", box(["❯ line one", "  line two", "", "  line three"], autoLine + tail)],
+    ["모드 없는 기본 모드", box(["❯ "], "  esc to interrupt")],
+    ["수동 모드", box(["❯ "], "  ⏸ manual mode on · esc to interrupt")],
+    ["뒤에 다른 안내", box(["❯ "], autoLine + tail + " · ← for agents")],
+  ];
+  const idle: [string, string[]][] = [
+    ["끝남", box(["❯ "], autoLine)],
+    ["끝남 (다른 안내)", box(["❯ "], autoLine + " · ← for agents")],
+    ["수동 모드 끝남", box(["❯ "], "  ⏸ manual mode on · ? for shortcuts")],
+    ["Esc로 중단한 뒤", box(["❯ Write a 60 line poem about rivers. No tools."], autoLine)],
+    // 리뷰 R1: 일반 출력의 같은 글
+    ["셸이 문구를 출력하고 프롬프트로", ["$ printf 'esc to interrupt\\n'", "esc to interrupt", "$ "]],
+    ["로그 마지막 줄", ["[12:00] tool output", "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt"]],
+    ["입력란 모양 아래에 다른 줄", [...box(["❯ "], autoLine + tail), "$ "]],
+    ["footer 위가 가로줄이 아님", ["❯ ", "text", autoLine + tail]],
+    ["입력 줄이 ❯로 시작하지 않음", box(["plain text"], autoLine + tail)],
+    ["입력 줄이 너무 많음", box(["❯ a", ...Array.from({ length: BUSY_INPUT_MAX }, (_, i) => `  ${i}`)], autoLine + tail)],
+    ["문구가 줄 끝이 아님", box(["❯ "], autoLine + " · esc to interrupt now")],
+    ["짧은 가로줄", ["──────", "❯ ", "──────", autoLine + tail]],
+  ];
+  const wrongBusy = busy.filter(([, l]) => !readBusy(l)).map(([n]) => n);
+  const wrongIdle = idle.filter(([, l]) => readBusy(l)).map(([n]) => n);
+  check("화면 작업 중: claude 입력란 아래 footer가 esc to interrupt로 끝날 때만 (일반 출력의 같은 글은 아님)", !wrongBusy.length && !wrongIdle.length, [...wrongBusy, ...wrongIdle].join(" | "));
+  // 화면과 훅 합치기 (ScreenTurn): 이번 차례에 화면에서 작업 중을 봤으면 화면을, 못 봤으면 훅을 따른다
+  // C: 프로그램이 상태를 거둠 (OSC 지움)
+  type Op = "b" | "i" | "S" | "E" | "C";
+  const steps = (ops: Op[]) => {
+    const t = new ScreenTurn();
+    return ops.map((op) => (op === "b" ? t.screen(true) : op === "i" ? t.screen(false) : op === "C" ? t.reset() : t.turn(op === "S"), t.working() ? "W" : "-")).join("");
+  };
+  const merges: [string, Op[], string][] = [
+    ["화면만 (훅 없음)", ["b", "i", "b", "i"], "W-W-"],
+    ["훅만 (화면을 읽지 못함)", ["S", "i", "E", "S", "E"], "WW-W-"],
+    ["훅 시작 → 화면 봄 → 화면 빠짐 (Esc 중단) = 풀림, 훅 끝은 그대로", ["S", "b", "i", "E"], "WW--"],
+    ["화면 끝이 훅 끝보다 늦음", ["S", "b", "E", "i"], "WWW-"],
+    ["훅 시작 때 이미 화면 작업 중", ["b", "S", "i"], "WW-"],
+    ["다음 차례는 새로 셈", ["S", "b", "i", "E", "S", "i"], "WW--WW"],
+    // 코드 리뷰 R1: Stop 없이 상태를 거두면 (끝남) 이전 차례가 남지 않고, 다음 차례는 다시
+    ["Stop 없이 지움", ["S", "i", "C", "i", "S", "E"], "WW--W-"],
+  ];
+  const badMerge = merges.filter(([, ops, want]) => steps(ops) !== want).map(([n, ops]) => `${n}: ${steps(ops)}`);
+  check("화면 작업 중: 화면과 훅 합치기 (본 차례는 화면, 못 본 차례는 훅)", !badMerge.length, badMerge.join(" | "));
 }
 
 // 앞에서 도는 프로그램의 상태 (src/programStatus.ts, Terminal.tsx): 물음에 답하고, 보고와 화면의 선택 창으로 이름표의 상태와
@@ -2952,6 +3002,135 @@ async function testProgramStatus(root: string, term: Terminal) {
   const resolved = await invoke<string>("real_path", { path: link });
   await run(term, `rm -f "${link}"`);
   check("알림 누르기: 링크 경로의 실제 경로", resolved === root && (await invoke<string>("real_path", { path: "/no/such/ddak" })) === "/no/such/ddak", resolved);
+}
+
+// 상태(OSC 7501)를 보내지 않는 claude의 작업 중 (Windows, docs/reviews/2026-11-04-windows-working.md): 화면의 입력란·footer와
+// claude 훅의 차례 시작·끝(pty-turn)을 합쳐 이름표 "작업 중"과 pty_working(잠자기 막기·폰)으로. frame.py가 claude 화면 맨 아래를
+// 흉내 낸다 (b: 작업 중 footer, i: 끝난 footer, o: OSC idle 보고, c: OSC 지움, q: 끝)
+async function testScreenBusy(root: string, term: Terminal) {
+  const pane = visiblePanes().find((p) => p.term === term)!;
+  const ptyId = Number(pane.el.querySelector<HTMLElement>(".terminal")?.dataset.pty);
+  const badge = () => pane.el.querySelector<HTMLElement>(".pane-label .pane-badge.status")?.textContent ?? null;
+  const awake = () => invoke<boolean>("selftest_keep_awake");
+  // 이름표와 잠자기 막기가 함께 그 상태가 되기를 기다린다
+  const becomes = (working: boolean) =>
+    waitAsync(`작업 중 ${working}`, async () => badge() === (working ? "working" : null) && (await awake()) === working, 3000).then(() => true, () => false);
+  const turnHook = (working: boolean, id: number | null = ptyId) => invoke<number | null>("selftest_pty_turn", { id, working });
+  // 셸 작은따옴표 안에 넣으므로 작은따옴표를 쓰지 않는다
+  const script = String.raw`import sys
+sys.stdout.reconfigure(encoding="utf-8")
+R = "\u2500" * 60
+def f(t=""):
+    sys.stdout.write("\x1b[2J\x1b[H\u273b Baked for 1s\r\n\r\n" + R + "\r\n\u276f \r\n" + R + "\r\n  \u23f5\u23f5 auto mode on (shift+tab to cycle)" + t)
+    sys.stdout.flush()
+def osc(state):
+    sys.stdout.write("\x1b]7501;state=" + state + "\x1b\\")
+    sys.stdout.flush()
+f()
+while True:
+    c = sys.stdin.readline().strip()
+    if c == "b": f(" \u00b7 esc to interrupt")
+    elif c == "i": f()
+    elif c == "o": osc("idle")
+    elif c == "c": osc("clear")
+    elif c == "q": break`.split("\n");
+  await run(term, `: > "${root}/frame.py"`);
+  for (const line of script) await run(term, `printf '%s\\n' '${line}' >> "${root}/frame.py"`);
+  // 리뷰 R1: 셸이 같은 문구를 출력하고 프롬프트로 돌아오면 작업 중이 아니다
+  // 앞 단계(programStatus)가 보낸 상태를 지운다 (상태를 보내는 동안은 화면을 보지 않는다)
+  await run(term, String.raw`printf '\033]7501;state=clear\033\\'`);
+  // 출력이 화면 마지막 줄에 남아 있는 동안 (프로그램이 아직 돎)과 프롬프트로 돌아온 뒤 둘 다 본다
+  const shown = run(term, String.raw`printf 'tool log\n  auto mode on (shift+tab to cycle) \302\267 esc to interrupt\n'; sleep 2`);
+  await waitFor("문구 출력", () => screen(term).some((l) => l.endsWith("esc to interrupt")), 3000).catch(() => null);
+  await sleep(600);
+  const whileShown = badge() === null && !(await awake());
+  await shown;
+  await sleep(600);
+  const shellText = whileShown && badge() === null && !(await awake());
+  term.input(`python3 "${root}/frame.py"\r`);
+  await waitFor("입력란 화면", () => screen(term).some((l) => l.includes("auto mode on")), 5000);
+  await sleep(1000);
+  const key = (k: string) => term.input(`${k}\r`);
+  // 화면만 (훅 없음)
+  key("b");
+  const screenOn = await becomes(true);
+  key("i");
+  const screenOff = await becomes(false);
+  // 훅 시작: 화면에서 아직 못 봤으면 작업 중 (화면 문구가 바뀌어 읽지 못하는 경우)
+  await turnHook(true);
+  const hookOn = await becomes(true);
+  // 화면에서 본 뒤 화면이 빠지면 (Esc 중단) 훅이 시작 상태여도 풀린다
+  key("b");
+  await sleep(500);
+  key("i");
+  const escOff = await becomes(false);
+  await turnHook(false);
+  await sleep(300);
+  const stillOff = badge() === null && !(await awake());
+  // 다음 차례는 새로 센다: 훅 시작만으로 다시 작업 중, 훅 끝에 풀림
+  await turnHook(true);
+  const nextOn = await becomes(true);
+  await turnHook(false);
+  const hookOff = await becomes(false);
+  // 프로그램이 상태를 보내면 (맥 claude) 상태만: 화면이 작업 중이어도 idle. 지움 뒤에는 다시 화면
+  key("o");
+  await sleep(300);
+  key("b");
+  await sleep(600);
+  const oscWins = badge() === null && !(await awake());
+  key("c");
+  await sleep(300);
+  key("b");
+  const afterClear = await becomes(true);
+  // 코드 리뷰 R1: 훅 시작 → 화면은 작업 중이 아님 → 상태 보고 → Stop 없이 지움(끝남)이면 작업 중이 아니고, 다음 차례 훅은 다시 된다
+  key("i");
+  await becomes(false);
+  await turnHook(true);
+  await becomes(true);
+  key("o");
+  const oscIdle = await becomes(false);
+  key("c");
+  await sleep(600);
+  const clearedOff = badge() === null && !(await awake());
+  await turnHook(true);
+  const againOn = await becomes(true);
+  await turnHook(false);
+  const againOff = await becomes(false);
+  check("화면 작업 중: Stop 없이 상태를 거두면 이전 훅 차례가 남지 않고 다음 차례는 다시 (코드 리뷰 R1)", oscIdle && clearedOff && againOn && againOff, JSON.stringify({ oscIdle, clearedOff, againOn, againOff }));
+  // 화면이 작업 중인 채 프로그램이 끝나면 셸 프롬프트가 마지막 줄이라 풀린다 (코드 재리뷰 R2: 작업 중에서 시작)
+  key("b");
+  const beforeQuit = await becomes(true);
+  key("q");
+  const quitOff = await becomes(false);
+  check(
+    "화면 작업 중: 입력란 footer로 작업 중·끝, 셸 출력의 같은 글은 아님 (리뷰 R1)",
+    shellText && screenOn && screenOff && beforeQuit && quitOff,
+    JSON.stringify({ shellText, screenOn, screenOff, beforeQuit, quitOff }),
+  );
+  check(
+    "화면 작업 중: 훅 차례 (못 본 차례는 훅, 본 차례는 화면이 빠지면 풀림, 다음 차례는 새로)",
+    hookOn && escOff && stillOff && nextOn && hookOff,
+    JSON.stringify({ hookOn, escOff, stillOff, nextOn, hookOff }),
+  );
+  check("화면 작업 중: 상태를 보내는 프로그램은 상태만, 지움 뒤 다시 화면", oscWins && afterClear, JSON.stringify({ oscWins, afterClear }));
+  // 생성 응답(PTY 번호)보다 먼저 온 훅 차례도 반영한다 (리뷰 확인 질문 2)
+  const before = tabCount();
+  devHooks.spawnDelay = 1500;
+  await menu("new_tab");
+  await waitFor("새 탭", () => tabCount() === before + 1, 3000);
+  await sleep(500);
+  const early = await turnHook(true, null);
+  const fresh = () => visiblePanes()[0]?.el;
+  await waitFor("새 터미널 번호", () => fresh()?.querySelector<HTMLElement>(".terminal")?.dataset.pty, 5000).catch(() => null);
+  devHooks.spawnDelay = undefined;
+  const freshPty = Number(fresh()?.querySelector<HTMLElement>(".terminal")?.dataset.pty);
+  // 일반 셸 창은 이름표가 없어서 잠자기 막기(pty_working)로 본다
+  const earlyOn = await waitAsync("이른 차례 반영", async () => await awake(), 3000).then(() => true, () => false);
+  await turnHook(false, freshPty);
+  const earlyOff = await waitAsync("이른 차례 끝", async () => !(await awake()), 3000).then(() => true, () => false);
+  check("화면 작업 중: PTY 번호를 받기 전에 온 훅 차례도 반영", early === freshPty && earlyOn && earlyOff, `${early} ${freshPty} ${earlyOn} ${earlyOff}`);
+  await menu("close_pane");
+  await waitFor("탭 닫힘", () => tabCount() === before, 3000).catch(() => null);
 }
 
 // 테마 토큰(#RRGGBB)의 계산된 색 모양 ("rgb(r, g, b)")
@@ -6297,6 +6476,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["permissionModeUnit", testPermissionModeUnit],
     ["notifyClickUnit", testNotifyClickUnit],
     ["programStatus", () => testProgramStatus(root, t())],
+    ["screenBusy", () => testScreenBusy(root, t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],
     ["webglLoss", () => testWebglLoss(t())],
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다

@@ -151,10 +151,17 @@ const REVIEWER_ROLE: &str = "You are the reviewer and QA in this work group. Do 
 When asked, review the requested target and report every finding with its ID, severity, evidence (file and line, or reproduction steps) and whether it blocks. When the developer disputes a finding, weigh the evidence: withdraw the finding if the developer's evidence shows it is invalid; otherwise keep it open with your counter-evidence. \
 For a plan or design document, check it against the code and the user's request: missing cases, wrong assumptions, risks, and simpler alternatives.";
 
-// 기본 설정 claude의 --settings: 권한 확인 알림(Notification) + 대화 ID 알림(SessionStart)
-const CLAUDE_SETTINGS: &str = r#"{"hooks":{"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"curl -s -m 2 -X POST {attention} >/dev/null 2>&1","async":true}]}],"SessionStart":[{"hooks":[{"type":"command","command":"curl -s -m 2 --data-binary @- {sessionStart} >/dev/null 2>&1 || true"}]}]}}"#;
-// 이전 기본 설정의 것 (SessionStart가 없음). 이 값 그대로인 세션만 읽을 때 새 기본으로 바꾼다 (upgrade_args)
-const OLD_CLAUDE_SETTINGS: &str = r#"{"hooks":{"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"curl -s -m 2 -X POST {attention} >/dev/null 2>&1","async":true}]}]}}"#;
+// 기본 설정 claude의 --settings: 권한 확인 알림(Notification) + 대화 ID 알림(SessionStart) + 차례 시작·끝 알림
+// (UserPromptSubmit·Stop·StopFailure → {turn}. Windows에서는 claude가 상태(OSC 7501)를 보내지 않아 작업 중 표시를 이것과
+// 화면으로 한다, docs/reviews/2026-11-04-windows-working.md). 차례 훅도 async가 아니다: 짧은 차례의 시작·끝이 순서가 바뀌어
+// 도착하지 않게. UserPromptSubmit 훅의 표준 출력은 claude가 대화에 넣으므로 버린다.
+const CLAUDE_SETTINGS: &str = r#"{"hooks":{"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"curl -s -m 2 -X POST {attention} >/dev/null 2>&1","async":true}]}],"SessionStart":[{"hooks":[{"type":"command","command":"curl -s -m 2 --data-binary @- {sessionStart} >/dev/null 2>&1 || true"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"curl -s -m 2 --data-binary @- {turn} >/dev/null 2>&1 || true"}]}],"Stop":[{"hooks":[{"type":"command","command":"curl -s -m 2 --data-binary @- {turn} >/dev/null 2>&1 || true"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"curl -s -m 2 --data-binary @- {turn} >/dev/null 2>&1 || true"}]}]}}"#;
+// 이전 기본 설정의 것들 (오래된 것부터: Notification만, + SessionStart). 이 값 그대로인 세션만 읽을 때 새 기본으로 바꾼다
+// (upgrade_args)
+const OLD_CLAUDE_SETTINGS: [&str; 2] = [
+    r#"{"hooks":{"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"curl -s -m 2 -X POST {attention} >/dev/null 2>&1","async":true}]}]}}"#,
+    r#"{"hooks":{"Notification":[{"matcher":"permission_prompt","hooks":[{"type":"command","command":"curl -s -m 2 -X POST {attention} >/dev/null 2>&1","async":true}]}],"SessionStart":[{"hooks":[{"type":"command","command":"curl -s -m 2 --data-binary @- {sessionStart} >/dev/null 2>&1 || true"}]}]}}"#,
+];
 
 fn render(claude_settings: &str) -> String {
     let json = |s: &str| serde_json::to_string(s).unwrap_or_default();
@@ -173,16 +180,16 @@ pub fn default_config() -> String {
 // 세션 인자 (args, resume)
 type Args = (Vec<String>, Option<Vec<String>>);
 
-// 이전 기본 claude 인자 → 새 기본 claude 인자. 기본 설정의 첫 세션(dev)에서 뽑는다.
-fn claude_upgrade() -> &'static (Args, Args) {
-    static PAIR: std::sync::OnceLock<(Args, Args)> = std::sync::OnceLock::new();
+// 이전 기본 claude 인자들 → 새 기본 claude 인자. 기본 설정의 첫 세션(dev)에서 뽑는다.
+fn claude_upgrade() -> &'static (Vec<Args>, Args) {
+    static PAIR: std::sync::OnceLock<(Vec<Args>, Args)> = std::sync::OnceLock::new();
     PAIR.get_or_init(|| {
         let dev = |settings: &str| {
             let g: Groups = serde_json::from_str(&render(settings)).expect("기본 설정");
             let s = g.groups.into_iter().next().and_then(|g| g.sessions.into_iter().next()).expect("기본 설정의 dev");
             (s.args, s.resume)
         };
-        (dev(OLD_CLAUDE_SETTINGS), dev(CLAUDE_SETTINGS))
+        (OLD_CLAUDE_SETTINGS.iter().map(|s| dev(s)).collect(), dev(CLAUDE_SETTINGS))
     })
 }
 
@@ -190,8 +197,8 @@ fn claude_upgrade() -> &'static (Args, Args) {
 // groups.json은 읽을 때 메모리에서만 바꾸고 파일은 쓰지 않는다 (읽기·저장이 겹치거나 백업·교체가 실패할 일이 없게).
 // 저장된 창(작업 공간)도 읽을 때 같은 규칙으로 바꾼다 (upgrade_saved, 다음 저장 때 파일에 남는다).
 fn upgrade_args(args: &mut Vec<String>, resume: &mut Option<Vec<String>>) -> bool {
-    let (old, new) = claude_upgrade();
-    if (&*args, &*resume) != (&old.0, &old.1) {
+    let (olds, new) = claude_upgrade();
+    if !olds.iter().any(|old| (&*args, &*resume) == (&old.0, &old.1)) {
         return false;
     }
     (*args, *resume) = new.clone();
@@ -321,6 +328,13 @@ mod tests {
             assert!(start.get("matcher").is_none(), "{settings}");
             assert!(start["hooks"][0]["command"].as_str().unwrap().contains("--data-binary @- {sessionStart}"), "{settings}");
             assert!(start["hooks"][0].get("async").is_none(), "{settings}");
+            // 차례 시작·끝: 훅 입력을 {turn}으로, 순서를 지키게 async가 아니고 표준 출력은 버린다 (UserPromptSubmit은 대화에 넣는다)
+            for event in ["UserPromptSubmit", "Stop", "StopFailure"] {
+                let hook = &settings["hooks"][event][0]["hooks"][0];
+                let command = hook["command"].as_str().unwrap_or("");
+                assert!(command.contains("--data-binary @- {turn} >/dev/null"), "{event} {settings}");
+                assert!(hook.get("async").is_none() && settings["hooks"][event][0].get("matcher").is_none(), "{event} {settings}");
+            }
         }
         for args in [&reviewer.args, reviewer.resume.as_ref().unwrap()] {
             assert!(args.contains(&"developer_instructions={prompt:toml}".to_string()));
@@ -362,15 +376,20 @@ mod tests {
     // 이전 기본 claude 인자와 정확히 같은 세션만 새 기본으로 바뀐다 (groups.json은 메모리에서만, 작업 공간은 읽은 내용에서)
     #[test]
     fn upgrades_only_untouched_old_default() {
-        let (old, new) = claude_upgrade();
-        assert_ne!(old, new);
-        assert!(old.0.iter().all(|a| !a.contains("SessionStart")) && new.0.iter().any(|a| a.contains("{sessionStart}")));
-        // 이전 기본 설정 파일: dev만 바뀌고 reviewer·셸은 그대로
-        let mut g = parse(render(OLD_CLAUDE_SETTINGS).as_bytes()).unwrap();
-        let reviewer = (g.groups[0].sessions[1].args.clone(), g.groups[0].sessions[1].resume.clone());
-        upgrade(&mut g);
-        assert_eq!((&g.groups[0].sessions[0].args, &g.groups[0].sessions[0].resume), (&new.0, &new.1));
-        assert_eq!((g.groups[0].sessions[1].args.clone(), g.groups[0].sessions[1].resume.clone()), reviewer);
+        let (olds, new) = claude_upgrade();
+        assert_eq!(olds.len(), 2);
+        assert!(olds.iter().all(|old| old != new && old.0.iter().all(|a| !a.contains("{turn}"))));
+        assert!(olds[0].0.iter().all(|a| !a.contains("SessionStart")) && olds[1].0.iter().any(|a| a.contains("{sessionStart}")));
+        assert!(new.0.iter().any(|a| a.contains("{sessionStart}") && a.contains("{turn}")));
+        // 이전 기본 설정 파일 (둘 다): dev만 바뀌고 reviewer·셸은 그대로
+        for settings in OLD_CLAUDE_SETTINGS {
+            let mut g = parse(render(settings).as_bytes()).unwrap();
+            let reviewer = (g.groups[0].sessions[1].args.clone(), g.groups[0].sessions[1].resume.clone());
+            upgrade(&mut g);
+            assert_eq!((&g.groups[0].sessions[0].args, &g.groups[0].sessions[0].resume), (&new.0, &new.1));
+            assert_eq!((g.groups[0].sessions[1].args.clone(), g.groups[0].sessions[1].resume.clone()), reviewer);
+        }
+        let old = &olds[0];
         // 고친 인자(옵션 하나를 더함)와 resume만 다른 것은 그대로
         let (mut args, mut resume) = (old.0.clone(), old.1.clone());
         args.push("--verbose".into());
@@ -387,10 +406,12 @@ mod tests {
             serde_json::json!({ "name": "dev", "command": "claude", "args": args, "resume": resume, "readOnly": false, "shiftEnter": null, "sid": "S", "prompt": "P" })
         };
         let custom = { let mut a = old.0.clone(); a.push("--verbose".into()); a };
-        let saved = serde_json::json!({ "version": 1, "tabs": [], "sessions": { "2": pane(&old.0, &old.1), "3": pane(&custom, &old.1) } }).to_string();
+        let v2 = &olds[1];
+        let saved = serde_json::json!({ "version": 1, "tabs": [], "sessions": { "2": pane(&old.0, &old.1), "3": pane(&custom, &old.1), "4": pane(&v2.0, &v2.1) } }).to_string();
         let up: serde_json::Value = serde_json::from_str(&upgrade_saved(&saved).expect("바뀜")).unwrap();
         assert_eq!(up["sessions"]["2"], pane(&new.0, &new.1));
         assert_eq!(up["sessions"]["3"], pane(&custom, &old.1));
+        assert_eq!(up["sessions"]["4"], pane(&new.0, &new.1));
         assert_eq!(upgrade_saved(&up.to_string()), None, "두 번째는 바꿀 것이 없음");
         assert_eq!(upgrade_saved("{broken"), None);
 

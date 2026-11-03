@@ -610,6 +610,8 @@ fn join_chat(
     vars.insert("attention".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.replacen("/mcp/", "/attention/", 1)));
     // CLI가 대화를 시작·전환할 때 새 대화 ID를 보낼 주소 (claude SessionStart 훅, src-tauri/src/chat.rs /session/<토큰>)
     vars.insert("sessionStart".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.replacen("/mcp/", "/session/", 1)));
+    // CLI가 차례를 시작·끝낼 때 보낼 주소 (claude UserPromptSubmit·Stop 훅, src-tauri/src/chat.rs /turn/<토큰>)
+    vars.insert("turn".into(), joined.as_ref().map_or(String::new(), |(url, _)| url.replacen("/mcp/", "/turn/", 1)));
     let fill = |argv: Option<Vec<String>>, vars: &HashMap<String, String>| argv.map(|a| a.iter().map(|x| fill_placeholders(x, vars)).collect::<Vec<_>>());
     let command = fill(command, &vars);
     vars.extend(fallback_vars);
@@ -872,6 +874,23 @@ pub fn pty_awaiting(app: tauri::AppHandle, ptys: State<'_, Ptys>, chats: State<'
         chats.attention(&token, kind, false);
     }
     crate::mobile::publish(&app, None, "status", serde_json::json!({}));
+}
+
+// claude 훅의 차례 시작(working)·끝을 그 터미널에 알린다 (chat.rs Change::Turn, 프론트 Terminal.tsx "pty-turn"이 화면 읽기와 합친다).
+// seq는 늘어나는 번호라 프론트가 늦게 온 오래된 것을 버린다
+pub fn emit_turn<R: tauri::Runtime>(app: &impl tauri::Emitter<R>, pty: u32, working: bool) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let _ = app.emit("pty-turn", serde_json::json!({ "pty": pty, "working": working, "seq": seq }));
+}
+
+// 자체 테스트: 훅의 차례 시작·끝을 그 터미널에 (id가 없으면 가장 최근에 만든 터미널: 프론트가 번호를 받기 전에 온 것을 시험한다)
+#[tauri::command]
+pub fn selftest_pty_turn(app: tauri::AppHandle, ptys: State<'_, Ptys>, id: Option<u32>, working: bool) -> Option<u32> {
+    std::env::var_os("DDAK_SELFTEST")?;
+    let pty = id.or_else(|| ptys.sessions.lock().unwrap().keys().max().copied())?;
+    emit_turn(&app, pty, working);
+    Some(pty)
 }
 
 // 자체 테스트: 그 터미널이 사용자를 기다린다고 알려졌는지
@@ -1397,12 +1416,12 @@ mod tests {
         let argv = |s: &str| Some(vec!["/bin/sh".to_string(), "-c".to_string(), s.to_string()]);
         let vars = HashMap::from([("session".to_string(), "S".to_string())]);
         let fallback_vars = HashMap::from([("session".to_string(), "NEW".to_string())]);
-        let (command, fallback, leave) = join_chat(Some(chats.clone()), Some(join), argv("echo URL={chat} {session}"), argv("echo {chat} {sessionStart} {session}"), vars, fallback_vars);
+        let (command, fallback, leave) = join_chat(Some(chats.clone()), Some(join), argv("echo URL={chat} {session}"), argv("echo {chat} {sessionStart} {turn} {session}"), vars, fallback_vars);
         let words: Vec<&str> = fallback.as_ref().unwrap()[2].split(' ').collect();
         let url = words[1].to_string();
         assert!(url.starts_with("http://127.0.0.1:") && url.contains("/mcp/"), "{url}");
-        // {sessionStart}는 같은 토큰의 /session/ 주소. fallback_vars는 fallback에만 덮어쓴다 (command는 vars 그대로)
-        assert_eq!(words[2..], [url.replacen("/mcp/", "/session/", 1).as_str(), "NEW"]);
+        // {sessionStart}·{turn}은 같은 토큰의 /session/·/turn/ 주소. fallback_vars는 fallback에만 덮어쓴다 (command는 vars 그대로)
+        assert_eq!(words[2..], [url.replacen("/mcp/", "/session/", 1).as_str(), url.replacen("/mcp/", "/turn/", 1).as_str(), "NEW"]);
         assert!(command.as_ref().unwrap()[2].ends_with(" S"), "{command:?}");
         assert_eq!(chats.members(Path::new("/")), ["user", "origin/dev"]);
         let ptys = Ptys::default();
