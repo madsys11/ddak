@@ -15,6 +15,7 @@ import { devHooks } from "./devHooks";
 import { onOpenDoc } from "./docs";
 import { projectForClick } from "./notifyClick";
 import { useT } from "./prefs";
+import { EMPTY_PROJECT_STATUS, type ProjectStatus, sameStatus, topState } from "./projectStatus";
 import "./App.css";
 
 // Rust(groups.rs)가 돌려주는 오류 코드 → 문구. "io" 등 나머지는 원문을 그대로 보인다.
@@ -72,6 +73,15 @@ function App() {
   const [chatOpen, setChatOpen] = useState<Record<string, boolean>>({});
   // 프로젝트 → 채팅 패널을 닫아 둔 동안 세션이 사용자에게 보낸 메시지 수 (사이드바 배지, Dock 배지)
   const [chatUnread, setChatUnread] = useState<Record<string, number>>({});
+  // 프로젝트 → 세션 창들의 상태 수 (Workspace onSummary)와 자동 깨우기가 멈춘 작업그룹 수 (ChatPanel onPaused).
+  // 사이드바 프로젝트 줄의 점·칩 (src/projectStatus.ts). 열린 프로젝트 것만 보인다 (지운 뒤 다시 넣으면 새로 알린다)
+  const [summaries, setSummaries] = useState<Record<string, ProjectStatus>>({});
+  const [pausedGroups, setPausedGroups] = useState<Record<string, number>>({});
+  const projectStatus: Record<string, ProjectStatus> = {};
+  for (const p of opened) {
+    const s = { ...(summaries[p] ?? EMPTY_PROJECT_STATUS), paused: pausedGroups[p] ?? 0 };
+    if (topState(s)) projectStatus[p] = s;
+  }
   const unreadTotal = Object.entries(chatUnread).reduce((n, [p, c]) => n + (opened.includes(p) ? c : 0), 0);
   useEffect(() => {
     invoke("set_badge", { count: unreadTotal }).catch(() => {});
@@ -191,6 +201,7 @@ function App() {
       if (!ok) return;
     }
     setOpened((o) => o.filter((p) => p !== path));
+    setPausedGroups(({ [path]: _, ...rest }) => rest);
     remove(path);
   }
 
@@ -219,7 +230,7 @@ function App() {
 
   return (
     <main className="layout">
-      <Sidebar projects={projects} active={active} treeRoots={treeRoots} unread={chatUnread} errors={[shownError, groupsMessage]} onAdd={pickProject} onActivate={activate} onRemove={removeProject} />
+      <Sidebar projects={projects} active={active} treeRoots={treeRoots} unread={chatUnread} status={projectStatus} errors={[shownError, groupsMessage]} onAdd={pickProject} onActivate={activate} onRemove={removeProject} />
       <section className="panel">
         {/* 작업그룹 설정을 읽은 뒤에 연다 (처음 띄울 세션을 알아야 해서). 못 읽었으면 셸 하나로 */}
         {groupsReady &&
@@ -240,6 +251,13 @@ function App() {
                 chatUnread={!!chatUnread[path]}
                 onToggleChat={() => setChatOpen((o) => ({ ...o, [path]: !o[path] }))}
                 docRequest={docRequest?.project === path ? docRequest : null}
+                onSummary={(sum) =>
+                  setSummaries((all) => {
+                    if (sum) return sameStatus(all[path], sum) ? all : { ...all, [path]: sum };
+                    const { [path]: _, ...rest } = all;
+                    return rest;
+                  })
+                }
               />
               <ChatPanel
                 project={path}
@@ -247,6 +265,7 @@ function App() {
                 watching={!!chatOpen[path] && path === active && windowFocused}
                 onClose={() => setChatOpen((o) => ({ ...o, [path]: false }))}
                 onUnread={(u) => setChatUnread((r) => ((r[path] ?? 0) === u ? r : { ...r, [path]: u }))}
+                onPaused={(n) => setPausedGroups((r) => ((r[path] ?? 0) === n ? r : { ...r, [path]: n }))}
               />
             </div>
           ))}

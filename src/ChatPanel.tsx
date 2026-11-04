@@ -33,12 +33,14 @@ const NO_RECIPIENT = "no-recipient";
 // (리뷰 R2: 열어 둔 채 다른 프로젝트로 가면 숨은 패널이 메시지를 읽은 것으로 처리해 배지가 빠졌다).
 // 안 읽은 수는 Rust가 센다 (chat.rs unread, 폰에서 읽은 것도 같은 수): 보고 있으면 본 번호를 올리고 (chat_seen), 아니면 새 메시지나
 // 본 번호가 바뀔 때 ("chat-seen") 그 수를 읽는다.
-export function ChatPanel({ project, open, watching, onClose, onUnread }: {
+export function ChatPanel({ project, open, watching, onClose, onUnread, onPaused }: {
   project: string;
   open: boolean;
   watching: boolean;
   onClose: () => void;
   onUnread: (unread: number) => void;
+  // 자동 깨우기가 멈춘 작업그룹 수가 바뀜 (사이드바 프로젝트 줄의 "재개 필요", src/projectStatus.ts)
+  onPaused: (groups: number) => void;
 }) {
   const { t, locale, panels, setPanelWidth } = usePrefs();
   // 자동 깨우기 제한의 지금 값 (협업 제한, 멈춤 문구)
@@ -68,8 +70,10 @@ export function ChatPanel({ project, open, watching, onClose, onUnread }: {
   const atBottom = useRef(true);
   // 마지막으로 받은 메시지 번호 (보게 되면 여기까지 본 것으로)
   const last = useRef(0);
-  const latest = useRef({ watching, onUnread });
-  latest.current = { watching, onUnread };
+  const latest = useRef({ watching, onUnread, onPaused });
+  latest.current = { watching, onUnread, onPaused };
+  // 사이드바에 알린다 (닫혀 있어도 떠 있으므로 숨은 프로젝트도 갱신된다)
+  useEffect(() => latest.current.onPaused(paused.length), [paused.length]);
   // 보이는 것만 거른다 (읽음은 그대로: 보고 있으면 마지막 메시지까지)
   const [filter, setFilterState] = useState<ChatFilter>(() => loadFilter(FILTER_KEY, project));
   const setFilter = (f: ChatFilter) => {

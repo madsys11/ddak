@@ -7,6 +7,7 @@ import { ProjectIcon } from "./icons";
 import { PANEL_SIZES, usePrefs, useT } from "./prefs";
 import { Resizer } from "./Resizer";
 import { baseName, type Project } from "./useProjects";
+import { type ProjectStatus, statusSummary, topState } from "./projectStatus";
 
 type Props = {
   projects: Project[];
@@ -15,6 +16,8 @@ type Props = {
   treeRoots: Record<string, { cwd: string; worktree: string | null }>;
   // 프로젝트 → 세션이 사용자에게 보낸 안 읽은 메시지 수 (배지)
   unread: Record<string, number>;
+  // 프로젝트 → 세션 창들의 상태 수와 멈춘 작업그룹 수 (점·칩, src/projectStatus.ts). 표시할 것이 없는 프로젝트는 빠져 있다
+  status: Record<string, ProjectStatus>;
   // 목록 파일·작업그룹 설정 오류 등. 비어 있는 것은 건너뛴다.
   errors: (string | null)[];
   onAdd: () => void;
@@ -23,7 +26,7 @@ type Props = {
 };
 
 // 프로젝트 목록. 프로젝트를 펼치면 그 폴더의 파일 트리가 보인다.
-export function Sidebar({ projects, active, treeRoots, unread, errors, onAdd, onActivate, onRemove }: Props) {
+export function Sidebar({ projects, active, treeRoots, unread, status, errors, onAdd, onActivate, onRemove }: Props) {
   const t = useT();
   const { panels, setPanelWidth } = usePrefs();
   const [addingTo, setAddingTo] = useState<string | null>(null);
@@ -83,6 +86,7 @@ export function Sidebar({ projects, active, treeRoots, unread, errors, onAdd, on
               active={p.path === active}
               treeRoot={treeRoots[p.path]}
               unread={unread[p.path] ?? 0}
+              status={status[p.path]}
               onActivate={() => onActivate(p.path)}
               onRemove={() => onRemove(p.path)}
               onAddRepo={() => setAddingTo(p.path)}
@@ -103,13 +107,14 @@ type NodeProps = {
   active: boolean;
   treeRoot?: { cwd: string; worktree: string | null };
   unread: number;
+  status?: ProjectStatus;
   onActivate: () => void;
   onRemove: () => void;
   onAddRepo: () => void;
   onSetup: () => void;
 };
 
-function ProjectNode({ project, active, treeRoot, unread, onActivate, onRemove, onAddRepo, onSetup }: NodeProps) {
+function ProjectNode({ project, active, treeRoot, unread, status, onActivate, onRemove, onAddRepo, onSetup }: NodeProps) {
   const t = useT();
   const tree = useTree();
   const folderMenu = useFolderMenu();
@@ -138,6 +143,10 @@ function ProjectNode({ project, active, treeRoot, unread, onActivate, onRemove, 
   const removeItem: MenuItem = { label: t("sidebar.removeProject"), action: onRemove };
   // 새 작업그룹에 복제할 항목과 준비 스크립트 (SetupDialog, src-tauri/src/setup.rs)
   const setupItem: MenuItem = { label: t("sidebar.setup"), action: onSetup };
+  // 가장 급한 상태 하나를 아이콘 위 점과 칩으로. 툴팁·스크린리더 이름에는 상태별 수 (리뷰 R2·R3)
+  const top = topState(status);
+  const summary = statusSummary(status, t);
+  const label = [baseName(path), treeRoot?.worktree, summary, unread > 0 ? t("sidebar.unread", { n: unread }) : null].filter(Boolean).join(", ");
 
   return (
     <>
@@ -145,7 +154,8 @@ function ProjectNode({ project, active, treeRoot, unread, onActivate, onRemove, 
         className={`tree-row project-row${active ? " active" : ""}${missing ? " missing" : ""}`}
         style={{ paddingLeft: indent(0) }}
         data-project={path}
-        title={missing ? t("sidebar.notFound", { path }) : path}
+        data-status={top ?? undefined}
+        title={missing ? t("sidebar.notFound", { path }) : summary ? `${path}\n${summary}` : path}
         onClick={() => !missing && onActivate()}
         onContextMenu={(e) => tree.openMenu(e, missing ? [removeItem] : [...addItems, "separator", setupItem, "separator", removeItem])}
       >
@@ -157,18 +167,35 @@ function ProjectNode({ project, active, treeRoot, unread, onActivate, onRemove, 
             if (!missing) setOpen(!open);
           }}
         />
-        <ProjectIcon />
-        <span className="tree-name">{baseName(path)}</span>
-        {unread > 0 && (
-          <span className="project-unread" data-unread={unread} title={t("sidebar.unread", { n: unread })}>
-            {unread}
+        {/* 프로젝트 고르기는 진짜 버튼: 키보드로 가고 (Enter·Space는 누름, 줄의 onClick으로 올라감) 이름에 상태 요약이 들어간다.
+            파일 트리 방향키 탐색은 없다 (계획 리뷰 R3, 코드 리뷰 R4: 역할 없는 div의 aria-label은 이름이 되지 않는다).
+            화살표·+·×는 버튼 밖에 둔다 */}
+        <button
+          type="button"
+          className="project-select"
+          aria-label={missing ? t("sidebar.notFound", { path }) : label}
+          aria-current={active ? "true" : undefined}
+          aria-disabled={missing || undefined}
+        >
+          <span className="project-icon">
+            <ProjectIcon />
+            {top && <span className={`project-dot ${top}`} />}
           </span>
-        )}
-        {treeRoot?.worktree && (
-          <span className="project-worktree" title={treeRoot.cwd}>
-            {treeRoot.worktree}
-          </span>
-        )}
+          <span className="tree-name">{baseName(path)}</span>
+          {top === "awaiting" && <span className="project-chip awaiting">{t("sidebar.state.awaiting", { n: status!.awaiting })}</span>}
+          {top === "paused" && <span className="project-chip paused">{t("sidebar.resumeNeeded")}</span>}
+          {top === "error" && <span className="project-chip error">{t("status.error")}</span>}
+          {unread > 0 && (
+            <span className="project-unread" data-unread={unread} title={t("sidebar.unread", { n: unread })}>
+              {unread}
+            </span>
+          )}
+          {treeRoot?.worktree && (
+            <span className="project-worktree" title={treeRoot.cwd}>
+              {treeRoot.worktree}
+            </span>
+          )}
+        </button>
         {!missing && (
           <span className="row-action" data-action="add" title={t("sidebar.addTo")} onClick={(e) => tree.openMenu(e, addItems)}>
             +

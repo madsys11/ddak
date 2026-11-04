@@ -19,7 +19,9 @@ import { insertAt } from "./dragPath";
 import selftestPlan from "../scripts/selftest-plan.json";
 import { gitDecorations, gitSummary } from "./gitStatus";
 import { THEMES, isThemeId } from "./themes";
-import { LOCALES, isLocale } from "./i18n";
+import { LOCALES, isLocale, translate, type MessageKey } from "./i18n";
+import { EMPTY_PROJECT_STATUS, type ProjectStatus, countStatuses, statusSummary, topState } from "./projectStatus";
+import type { ProgramStatus } from "./programStatus";
 import mobileCss from "./mobile/mobile.css?raw";
 import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
@@ -2004,6 +2006,14 @@ async function testProjects(root: string, first: Terminal) {
     (e) => check("프로젝트: 옮겨 간 프로젝트의 터미널에 포커스", false, String(e)),
   );
 
+  // 숨은 프로젝트의 상태도 사이드바에 따라온다 (Workspace는 숨겨도 떠 있다. 계획 리뷰 권고)
+  const osc = (state: string) => `printf '\\033]7501;state=${state}\\033\\\\'\r`;
+  first.input(osc("working"));
+  const hiddenOn = await waitFor("숨은 프로젝트 작업 중", () => projectRow(root)?.dataset.status === "working", 3000).then(() => true, () => false);
+  first.input(osc("clear"));
+  const hiddenOff = await waitFor("숨은 프로젝트 지움", () => projectRow(root)?.dataset.status === undefined, 3000).then(() => true, () => false);
+  check("프로젝트 상태: 보고 있지 않은 프로젝트의 상태도 사이드바에 따라옴", hiddenOn && hiddenOff, `${hiddenOn} ${hiddenOff}`);
+
   // 단축키는 보이는 프로젝트에만
   await menu("new_tab");
   await waitFor("새 탭", () => tabsIn(other) === 2).then(
@@ -2054,9 +2064,17 @@ async function testProjects(root: string, first: Terminal) {
   await waitFor("첫 프로젝트 펼치기", () => rowNames().includes("server"));
   check("프로젝트: 화살표로 다시 펼침", true);
 
-  // 열려 있는 프로젝트를 제거하면 먼저 묻는다
-  projectRow(other)!.click();
+  // 키보드: 프로젝트 고르기 버튼에 포커스를 두고 누른다 (계획 리뷰 R3, 코드 리뷰 R4. Enter·Space는 진짜 버튼의 기본 동작). 그 프로젝트에 상태를 하나 둔다 (아래 제거·다시 넣기)
+  const otherSelect = projectRow(other)!.querySelector<HTMLButtonElement>("button.project-select")!;
+  otherSelect.focus();
+  const otherFocused = document.activeElement === otherSelect;
+  otherSelect.click();
   await waitFor("두 번째 프로젝트로", () => visiblePanes()[0]?.term === o.term);
+  check("프로젝트: 프로젝트 고르기 버튼에 포커스를 두고 누르면 그 프로젝트로", otherFocused && projectRow(other)!.classList.contains("active"), `${otherFocused}`);
+  await run(o.term, `printf '\\033]7501;%s\\033\\\\' 'state=working'`);
+  const otherWorking = await waitFor("두 번째 프로젝트 작업 중", () => projectRow(other)?.dataset.status === "working", 3000).then(() => true, () => false);
+
+  // 열려 있는 프로젝트를 제거하면 먼저 묻는다
   const realConfirm = devHooks.confirm;
   let asked = "";
   devHooks.confirm = async (m) => ((asked = m), false);
@@ -2095,6 +2113,8 @@ async function testProjects(root: string, first: Terminal) {
   devHooks.workspaceLoad = () => (loads++ === 0 ? new Promise((r) => setTimeout(() => r('{"version":99}'), 1500)) : Promise.resolve('{"version":99}'));
   await devHooks.addProject!(other);
   await waitFor("다시 열림", () => tabsIn(other) === 1, 5000);
+  // 지운 뒤 다시 넣으면 옛 상태가 남지 않는다 (계획 리뷰 권고)
+  check("프로젝트 상태: 지운 프로젝트를 다시 넣으면 옛 상태가 남지 않음", otherWorking && projectRow(other)?.dataset.status === undefined, `${otherWorking} ${projectRow(other)?.dataset.status}`);
   await sleep(2500);
   devHooks.workspaceLoad = undefined;
   const files = (await run(first, `ls "${data}/workspaces" | grep -c '^other-.*\\.json$'; ls "${data}/workspaces" | grep -c '^other-.*\\.json\\.bad$'`)).map((l) => l.trim()).filter((l) => /^\d+$/.test(l));
@@ -3133,6 +3153,155 @@ while True:
   await waitFor("탭 닫힘", () => tabCount() === before, 3000).catch(() => null);
 }
 
+// 사이드바 프로젝트 줄의 상태 (src/projectStatus.ts): 세는 규칙, 가장 급한 것, 요약 문구
+function testProjectStatusUnit() {
+  const p = (state?: ProgramStatus["state"], awaiting = false) => ({ status: state ? { state } : undefined, awaiting });
+  const c = countStatuses([p("working"), p("blocked", true), p("done"), p("error"), p("idle"), p(), p("working", true), p("done")], 2);
+  check(
+    "프로젝트 상태: 기다리는 창은 기다림으로만, idle·상태 없음은 세지 않음, 멈춤은 작업그룹 수",
+    JSON.stringify(c) === JSON.stringify({ awaiting: 2, paused: 2, error: 1, working: 1, done: 2 }),
+    JSON.stringify(c),
+  );
+  const s = (o: Partial<ProjectStatus>) => ({ ...EMPTY_PROJECT_STATUS, ...o });
+  const tops = [
+    topState(s({ working: 1, done: 3 })),
+    topState(s({ paused: 1, error: 2 })),
+    topState(s({ awaiting: 1, paused: 1 })),
+    topState(s({ error: 1, working: 1 })),
+    topState(s({ done: 1 })),
+    topState(s({})),
+    topState(undefined),
+  ];
+  check("프로젝트 상태: 급한 순서 기다림 > 멈춤 > 오류 > 작업 중 > 완료", tops.join(",") === "working,paused,awaiting,error,done,,", tops.join(","));
+  const en = (key: MessageKey, vars?: Record<string, string | number>) => translate("en", key, vars);
+  const summary = statusSummary(c, en);
+  check(
+    "프로젝트 상태: 요약은 급한 순서로 0이 아닌 것만",
+    summary === "waiting 2 · notifications paused 2 · error 1 · working 1 · done 2" && statusSummary(s({}), en) === "" && statusSummary(s({ done: 1 }), en) === "done 1",
+    summary,
+  );
+}
+
+// 사이드바 프로젝트 줄의 상태 점·칩 (src/Sidebar.tsx). 셸에서 OSC 7501을 보내 바꾼다. 다른 탭의 창도 세고, 닫으면 빠진다.
+// 프로젝트 줄은 키보드로 포커스를 받고 이름에 상태 요약이 들어간다 (계획 리뷰 R3)
+async function testProjectStatus(root: string, term: Terminal) {
+  const row = () => projectRow(root)!;
+  // 프로젝트를 고르는 버튼과 그 접근성 이름 (코드 리뷰 R4: 역할 있는 컨트롤에 이름)
+  const select = () => row().querySelector<HTMLButtonElement>("button.project-select")!;
+  const name = () => select()?.getAttribute("aria-label");
+  const dot = () => row().querySelector<HTMLElement>(".project-dot");
+  const chip = () => row().querySelector<HTMLElement>(".project-chip");
+  const report = (body: string) => run(term, `printf '\\033]7501;%s\\033\\\\' '${body}'`);
+  const becomes = (state: string | undefined) =>
+    waitFor(`프로젝트 상태 ${state}`, () => row().dataset.status === state && (state ? dot()?.classList.contains(state) : !dot()), 3000).then(() => true, () => false);
+  await report("state=clear");
+  const none = await becomes(undefined);
+
+  await report("state=blocked:kind=permission");
+  const awaiting = await becomes("awaiting");
+  const awaitChip = chip();
+  const awaitLook = awaitChip && getComputedStyle(awaitChip);
+  check(
+    "프로젝트 상태: 사용자를 기다리면 칠한 칩 \"waiting 1\"과 점, 이름·툴팁에 요약",
+    none && awaiting && awaitChip?.textContent === "waiting 1" && awaitChip.classList.contains("awaiting") &&
+      awaitLook?.backgroundColor === tokenRgb("--status-awaiting-bg") && awaitLook?.color === tokenRgb("--status-awaiting-fg") &&
+      name() === `${platformBaseName(root)}, waiting 1` && row().title === `${root}\nwaiting 1`,
+    `${none} ${awaiting} ${awaitChip?.textContent} ${awaitLook?.backgroundColor} ${name()} ${JSON.stringify(row().title)}`,
+  );
+
+  // 좁은 사이드바(최소 160px)에서 기다림 칩·멈춤 칩("resume needed")과 안 읽은 배지가 함께 있어도 이름이 남고 넘치지 않는다
+  // (코드 리뷰 질문). 멈춤은 가짜 작업그룹, 안 읽음은 세션이 사용자에게 보낸 메시지로 만든다
+  const sidebar = document.querySelector<HTMLElement>(".sidebar")!;
+  const nameEl = () => row().querySelector<HTMLElement>(".tree-name")!;
+  const narrow = async () => {
+    sidebar.style.width = "160px";
+    await sleep(100);
+    const r = { name: Math.round(nameEl().getBoundingClientRect().width), over: row().scrollWidth - row().clientWidth, chip: chip()?.textContent };
+    sidebar.style.width = "";
+    return r;
+  };
+  const writer = await invoke<string>("selftest_chat_join", { project: root, name: "w/a" });
+  const note = await invoke<{ id: number }>("selftest_chat_post", { project: root, from: "w/a", text: "@user narrow" });
+  await waitFor("안 읽음 배지", () => row().querySelector(".project-unread"), 3000).catch(() => null);
+  const narrowWait = await narrow();
+  await report("state=clear");
+  devHooks.chatPausedExtra = ["narrow"];
+  await emit("chat-limit", { project: root });
+  await becomes("paused");
+  const narrowPaused = await narrow();
+  devHooks.chatPausedExtra = undefined;
+  await emit("chat-limit", { project: root });
+  await becomes(undefined);
+  await invoke("chat_seen", { project: root, id: note.id });
+  await invoke("selftest_chat_leave", { token: writer });
+  await waitFor("안 읽음 지움", () => !row().querySelector(".project-unread"), 3000).catch(() => null);
+  const fits = (r: { name: number; over: number }) => r.name >= 24 && r.over <= 0;
+  check(
+    "프로젝트 상태: 최소 너비 160px에서 칩·안 읽은 배지가 함께 있어도 이름이 남고 줄이 넘치지 않음 (칩이 먼저 줄어듦)",
+    fits(narrowWait) && fits(narrowPaused) && narrowPaused.chip === "resume needed",
+    `${JSON.stringify(narrowWait)} ${JSON.stringify(narrowPaused)}`,
+  );
+  await report("state=blocked:kind=permission");
+  await becomes("awaiting");
+
+  await report("state=working");
+  const working = await becomes("working");
+  const ring = dot() && getComputedStyle(dot()!);
+  check(
+    "프로젝트 상태: 작업 중은 칩 없이 속이 빈 고리 (흐려지지 않고 크기만 움직임)",
+    working && !chip() && ring?.backgroundColor === "rgba(0, 0, 0, 0)" && ring.boxShadow.includes("inset") && ring.color === tokenRgb("--status-working") &&
+      (ring.animationName === "project-ring" || matchMedia("(prefers-reduced-motion: reduce)").matches),
+    `${working} chip=${!!chip()} ${ring?.backgroundColor} ${ring?.boxShadow} ${ring?.animationName}`,
+  );
+
+  await report("state=done");
+  const done = await becomes("done");
+  const doneBg = dot() && getComputedStyle(dot()!).backgroundColor;
+  await report("state=error");
+  const error = await becomes("error");
+  check(
+    "프로젝트 상태: 완료는 꽉 찬 초록 점, 오류는 빨간 글자 칩",
+    done && doneBg === tokenRgb("--status-done") && error && chip()?.textContent === "error" && getComputedStyle(chip()!).color === tokenRgb("--error"),
+    `${done} ${doneBg} ${error} ${chip()?.textContent}`,
+  );
+
+  // 다른 탭의 창도 센다 (작업그룹 탭도 같은 Workspace의 탭). 닫으면 빠진다
+  const before = tabCount();
+  await menu("new_tab");
+  const [second] = await waitFor("새 탭 터미널", () => tabCount() === before + 1 && visiblePanes().length === 1 && visiblePanes()[0].term !== term && visiblePanes());
+  await ready(second.term);
+  await run(second.term, `printf '\\033]7501;%s\\033\\\\' 'state=working'`);
+  const both = await waitFor("두 창 요약", () => name()?.endsWith("error 1 · working 1"), 3000).then(() => true, () => false);
+  const bothTop = row().dataset.status;
+  // 탭을 다시 띄우면 (작업그룹 끝내기 실패 뒤의 길) 옛 터미널의 기다림이 남지 않는다 (코드 리뷰 R5)
+  await run(second.term, `printf '\\033]7501;%s\\033\\\\' 'state=blocked:kind=permission'`);
+  const relaunchWait = await becomes("awaiting");
+  devHooks.relaunchActiveTab?.();
+  const relaunched = await waitFor("다시 띄운 탭", () => visiblePanes().length === 1 && visiblePanes()[0].term !== second.term, 5000).then(() => true, () => false);
+  const afterRelaunch = await waitFor("옛 기다림 지움", () => row().dataset.status === "error" && name()?.endsWith(", error 1"), 3000).then(() => true, () => false);
+  check("프로젝트 상태: 탭을 다시 띄우면 옛 터미널의 상태가 사이드바에 남지 않음", relaunchWait && relaunched && afterRelaunch, `${relaunchWait} ${relaunched} ${afterRelaunch} ${name()}`);
+  // 닫기는 상태가 있는 창으로 본다 (재리뷰 R6: 다시 띄운 뒤 상태 없는 창을 닫으면 닫은 창을 세는 결함을 잡지 못했다)
+  const relaunchedTerm = visiblePanes()[0].term;
+  await ready(relaunchedTerm);
+  await run(relaunchedTerm, `printf '\\033]7501;%s\\033\\\\' 'state=working'`);
+  const beforeClose = await waitFor("닫기 전 두 창", () => name()?.endsWith("error 1 · working 1"), 3000).then(() => true, () => false);
+  await menu("close_pane");
+  await waitFor("탭 닫힘", () => tabCount() === before, 3000).catch(() => null);
+  const closed = await waitFor("닫은 창 빠짐", () => name()?.endsWith(", error 1"), 3000).then(() => true, () => false);
+  check("프로젝트 상태: 다른 탭의 창도 세고 (가장 급한 것은 오류), 상태가 있는 창을 닫으면 빠짐", both && bothTop === "error" && beforeClose && closed, `${both} ${bothTop} ${beforeClose} ${closed} ${name()}`);
+
+  await report("state=clear");
+  const cleared = await becomes(undefined);
+  check("프로젝트 상태: 지우면 점·칩 없음, 이름은 프로젝트 이름만", cleared && !chip() && name() === platformBaseName(root) && row().title === root, `${cleared} ${name()}`);
+
+  // 키보드: 프로젝트 줄은 포커스를 받고 윤곽선이 보인다 (Enter로 옮겨 가는 것은 projects 단계가 다른 프로젝트로 본다)
+  // 고르기는 진짜 버튼이라 Enter·Space는 브라우저가 누름으로 바꾼다 (합성 키 이벤트로는 누르지 않으므로 projects 단계가 눌러 본다)
+  select().focus();
+  const focused = document.activeElement === select() && select().type === "button" && select().getAttribute("aria-current") === "true" && !row().hasAttribute("aria-label");
+  term.focus();
+  check("프로젝트 상태: 프로젝트 고르기는 포커스를 받는 버튼, 이름은 버튼에 (보고 있는 프로젝트는 aria-current)", focused, `${document.activeElement?.className} ${select()?.outerHTML.slice(0, 160)}`);
+}
+
 // 테마 토큰(#RRGGBB)의 계산된 색 모양 ("rgb(r, g, b)")
 function tokenRgb(name: string) {
   const hex = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -3827,6 +3996,8 @@ async function testLimitsDialog(root: string) {
     // 지금 제한으로 lim 그룹을 멈춘다
     for (let i = 0; i < before.wakeLimit; i++) await invoke("selftest_chat_post", { project: root, from: "lim/a", text: "@lim/b x" });
     const pausedBefore = (await paused()).includes("lim");
+    // 사이드바 프로젝트 줄에 "재개 필요" (자동 깨우기 멈춤, 시안 리뷰 R1)
+    const sidebarPaused = await waitFor("사이드바 재개 필요", () => projectRow(root)?.dataset.status === "paused" && projectRow(root)?.querySelector(".project-chip.paused")?.textContent === "resume needed", 3000).then(() => true, () => false);
     // 대화 제한을 바꾸면 재개 (멈춤이 풀림), 재리뷰 횟수도 저장
     await open();
     setField("wake", "4");
@@ -3837,6 +4008,8 @@ async function testLimitsDialog(root: string) {
     const saved = await invoke<{ wakeLimit: number; reReviews: number }>("limits_get");
     await waitFor("지금 값", () => currentLimits().wakeLimit === 4, 2000).catch(() => null);
     const resumed = !(await paused()).includes("lim");
+    const sidebarResumed = await waitFor("사이드바 재개됨", () => projectRow(root)?.dataset.status !== "paused", 3000).then(() => true, () => false);
+    check("협업 제한: 멈춘 작업그룹이 있으면 사이드바 프로젝트 줄에 \"재개 필요\", 재개하면 사라짐", sidebarPaused && sidebarResumed, `${sidebarPaused} ${sidebarResumed} ${projectRow(root)?.dataset.status}`);
     const prompt = promptOf({ id: "g", name: "G", rules: "at most {reReviews} re-reviews", sessions: [] }, { name: "s", command: "", args: [], resume: null, readOnly: false, shiftEnter: null });
     check(
       "협업 제한: 저장하면 파일과 지금 값이 바뀌고, 대화 제한이 바뀌면 멈춘 작업그룹을 재개, 새 세션 규약에 새 횟수",
@@ -5078,7 +5251,13 @@ time.sleep(60)`;
   pickerEl.querySelector<HTMLElement>("[data-action=pane-restart]")?.click();
   const again = await freshAsk(seenAsks);
   await waitFor("대기 배지", () => pickerEl.querySelector(".pane-label [data-status]"), 3000).catch(() => null);
-  const before = { again: !!again && pickerTerm() !== pickerPane.term, badge: !!pickerEl.querySelector(".pane-label [data-status]"), open: (await invoke<string[]>("chat_prompts", { project: root })).includes(again?.prompt?.id ?? "-") };
+  await waitFor("사이드바 대기", () => projectRow(root)?.dataset.status === "awaiting", 3000).catch(() => null);
+  const before = {
+    again: !!again && pickerTerm() !== pickerPane.term,
+    badge: !!pickerEl.querySelector(".pane-label [data-status]"),
+    open: (await invoke<string[]>("chat_prompts", { project: root })).includes(again?.prompt?.id ?? "-"),
+    sidebar: projectRow(root)?.dataset.status === "awaiting",
+  };
   let promptEvents = 0;
   const unlistenPrompts = await listen("chat-prompts", () => promptEvents++);
   let finishWait: (ended: boolean) => void = () => {};
@@ -5090,6 +5269,8 @@ time.sleep(60)`;
     noTerminal: !pickerEl.querySelector(".xterm"),
     noBadge: !pickerEl.querySelector(".pane-label [data-status]"),
     noRestart: !pickerEl.querySelector("[data-action=pane-restart]"),
+    // 사이드바 프로젝트 줄의 기다림도 함께 지워진다 (계획 리뷰 권고: 재시작은 statuses를 먼저 비운다)
+    noSidebar: projectRow(root)?.dataset.status !== "awaiting",
   };
   const promptClosed = await waitAsync("옛 선택 창 닫힘", async () => promptEvents > 0 && !(await invoke<string[]>("chat_prompts", { project: root })).includes(again?.prompt?.id ?? "-") && true, 3000).catch(() => false);
   await waitFor("닫힌 선택 창 단추", () => option(again?.prompt?.id ?? "-", 0)?.disabled, 3000).catch(() => null);
@@ -6477,6 +6658,8 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["notifyClickUnit", testNotifyClickUnit],
     ["programStatus", () => testProgramStatus(root, t())],
     ["screenBusy", () => testScreenBusy(root, t())],
+    ["projectStatusUnit", testProjectStatusUnit],
+    ["projectStatus", () => testProjectStatus(root, t())],
     ["tabsAndSplits", () => testTabsAndSplits(root, t())],
     ["webglLoss", () => testWebglLoss(t())],
     // 탭을 많이 열면 앞 터미널의 WebGL 컨텍스트가 밀려나므로 WebGL·배율 검사 뒤에 둔다

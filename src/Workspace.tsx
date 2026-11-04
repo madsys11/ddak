@@ -14,6 +14,7 @@ import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./
 import { usePointerTrack } from "./pointerTrack";
 import { Terminal } from "./Terminal";
 import type { ProgramStatus } from "./programStatus";
+import { type ProjectStatus, countStatuses, sameStatus } from "./projectStatus";
 import { useT } from "./prefs";
 import { type Group, promptOf } from "./useGroups";
 import { openLink } from "./terminalLinks";
@@ -316,6 +317,8 @@ type Props = {
   onToggleChat: () => void;
   // 문서 탭으로 열 파일과 열고 나서 갈 제목 (App이 받은 요청, src/docs.ts requestOpenDoc). n이 바뀔 때마다 한 번 연다
   docRequest: { path: string; anchor?: string; n: number } | null;
+  // 이 프로젝트 세션 창들의 상태 수 (사이드바 프로젝트 줄, src/projectStatus.ts). 바뀔 때만, 내려갈 때 null
+  onSummary: (summary: ProjectStatus | null) => void;
 };
 
 // 프로젝트마다 Workspace가 하나씩 떠 있다. 보이는(visible) 것만 단축키를 받는다.
@@ -344,13 +347,13 @@ function StatusBadge({ status, awaiting }: { status?: ProgramStatus; awaiting: b
   );
 }
 
-export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRoot, onError, onClearError, chatOpen, chatUnread, onToggleChat, docRequest }: Props) {
+export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRoot, onError, onClearError, chatOpen, chatUnread, onToggleChat, docRequest, onSummary }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
   const [s, dispatch] = useReducer(reducer, cwd, initial);
-  const latest = useRef({ group, onError, onClearError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs });
-  latest.current = { group, onError, onClearError, onTreeRoot, t, loaded: s.loaded, tabs: s.tabs };
+  const latest = useRef({ group, onError, onClearError, onTreeRoot, onSummary, t, loaded: s.loaded, tabs: s.tabs });
+  latest.current = { group, onError, onClearError, onTreeRoot, onSummary, t, loaded: s.loaded, tabs: s.tabs };
   const creating = useRef(false);
   const bodies = useRef<Record<number, HTMLDivElement | null>>({});
   const root = useRef<HTMLDivElement>(null);
@@ -420,7 +423,11 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   };
   // 그 탭들의 세션을 이어서 하기로 다시 띄운다 (작업그룹 끝내기가 세션을 끝낸 뒤 멈췄을 때). 끝낸 터미널의 늦은 종료는 이전 key의
   // 것이라 창을 닫지 않는다
+  // 옛 터미널의 상태·깨우기도 지운다 (↻처럼. 리뷰 R5: 새 터미널은 상태가 바뀌기 전에는 알리지 않아 옛 기다림이 사이드바에 남았다)
   const relaunchTabs = (ids: number[]) => {
+    const panes = latest.current.tabs.filter((tab) => ids.includes(tab.id)).flatMap((tab) => paneIds(tab.layout));
+    setStatuses((all) => panes.reduce((rest, p) => without(rest, p), all));
+    setWaking((all) => panes.reduce((rest, p) => without(rest, p), all));
     dispatch({ type: "resumeTabs", ids });
     setRuns((r) => ({ ...r, ...Object.fromEntries(ids.map((id) => [id, (r[id] ?? 0) + 1])) }));
   };
@@ -583,6 +590,23 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
   useEffect(() => {
     latest.current.onTreeRoot(treeCwd, treeWorktree);
   }, [treeCwd, treeWorktree]);
+
+  // 사이드바 프로젝트 줄의 상태: 지금 있는 창만 센다 (닫은 창의 항목이 남아도 세지 않게). 재시작은 statuses를 먼저 비운다
+  const livePanes = s.tabs.flatMap((tab) => paneIds(tab.layout));
+  const summary = countStatuses(livePanes.flatMap((p) => (statuses[p] ? [statuses[p]] : [])));
+  const reported = useRef<ProjectStatus | null>(null);
+  useEffect(() => {
+    if (sameStatus(reported.current ?? undefined, summary)) return;
+    reported.current = summary;
+    latest.current.onSummary(summary);
+  });
+  useEffect(
+    () => () => {
+      reported.current = null;
+      latest.current.onSummary(null);
+    },
+    [],
+  );
 
   // 활성 탭을 탭 영역에서 보이게 스크롤한다 (새 탭, ⌘1~9 등으로 바뀔 때).
   // 탭 너비는 나중에도 바뀐다 (셸이 보내는 터미널 제목, 탭 추가·닫기). 그때도 다시 맞추되, 사용자가 휠로 넘겨 활성 탭이
