@@ -27,7 +27,7 @@ import { MessageView, ReadMark, readTarget } from "./mobile/sync";
 import { changeKey, confirmed, keyProblem, plan as pushPlan, reconcile, removeComputer } from "./mobile/push";
 import { Chat, ComputerList, KeyProblem, ProjectList, Settings as PhoneSettingsView, DEFAULT_WAKE_LIMIT as PHONE_WAKE_LIMIT } from "./mobile/MobileApp";
 import { DEFAULT_LIMITS, currentLimits, devResetLimits, fillRules, saveLimits } from "./limits";
-import { fixedRuleGroups } from "./LimitsDialog";
+import { DESIGN_RULES_HEAD, fixedRuleGroups } from "./LimitsDialog";
 import { promptOf } from "./useGroups";
 import { IS_WINDOWS } from "./platform";
 import { locale as phoneLocale, t as phoneT } from "./mobile/i18n";
@@ -3941,8 +3941,20 @@ async function testLimitsUnit() {
     filled === "role {reReviews}\n\nat most 4 re-reviews; 4 again" && now === `role {reReviews}\n\nat most ${currentLimits().reReviews} re-reviews; ${currentLimits().reReviews} again` && fillRules("x", 1) === "x",
     `${JSON.stringify(filled)} ${JSON.stringify(now)}`,
   );
-  const fixed = fixedRuleGroups([group, { ...group, id: "e", name: "Edited", rules: "at most two re-reviews" }, { ...group, id: "n", name: "", rules: null }]);
-  check("협업 제한: 규약을 고쳐 {reReviews}가 없는 그룹만 알림 대상 (규약 없는 그룹은 아님)", fixed.join(",") === "Edited", fixed.join(","));
+  const fixed = fixedRuleGroups([
+    group,
+    { ...group, id: "e", name: "Edited", rules: "at most two re-reviews" },
+    { ...group, id: "n", name: "", rules: null },
+    { ...group, id: "d", name: "Design", rules: `${DESIGN_RULES_HEAD}(1) Only the user approves.` },
+    // 다른 말·표현으로 횟수를 정한 리뷰 규약도 알린다 (리뷰 R12)
+    { ...group, id: "k", name: "Korean", rules: "재리뷰: 2" },
+    { ...group, id: "r", name: "Rounds", rules: "At most two review rounds." },
+  ]);
+  check(
+    "협업 제한: {reReviews}가 없는 규약은 모두 알림 대상, 규약 없는 그룹과 기본 디자인 규약만 아님",
+    fixed.join(",") === "Edited,Korean,Rounds",
+    fixed.join(","),
+  );
 }
 
 // 앱을 켤 때 협업 제한을 읽은 뒤에 Workspace를 연다 (처음 만드는 세션이 기본 횟수로 만들어지지 않게). 자체 테스트는 앱 데이터에
@@ -4410,7 +4422,7 @@ async function testGroupWorktree(root: string, first: Terminal) {
     const [br, ir] = [btn.getBoundingClientRect(), btn.querySelector("svg")?.getBoundingClientRect()];
     return ir ? ir.top + ir.height / 2 - (br.top + br.height / 2) : NaN;
   });
-  check("작업그룹 추가: 탭 바 버튼 아이콘 여섯(Git Graph·채팅 포함)이 세로 가운데", offs.length === 6 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
+  check("작업그룹 추가: 탭 바 버튼 아이콘 일곱(작업그룹 열기·Git Graph·채팅 포함)이 세로 가운데", offs.length === 7 && offs.every((o) => Math.abs(o) <= 0.5), offs.map((o) => o.toFixed(1)).join(","));
   // 준비 스크립트에 명령을 넣으면 다음 작업그룹부터 세션 아래 setup 창에서 돌고, 세션은 준비가 성공한 뒤에 뜬다.
   // 플래그 파일로 멈춰 두거나(hold) 실패하게(fail) 한다.
   const flags = setupPath.replace(/\/[^/]+$/, "");
@@ -4761,6 +4773,91 @@ async function testGroupEnd(root: string, first: Terminal) {
 
 // 세션 추가 (Terminal 메뉴, 탭 오른쪽 클릭): 작업그룹 설정의 세션을 골라 지금 탭에 분할 창으로 띄운다. 쓰기 가능한 세션이
 // 이미 있는 탭에 쓰기 가능한 세션을 또 더하면 경고하고 (취소 / 새 작업그룹 / 그래도 추가), 읽기 전용은 경고하지 않는다.
+// 프로젝트를 추가할 때 첫 탭의 작업그룹 고르기 (App pickProject, GroupPickDialog)와 탭 바 "작업그룹 열기" 메뉴 (Workspace).
+// 폴더 선택 창은 devHooks.pickFolder로 바꾼다. 저장된 상태는 늘 없음으로 (지운 뒤 다시 넣은 프로젝트도 첫 탭을 새로 정하게)
+async function testGroupPick(root: string, first: Terminal) {
+  const picked = root.replace(/\/proj$/, "/picked");
+  const file = await groupsFile();
+  const write = (json: string) => run(first, `printf '%s' '${json}' > "${file}"`);
+  await run(first, `mkdir -p "${picked}"`);
+  const dialog = () => document.querySelector<HTMLElement>(".group-pick-dialog");
+  const shown = () => [...(dialog()?.querySelectorAll<HTMLElement>("[data-group]") ?? [])].map((b) => b.dataset.group).join(",");
+  const ws = () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(picked)}"]`);
+  const titles = () => [...(ws()?.querySelectorAll(".tab .tab-title") ?? [])].map((el) => el.textContent).join(",");
+  const panesIn = () => [...(ws()?.querySelectorAll<HTMLElement>(".tab-body:not([style*='none']) .pane") ?? [])];
+  const clickAdd = () => document.querySelector<HTMLElement>(".sidebar-header .icon-btn")!.click();
+  const realConfirm = devHooks.confirm;
+  const removePicked = async () => {
+    devHooks.confirm = async () => true;
+    projectRow(picked)!.querySelector<HTMLElement>("[data-action=remove]")!.click();
+    await waitFor("고른 프로젝트 빼기", () => !projectRow(picked));
+    devHooks.confirm = realConfirm;
+  };
+  devHooks.pickFolder = async () => picked;
+  devHooks.workspaceLoad = () => Promise.resolve(null);
+  try {
+    // 그룹이 하나뿐이면 묻지 않고 기본 그룹으로
+    clickAdd();
+    await waitFor("그룹 하나: 바로 추가", () => projectRow(picked)?.classList.contains("active") && tabsIn(picked) === 1, 5000);
+    check("그룹 고르기: 작업그룹이 하나면 묻지 않음", !dialog() && titles() === "Test", titles());
+    await removePicked();
+
+    await write(TEST_GROUPS.replace(/]}$/, `,{"id":"duo","name":"Duo","sessions":[{"name":"a"},{"name":"b"}]}]}`));
+    await waitFor("그룹 둘", () => devHooks.groups?.groups.length === 2, 3000);
+    // 취소하면 추가하지 않는다. 기본 그룹이 먼저이고 포커스가 있다 (Enter면 지금과 같다)
+    clickAdd();
+    await waitFor("그룹 고르기 창", dialog, 3000);
+    const focused = (document.activeElement as HTMLElement | null)?.dataset.group;
+    check("그룹 고르기: 기본 그룹이 먼저, 포커스", shown() === "test,duo" && focused === "test", `${shown()} ${focused}`);
+    dialog()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await waitFor("창 닫힘", () => !dialog(), 3000);
+    await sleep(300);
+    check("그룹 고르기: 취소하면 추가하지 않음", !projectRow(picked));
+
+    // 고른 그룹이 첫 탭. 저장한 상태를 읽는 동안 같은 폴더를 다시 골라도 (이미 있는 프로젝트: 묻지 않고 옮겨 가기만)
+    // 고른 그룹이 지워지지 않는다 (리뷰 R11)
+    // 개발 모드는 효과를 두 번 돌리고 읽기는 차례로 돈다: 걸어 둔 읽기를 모두 끝낸다
+    const pending: ((v: string | null) => void)[] = [];
+    const finishLoad = (v: string | null) => pending.splice(0).forEach((r) => r(v));
+    devHooks.workspaceLoad = () => new Promise((r) => pending.push(r));
+    clickAdd();
+    (await waitFor("그룹 고르기 창", () => dialog()?.querySelector<HTMLElement>("[data-group=duo]"), 3000)).click();
+    await waitFor("목록에 추가", () => projectRow(picked)?.classList.contains("active"), 3000);
+    clickAdd();
+    await sleep(500);
+    check("그룹 고르기: 이미 있는 프로젝트는 묻지 않음", !dialog() && tabsIn(picked) === 0, `${!dialog()} ${tabsIn(picked)}`);
+    devHooks.workspaceLoad = () => Promise.resolve(null);
+    finishLoad(null);
+    await waitFor("고른 그룹으로 열림", () => panesIn().length === 2, 5000).catch(() => {});
+    check("그룹 고르기: 고른 작업그룹으로 첫 탭 (읽는 동안 다시 골라도)", titles() === "Duo" && panesIn().map(paneLabel).join(",") === "a,b", `${titles()} ${panesIn().map(paneLabel).join(",")}`);
+
+    // 탭 바 메뉴: 설정의 그룹을 골라 원본 폴더에 연다
+    ws()!.querySelector<HTMLElement>("[data-action=open-group]")!.click();
+    await waitFor("그룹 메뉴", contextMenu, 3000);
+    check("그룹 열기: 메뉴는 기본 그룹 먼저", menuLabels().join(",") === "Test,Duo", menuLabels().join(","));
+    await pickMenu("Test");
+    await waitFor("새 그룹 탭", () => tabsIn(picked) === 2, 3000).catch(() => {});
+    const term = await waitFor("새 그룹 탭 터미널", () => visiblePanes()[0]?.term);
+    await ready(term);
+    // 같은 폴더인지는 셸이 본다 (Windows의 pwd는 /c/… 꼴이라 글자로 비교하지 않는다)
+    const here = (await run(term, `[ . -ef "${picked}" ] && echo HERE-SAME || pwd`)).map((l) => l.trim());
+    check("그룹 열기: 고른 그룹이 원본 폴더에 새 탭", titles() === "Duo,Test" && here.includes("HERE-SAME"), `${titles()} ${here.join("|")}`);
+
+    // 지운 뒤 다시 넣으면 이전 선택을 쓰지 않는다 (그룹을 주지 않으면 기본 그룹)
+    await removePicked();
+    await devHooks.addProject!(picked);
+    await waitFor("다시 넣음", () => tabsIn(picked) === 1, 5000).catch(() => {});
+    check("그룹 고르기: 지운 뒤 다시 넣으면 이전 선택을 쓰지 않음", titles() === "Test", titles());
+    await removePicked();
+  } finally {
+    devHooks.pickFolder = undefined;
+    devHooks.workspaceLoad = undefined;
+    devHooks.confirm = realConfirm;
+    await write(TEST_GROUPS);
+    await waitFor("테스트 설정 복귀", () => devHooks.groups?.groups.length === 1, 3000);
+  }
+}
+
 async function testAddSession(root: string, first: Terminal) {
   const file = await groupsFile();
   // poster: 자기 채팅방 주소({chat})로 MCP post_message를 보낸다 (claude·codex 대신 curl)
@@ -6336,13 +6433,13 @@ async function testLastExit(first: Terminal) {
     buttons.join("|"),
   );
   const btns = [...ws.querySelectorAll<HTMLButtonElement>(".tabbar-btn")];
-  // 순서: 터미널, 작업그룹, 분할 둘, Git Graph, 구분선, 채팅
+  // 순서: 터미널, 작업그룹, 작업그룹 열기, 분할 둘, Git Graph, 구분선, 채팅
   const order = [...ws.querySelectorAll<HTMLElement>(".tabbar-btn, .tabbar-sep")]
     .map((b) => (b.classList.contains("tabbar-sep") ? "|" : (b.dataset.action ?? ((b as HTMLButtonElement).disabled ? "split" : "terminal"))))
     .join();
   check(
     "닫기: 빈 화면에도 탭 바 (분할 버튼만 비활성), 순서는 만드는 버튼 왼쪽·보는 버튼 오른쪽 끝",
-    btns.length === 6 && btns.map((b) => b.disabled).join() === "false,false,true,true,false,false" && order === "terminal,new-group,split,split,git,|,chat",
+    btns.length === 7 && btns.map((b) => b.disabled).join() === "false,false,false,true,true,false,false" && order === "terminal,new-group,open-group,split,split,git,|,chat",
     `${btns.map((b) => b.disabled).join()} ${order}`,
   );
   ws.querySelector<HTMLElement>("[data-action=origin-group]")!.click();
@@ -6516,7 +6613,7 @@ async function testCorrupt(root: string) {
 
   // 이 시나리오는 groups.json 없이 시작한다 → 기본 설정이 만들어진다 (프로젝트가 없어서 CLI는 뜨지 않는다).
   const g = await waitFor("작업그룹 기본 설정", () => devHooks.groups);
-  check("작업그룹: 파일이 없으면 기본 설정을 만듦", g.default === "dev-review" && g.groups.map((x) => x.id).join(",") === "dev-review,shell");
+  check("작업그룹: 파일이 없으면 기본 설정을 만듦", g.default === "dev-review" && g.groups.map((x) => x.id).join(",") === "dev-review,design,shell");
   const [dev, reviewer] = g.groups[0].sessions;
   check(
     "작업그룹: 기본은 claude 개발 + 읽기 전용 codex 리뷰어",
@@ -6528,7 +6625,15 @@ async function testCorrupt(root: string) {
     !!g.groups[0].rules && !!dev.role && !!reviewer.role && dev.args.includes("{prompt}") && reviewer.args.includes("developer_instructions={prompt:toml}"),
     JSON.stringify([g.groups[0].rules?.slice(0, 20), dev.role?.slice(0, 20), dev.args.slice(-1), reviewer.args.slice(-1)]),
   );
-  check("작업그룹: 명령 없는 세션(셸)", g.groups[1].sessions[0].command === "" && g.groups[1].sessions[0].args.length === 0);
+  const [director, artist] = g.groups[1].sessions;
+  check(
+    "작업그룹: 디자인 그룹은 claude director + 쓰기 가능 codex artist",
+    director.command === "claude" && artist.command === "codex" && !director.readOnly && !artist.readOnly && artist.args.includes("workspace-write") && !!g.groups[1].rules,
+    JSON.stringify(g.groups[1].sessions.map((x) => [x.name, x.command, x.readOnly])),
+  );
+  check("작업그룹: 명령 없는 세션(셸)", g.groups[2].sessions[0].command === "" && g.groups[2].sessions[0].args.length === 0);
+  // 협업 제한 창: 기본 설정에는 "고친 규약" 안내가 없다 (디자인 규약은 groups.rs DESIGN_RULES의 첫 줄로 뺀다)
+  check("작업그룹: 기본 설정은 협업 제한의 고친 규약 안내 대상이 없음", fixedRuleGroups(g.groups).length === 0, fixedRuleGroups(g.groups).join(","));
 }
 
 // main 시나리오의 단계. 앞 단계가 만든 상태(터미널 first, 탭, 세션, 설정)를 뒤 단계가 이어 쓴다.
@@ -6672,6 +6777,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["tabScroll", testTabScroll],
     ["manyTerminals", () => testManyTerminals(20)],
     ["projects", () => testProjects(root, t())],
+    ["groupPick", () => testGroupPick(root, t())],
     ["groupErrorClear", () => testGroupErrorClear(root, t())],
     ["chatFilter", () => testChatFilter(root)],
     ["limitsDialog", () => testLimitsDialog(root)],

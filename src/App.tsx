@@ -8,8 +8,9 @@ import { LimitsDialog } from "./LimitsDialog";
 import { currentLimits, loadLimits } from "./limits";
 import { Sidebar } from "./Sidebar";
 import { Workspace } from "./Workspace";
-import { StoreBroken, baseName, useProjects } from "./useProjects";
-import { useGroups } from "./useGroups";
+import { StoreBroken, baseName, normalize, useProjects } from "./useProjects";
+import { groupChoices, useGroups } from "./useGroups";
+import { GroupPickDialog } from "./GroupPickDialog";
 import type { MessageKey } from "./i18n";
 import { devHooks } from "./devHooks";
 import { onOpenDoc } from "./docs";
@@ -64,6 +65,12 @@ function App() {
   const groupsReady = (groups !== null || groupsError !== null) && limitsReady;
   if (import.meta.env.DEV && groupsReady && devHooks.limitsAtFirstWorkspace === undefined) devHooks.limitsAtFirstWorkspace = currentLimits().reReviews;
   const defaultGroup = groups?.groups.find((g) => g.id === groups.default) ?? null;
+  const choices = groupChoices(defaultGroup, groups?.groups ?? null);
+  // 프로젝트를 추가할 때 고른 작업그룹 id (그 Workspace의 첫 탭, 저장된 상태가 없을 때만). 저장하지 않는다: 다음부터는 저장된
+  // 탭을 복원한다. 지우면 함께 지워서 다시 추가할 때 이전 선택을 쓰지 않는다
+  const [firstGroups, setFirstGroups] = useState<Record<string, string>>({});
+  // 폴더를 골랐고 작업그룹을 고르는 중인 경로 (설정을 다 읽은 뒤에 창을 띄운다)
+  const [picking, setPicking] = useState<string | null>(null);
   // 한 번이라도 연 프로젝트의 터미널은 다른 프로젝트로 옮겨 가도 살려 둔다 (숨기기만 한다).
   // 앱을 켤 때 모든 프로젝트의 터미널을 띄우지 않도록, 처음 열 때 만든다.
   const [opened, setOpened] = useState<string[]>([]);
@@ -172,14 +179,32 @@ function App() {
     <>
       {mobileOpen && <MobileDialog onClose={() => setMobileOpen(false)} />}
       {limitsOpen && <LimitsDialog groups={groups?.groups ?? null} onClose={() => setLimitsOpen(false)} />}
+      {picking && groupsReady && choices.length > 1 && (
+        <GroupPickDialog
+          name={baseName(picking)}
+          groups={choices}
+          onPick={(g) => {
+            setPicking(null);
+            addProject(picking, true, g.id);
+          }}
+          onClose={() => setPicking(null)}
+        />
+      )}
     </>
   );
 
-  async function addProject(path: string, activate = true) {
+  // group: 첫 탭으로 열 작업그룹 id. 없으면 기본 그룹. 이미 있는 프로젝트면 옮겨 가기만 하고 고른 그룹은 건드리지 않는다
+  // (그 Workspace가 아직 상태를 읽는 중이면 앞서 고른 그룹이 지워져 기본 그룹으로 열렸다, 리뷰 R11)
+  async function addProject(path: string, activate = true, group?: string) {
+    const key = normalize(path);
+    const isNew = !(projectsRef.current ?? []).some((p) => p.path === key);
+    // Workspace가 뜨기 전에 정해 둔다 (첫 탭을 정하는 것은 그 Workspace가 상태를 읽은 뒤)
+    if (isNew) setFirstGroups(({ [key]: _, ...rest }) => (group ? { ...rest, [key]: group } : rest));
     try {
       await add(path, activate);
       setError(null);
     } catch (e) {
+      if (isNew) setFirstGroups(({ [key]: _, ...rest }) => rest);
       if (e instanceof StoreBroken) return;
       setError(t("sidebar.addFailed", { path: e instanceof Error ? e.message : String(e) }));
     }
@@ -188,9 +213,19 @@ function App() {
   // 새 프로젝트도 여기서: 폴더 선택 창의 "새 폴더" 버튼으로 만든다. 플러그인(desktop.rs)·rfd 폴더 선택의 기본값도 켜짐이지만
   // 이 창이 그 버튼에 기대므로 밝혀 둔다
   async function pickProject() {
-    const picked = await open({ directory: true, canCreateDirectories: true });
-    if (typeof picked === "string") await addProject(picked);
+    const picked = await (import.meta.env.DEV && devHooks.pickFolder ? devHooks.pickFolder() : open({ directory: true, canCreateDirectories: true }));
+    if (typeof picked !== "string") return;
+    // 이미 있는 프로젝트면 그리로 옮겨 가기만 한다 (그룹을 고르게 하면 고른 그룹이 적용되는 것처럼 보인다)
+    if (projectsRef.current?.some((p) => p.path === normalize(picked))) return addProject(picked);
+    setPicking(picked);
   }
+  // 고를 작업그룹이 하나 이하면 (설정을 못 읽은 경우 포함) 묻지 않고 기본으로 추가한다
+  useEffect(() => {
+    if (!picking || !groupsReady || choices.length > 1) return;
+    setPicking(null);
+    addProject(picking);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picking, groupsReady, choices.length]);
 
   async function removeProject(path: string) {
     if (opened.includes(path)) {
@@ -202,6 +237,7 @@ function App() {
     }
     setOpened((o) => o.filter((p) => p !== path));
     setPausedGroups(({ [path]: _, ...rest }) => rest);
+    setFirstGroups(({ [path]: _, ...rest }) => rest);
     remove(path);
   }
 
@@ -240,6 +276,7 @@ function App() {
                 cwd={path}
                 visible={path === active}
                 group={defaultGroup}
+                firstGroup={groups?.groups.find((g) => g.id === firstGroups[path]) ?? null}
                 groups={groups?.groups ?? null}
                 shiftEnterFor={groups?.shiftEnterFor ?? {}}
                 onTreeRoot={(cwd, worktree) =>

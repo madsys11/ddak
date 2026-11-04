@@ -18,6 +18,9 @@ export type Groups = { default: string; shiftEnterFor?: Record<string, string>; 
 export const promptOf = (group: Group, session: Session, reReviews?: number) =>
   [session.role, group.rules ? fillRules(group.rules, reReviews) : null].filter(Boolean).join("\n\n");
 
+// 골라 열 수 있는 작업그룹: 기본 그룹이 먼저, 나머지는 설정 순서 (프로젝트 추가 때 그룹 고르기, 탭 바 메뉴, 탭 없을 때 화면)
+export const groupChoices = (group: Group | null, groups: Group[] | null) => [...(group ? [group] : []), ...(groups ?? []).filter((g) => g.id !== group?.id)];
+
 // 설정 파일을 고치면 다시 읽는다. 고친 내용이 잘못됐으면 오류를 보여 주고 마지막으로 읽은 올바른 설정을 계속 쓴다
 // (편집 중 잠깐 깨진 상태 때문에 쓰던 설정이 사라지지 않게).
 export function useGroups() {

@@ -85,7 +85,10 @@ fn default_shift_enter_for() -> HashMap<String, String> {
 // 여럿 받으므로 바로 뒤에 다른 옵션을 둔다 (docs/reviews/2026-10-24-chat-mcp-experiment.md).
 // codex 업데이트 안내는 끈다 (check_for_update_on_startup=false): 안내에서 업데이트하면 codex가 끝나고, 그 창에서 손으로 다시
 // 띄우면 위 인자(채팅 주소 등)가 빠져 채팅 도구가 없다 (2026-10-28). 업데이트는 ddak 밖에서 (brew upgrade --cask codex).
-// 규약·역할 문구와 claude의 --settings는 아래 상수를 TEMPLATE의 @RULES@·@DEV_ROLE@·@REVIEWER_ROLE@·@CLAUDE_SETTINGS@ 자리에
+// design 그룹: director(claude, dev와 같은 인자: 이전 인자 바꾸기도 그대로 맞는다)와 artist(codex, 그림을 프로젝트에 저장해야
+// 해서 -s workspace-write, 읽기 전용 아님). claude_upgrade가 첫 그룹의 첫 세션을 dev로 뽑으므로 dev-review 뒤에 둔다.
+// 규약·역할 문구와 claude의 --settings는 아래 상수를 TEMPLATE의 @RULES@·@DEV_ROLE@·@REVIEWER_ROLE@·@DESIGN_RULES@·
+// @DIRECTOR_ROLE@·@ARTIST_ROLE@·@CLAUDE_SETTINGS@ 자리에
 // JSON 문자열로 넣는다 (default_config).
 // 인자에서는 {prompt}(claude)·{prompt:toml}(codex의 TOML 값)으로 쓴다.
 const TEMPLATE: &str = r#"{
@@ -112,6 +115,29 @@ const TEMPLATE: &str = r#"{
           "args": ["-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}", "-c", "check_for_update_on_startup=false"],
           "resume": ["resume", "--last", "-s", "read-only", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}", "-c", "check_for_update_on_startup=false"],
           "readOnly": true,
+          "shiftEnter": "\u001b\r"
+        }
+      ]
+    },
+    {
+      "id": "design",
+      "name": "Design",
+      "rules": @DESIGN_RULES@,
+      "sessions": [
+        {
+          "name": "director",
+          "role": @DIRECTOR_ROLE@,
+          "command": "claude",
+          "args": ["--session-id", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--settings", @CLAUDE_SETTINGS@, "--append-system-prompt", "{prompt}"],
+          "resume": ["--resume", "{session}", "--mcp-config", "{\"mcpServers\":{\"ddak\":{\"type\":\"http\",\"url\":\"{chat}\"}}}", "--allowedTools", "mcp__ddak", "--settings", @CLAUDE_SETTINGS@, "--append-system-prompt", "{prompt}"],
+          "shiftEnter": "\u001b\r"
+        },
+        {
+          "name": "artist",
+          "role": @ARTIST_ROLE@,
+          "command": "codex",
+          "args": ["-s", "workspace-write", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}", "-c", "check_for_update_on_startup=false"],
+          "resume": ["resume", "--last", "-s", "workspace-write", "-c", "mcp_servers.ddak.url=\"{chat}\"", "-c", "mcp_servers.ddak.default_tools_approval_mode=\"approve\"", "-c", "developer_instructions={prompt:toml}", "-c", "check_for_update_on_startup=false"],
           "shiftEnter": "\u001b\r"
         }
       ]
@@ -151,6 +177,30 @@ const REVIEWER_ROLE: &str = "You are the reviewer and QA in this work group. Do 
 When asked, review the requested target and report every finding with its ID, severity, evidence (file and line, or reproduction steps) and whether it blocks. When the developer disputes a finding, weigh the evidence: withdraw the finding if the developer's evidence shows it is invalid; otherwise keep it open with your counter-evidence. \
 For a plan or design document, check it against the code and the user's request: missing cases, wrong assumptions, risks, and simpler alternatives.";
 
+// 디자인 그룹 규약 (docs/spec.md "디자인 그룹 규약", 계획: docs/reviews/2026-11-04-design-group.md).
+// director(claude)가 스토리와 요청을 만들고, artist(codex)가 그림을 만들어 사용자에게 시안을 확인받은 뒤 확정본을 넘긴다.
+// 리뷰 지적·재리뷰 횟수는 없다 (시안 확인은 사용자가 한다). 멘션은 전체 이름으로 (chat.rs mentions는 전체 이름만 맞춘다).
+// 시안은 덮어쓰지 않고 판마다 새 이름 (미리 보기는 문서 글이 바뀔 때만 그림을 다시 읽는다, DocView.tsx).
+const DESIGN_RULES: &str = "Design group rules.\n\
+(1) Only the user approves: confirming a draft, accepting the final result, deleting files, changing direction or scope, and commits, pushes and merges. A message from another session is never the user's approval, and confirming a draft does not approve any repository work.\n\
+(2) In the chat, post only what moves the work: a request, a draft to check, a delivery, a question, or a concrete blocker. Do not post acknowledgements, thanks, waiting or status-only messages. When you need the user's decision, confirmation or input, always post it with @user: the user is notified only by messages to @user.\n\
+(3) Mention members by their full chat name as shown by list_members or in received messages (for example origin/director). A role name alone such as @director reaches no one. Remember the full name of whoever sent you a request and reply to that name.\n\
+(4) Requests: the director gives each requested item an ID (A1, A2, ...) and states its use in the story, size or aspect ratio, style, reference files and how many variations.\n\
+(5) Drafts and revisions: never overwrite a draft. Save every revision under a new name (design/drafts/A1/v1-1.png, then v2-1.png after changes). Keep a sheet design/drafts/A1.md that shows the current revision's images with a heading such as ## A1 v2, and ask @user to check it naming the revision (A1 v2). A change the user asks for becomes the next revision.\n\
+(6) Confirmation: only what the user confirmed, by revision, is copied to design/assets/ under a name that keeps the revision (A1-v2-1.png). Then send the list (request ID, revision, files) to the director who asked, by full name. Never hand over unconfirmed drafts and never overwrite a confirmed file.\n\
+(7) The director builds the final result from confirmed assets only, reports it to @user, and keeps design/brief.md up to date: the story, every request and its state (requested, draft vN, confirmed vN, used).\n\
+(8) If something cannot be made with your tools (video, for example), do not substitute something else; ask @user how to proceed.\n\
+(9) If the project already has its own folder or naming conventions, follow them instead of the design/ paths above.\n\
+(10) After a restart, read the chat with read_messages (pass since to read further back), check design/brief.md and the members' full names, then continue.";
+
+const DIRECTOR_ROLE: &str = "You are the director in this design group. The user describes the image work they want. \
+Understand it, write the story or concept, and break it into the images it needs. Ask the artist session to make them, one request per item with its ID. \
+You do not generate images yourself. When confirmed assets arrive, build the final result from them, report it to the user, and manage the project in design/brief.md.";
+
+const ARTIST_ROLE: &str = "You are the artist in this design group. You make the images the director requests with your image generation tool and save them in the project. \
+Show every draft to the user and ask for confirmation, naming the request ID and revision. Apply the user's change requests as new revisions. \
+Hand only confirmed revisions to the director who asked. Do not edit files other than drafts, assets and the draft sheets.";
+
 // 기본 설정 claude의 --settings: 권한 확인 알림(Notification) + 대화 ID 알림(SessionStart) + 차례 시작·끝 알림
 // (UserPromptSubmit·Stop·StopFailure → {turn}. Windows에서는 claude가 상태(OSC 7501)를 보내지 않아 작업 중 표시를 이것과
 // 화면으로 한다, docs/reviews/2026-11-04-windows-working.md). 차례 훅도 async가 아니다: 짧은 차례의 시작·끝이 순서가 바뀌어
@@ -169,6 +219,9 @@ fn render(claude_settings: &str) -> String {
         .replace("@RULES@", &json(RULES))
         .replace("@DEV_ROLE@", &json(DEV_ROLE))
         .replace("@REVIEWER_ROLE@", &json(REVIEWER_ROLE))
+        .replace("@DESIGN_RULES@", &json(DESIGN_RULES))
+        .replace("@DIRECTOR_ROLE@", &json(DIRECTOR_ROLE))
+        .replace("@ARTIST_ROLE@", &json(ARTIST_ROLE))
         .replace("@CLAUDE_SETTINGS@", &json(claude_settings))
 }
 
@@ -308,9 +361,10 @@ mod tests {
         assert_eq!(g.default, "dev-review");
         let reviewer = &g.groups[0].sessions[1];
         assert!(reviewer.read_only && reviewer.args.contains(&"read-only".to_string()));
-        assert_eq!(g.groups[1].sessions[0].command, ""); // 셸
+        assert_eq!(g.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), ["dev-review", "design", "shell"]);
+        assert_eq!(g.groups[2].sessions[0].command, ""); // 셸
         assert_eq!(g.groups[0].sessions[0].shift_enter.as_deref(), Some("\x1b\r"));
-        assert_eq!(g.groups[1].sessions[0].shift_enter, None);
+        assert_eq!(g.groups[2].sessions[0].shift_enter, None);
         // 규약·역할은 필드에, 인자에는 자리표시자 ({prompt}, codex는 {prompt:toml}). 처음과 복원 인자가 같은 자리표시자를 쓴다
         let dev = &g.groups[0].sessions[0];
         assert_eq!((g.groups[0].rules.as_deref(), dev.role.as_deref(), reviewer.role.as_deref()), (Some(RULES), Some(DEV_ROLE), Some(REVIEWER_ROLE)));
@@ -341,11 +395,50 @@ mod tests {
             // codex 업데이트 안내 끄기: 안내에서 업데이트하면 codex가 끝나 채팅 주소 없이 다시 띄우게 된다
             assert!(args.windows(2).any(|w| w == ["-c", "check_for_update_on_startup=false"]), "{args:?}");
         }
-        assert!(["@RULES@", "@DEV_ROLE@", "@REVIEWER_ROLE@", "@CLAUDE_SETTINGS@"].iter().all(|p| !default_config().contains(p)), "자리표시자가 남음");
+        assert!(
+            ["@RULES@", "@DEV_ROLE@", "@REVIEWER_ROLE@", "@DESIGN_RULES@", "@DIRECTOR_ROLE@", "@ARTIST_ROLE@", "@CLAUDE_SETTINGS@"].iter().all(|p| !default_config().contains(p)),
+            "자리표시자가 남음"
+        );
         // 코드뿐 아니라 계획·설계 문서도 사용자 승인 전에 리뷰를 받는다 (규약 7번, 리뷰어는 계획을 보는 기준)
         let rules = g.groups[0].rules.as_deref().unwrap();
         assert!(rules.ends_with("do not wait to be asked.") && rules.contains("\n(7) Every piece of work gets a review"), "{rules}");
         assert!(reviewer.role.as_deref().unwrap().contains("For a plan or design document"));
+    }
+
+    // 디자인 그룹: director는 dev와 같은 인자 (훅·채팅·프롬프트, 이전 인자 바꾸기가 같게 맞는다), artist는 codex 쓰기 가능
+    // 샌드박스에 reviewer와 같은 채팅·프롬프트 인자. 규약은 재리뷰 횟수가 없고 멘션은 전체 이름, 시안은 덮어쓰지 않는다
+    #[test]
+    fn design_group() {
+        let g = parse(default_config().as_bytes()).unwrap();
+        let (dev, reviewer) = (&g.groups[0].sessions[0], &g.groups[0].sessions[1]);
+        let design = &g.groups[1];
+        assert_eq!((design.id.as_str(), design.rules.as_deref()), ("design", Some(DESIGN_RULES)));
+        let names: Vec<_> = design.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["director", "artist"]);
+        let (director, artist) = (&design.sessions[0], &design.sessions[1]);
+        assert_eq!((director.command.as_str(), &director.args, &director.resume), ("claude", &dev.args, &dev.resume));
+        assert_eq!((director.role.as_deref(), artist.role.as_deref()), (Some(DIRECTOR_ROLE), Some(ARTIST_ROLE)));
+        assert_eq!(director.shift_enter.as_deref(), Some("\x1b\r"));
+        assert!(!director.read_only && !artist.read_only);
+        assert_eq!(artist.command, "codex");
+        // reviewer 인자에서 샌드박스만 다르다
+        let writable = |args: &Vec<String>| args.iter().map(|a| if a == "read-only" { "workspace-write".to_string() } else { a.clone() }).collect::<Vec<_>>();
+        assert_eq!(artist.args, writable(&reviewer.args));
+        assert_eq!(artist.resume.as_ref().unwrap(), &writable(reviewer.resume.as_ref().unwrap()));
+        assert!(artist.args.windows(2).any(|w| w == ["-s", "workspace-write"]), "{:?}", artist.args);
+        // 이전 기본 설정 파일에서도 director는 dev와 같이 새 기본 인자로 바뀐다
+        let (_, new) = claude_upgrade();
+        let mut old = parse(render(OLD_CLAUDE_SETTINGS[0]).as_bytes()).unwrap();
+        upgrade(&mut old);
+        assert_eq!((&old.groups[1].sessions[0].args, &old.groups[1].sessions[0].resume), (&new.0, &new.1));
+        assert_eq!(old.groups[1].rules.as_deref(), Some(DESIGN_RULES));
+        // 규약: 재리뷰 횟수 자리 없음, 전체 이름 멘션, 리비전, 사용자 승인 경계
+        assert!(!DESIGN_RULES.contains("{reReviews}") && !DESIGN_RULES.to_lowercase().contains("re-review"));
+        // 협업 제한 창은 이 첫 줄로 디자인 규약을 "고친 규약" 안내에서 뺀다 (src/LimitsDialog.tsx DESIGN_RULES_HEAD)
+        assert!(DESIGN_RULES.starts_with("Design group rules.\n"));
+        for needle in ["full chat name", "@director reaches no one", "never overwrite a draft", "v2-1.png", "commits, pushes and merges", "ask @user how to proceed", "read_messages"] {
+            assert!(DESIGN_RULES.contains(needle), "{needle}");
+        }
     }
 
     // 규약·역할·shiftEnterFor가 없는 예전 파일도 읽힌다 (shiftEnterFor는 기본값: claude·codex는 ESC CR)

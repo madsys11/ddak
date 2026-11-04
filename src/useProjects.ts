@@ -11,7 +11,7 @@ export { baseName } from "./platform";
 const exists = (path: string) => invoke("list_dir", { path }).then(() => true, () => false);
 // 대화상자는 끝에 /를 붙이지 않지만, 같은 폴더가 두 번 들어가지 않게 맞춰 둔다.
 // Windows는 \ 도 (드라이브 루트 C:\ 는 그대로). 맥의 \ 는 이름의 일부
-const normalize = (path: string) => trimTrailingSep(path);
+export const normalize = (path: string) => trimTrailingSep(path);
 
 // 목록 파일을 못 읽었을 때. 이 상태에서는 목록을 바꾸지 않는다 (바꿔도 저장할 수 없고,
 // 저장하면 읽지 못한 원래 목록을 빈 목록으로 덮어쓴다).

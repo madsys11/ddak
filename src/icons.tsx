@@ -47,6 +47,16 @@ export const TerminalIcon = () => (
   </Svg>
 );
 
+// 탭 바 버튼: 작업그룹 골라 열기 (나란히 뜬 세션 창 둘)
+export const GroupIcon = () => (
+  <Svg className="icon-tool">
+    <g fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="1.75" y="3.25" width="5.5" height="9.5" rx="1" />
+      <rect x="8.75" y="3.25" width="5.5" height="9.5" rx="1" />
+    </g>
+  </Svg>
+);
+
 // 탭 바 버튼: 오른쪽으로 분할 / 아래로 분할 (창 안의 세로·가로 구분선)
 export const SplitIcon = ({ dir }: { dir: "row" | "col" }) => (
   <Svg className="icon-tool">

@@ -158,6 +158,7 @@
     },
     { "files": ["src/EndGroupDialog.tsx"], "steps": ["groupEnd"] },
     { "files": ["src/AddSessionDialog.tsx"], "steps": ["addSession"] },
+    { "files": ["src/GroupPickDialog.tsx"], "steps": ["groupPick"] },
     {
       "files": ["src-tauri/src/groups.rs"],
       "steps": ["groups", "groupWorktree", "groupClone", "groupEnd", "addSession", "sessionFollow", "shiftEnterProgram"],

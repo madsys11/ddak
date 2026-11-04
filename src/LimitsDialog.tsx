@@ -3,8 +3,12 @@ import { useT } from "./prefs";
 import { RE_REVIEW_RANGE, WAKE_RANGE, saveLimits, useLimits, useLimitsLoaded } from "./limits";
 import type { Group } from "./useGroups";
 
-// 규약이 있지만 {reReviews}가 없는 그룹(사용자가 고친 규약): 재리뷰 횟수가 들어가지 않는다
-export const fixedRuleGroups = (groups: Group[]) => groups.filter((g) => g.rules && !g.rules.includes("{reReviews}")).map((g) => g.name || g.id);
+// 규약이 있지만 {reReviews}가 없는 그룹(사용자가 고친 규약): 재리뷰 횟수가 들어가지 않는다.
+// 규약은 자유 글이라 리뷰 횟수를 정했는지 글로 짐작하지 않고 모두 알린다. 기본 디자인 그룹의 규약(재리뷰가 없음,
+// groups.rs DESIGN_RULES의 첫 줄로 안다)만 뺀다 (리뷰 R12: "re-review" 철자로 거르면 한국어·다른 표현의 리뷰 규약이 빠졌다)
+export const DESIGN_RULES_HEAD = "Design group rules.\n";
+export const fixedRuleGroups = (groups: Group[]) =>
+  groups.filter((g) => g.rules && !g.rules.includes("{reReviews}") && !g.rules.startsWith(DESIGN_RULES_HEAD)).map((g) => g.name || g.id);
 
 // 앱 메뉴 "협업 제한…" (src-tauri/src/menu.rs, src-tauri/src/limits.rs, docs/spec.md "협업 제한"): 세션끼리 사용자 없이 주고받을 메시지
 // 수와 재리뷰 최대 횟수. 저장하면 대화 제한은 바로 (바뀌었으면 모든 작업그룹을 다시 세고 보류된 알림을 보냄), 재리뷰 횟수는 새로 띄운

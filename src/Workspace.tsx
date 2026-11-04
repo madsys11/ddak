@@ -9,14 +9,14 @@ import { codeError } from "./errors";
 import { DocView } from "./DocView";
 import { baseName } from "./docs";
 import { GitGraph } from "./GitGraph";
-import { ChatIcon, DocIcon, GitIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
+import { ChatIcon, DocIcon, GitIcon, GroupIcon, SplitIcon, TerminalIcon, WorktreeIcon } from "./icons";
 import { Layout, Path, measure, paneIds, remove, row, setRatio, split } from "./layout";
 import { usePointerTrack } from "./pointerTrack";
 import { Terminal } from "./Terminal";
 import type { ProgramStatus } from "./programStatus";
 import { type ProjectStatus, countStatuses, sameStatus } from "./projectStatus";
 import { useT } from "./prefs";
-import { type Group, promptOf } from "./useGroups";
+import { type Group, groupChoices, promptOf } from "./useGroups";
 import { openLink } from "./terminalLinks";
 import { cmdKey, otherKey, relativeTo } from "./platform";
 import { type PaneSession, type Setup, type State, type Tab, commandOf, followSession, fromSaved, isViewer, toSaved } from "./workspaceState";
@@ -301,6 +301,8 @@ type Props = {
   visible: boolean;
   // 기본 작업그룹. 처음 열 때와 새 작업그룹을 만들 때 쓴다. 이미 뜬 세션은 설정이 바뀌어도 그대로 둔다.
   group: Group | null;
+  // 프로젝트를 추가할 때 고른 작업그룹 (App의 그룹 고르기 창). 저장된 상태가 없을 때 첫 탭에만 쓴다. 없으면 group
+  firstGroup?: Group | null;
   // 작업그룹 설정 전체 (세션 추가에서 고른다). 못 읽었으면 null.
   groups: Group[] | null;
   // 세션 구성에 shiftEnter가 없는 터미널의 ⇧↩: 앞에서 도는 프로그램 이름 → 보낼 입력 (groups.json shiftEnterFor, Terminal.tsx)
@@ -347,13 +349,13 @@ function StatusBadge({ status, awaiting }: { status?: ProgramStatus; awaiting: b
   );
 }
 
-export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRoot, onError, onClearError, chatOpen, chatUnread, onToggleChat, docRequest, onSummary }: Props) {
+export function Workspace({ cwd, visible, group, firstGroup, groups, shiftEnterFor, onTreeRoot, onError, onClearError, chatOpen, chatUnread, onToggleChat, docRequest, onSummary }: Props) {
   const t = useT();
   const setupProblem = (setup: Setup) =>
     setup.spawnFailed ? t("setup.spawnFailed") : setup.code === null ? t("setup.stopped") : t("setup.failed", { code: setup.code });
   const [s, dispatch] = useReducer(reducer, cwd, initial);
-  const latest = useRef({ group, onError, onClearError, onTreeRoot, onSummary, t, loaded: s.loaded, tabs: s.tabs });
-  latest.current = { group, onError, onClearError, onTreeRoot, onSummary, t, loaded: s.loaded, tabs: s.tabs };
+  const latest = useRef({ group, firstGroup, onError, onClearError, onTreeRoot, onSummary, t, loaded: s.loaded, tabs: s.tabs });
+  latest.current = { group, firstGroup, onError, onClearError, onTreeRoot, onSummary, t, loaded: s.loaded, tabs: s.tabs };
   const creating = useRef(false);
   const bodies = useRef<Record<number, HTMLDivElement | null>>({});
   const root = useRef<HTMLDivElement>(null);
@@ -511,7 +513,7 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
         latest.current.onError(latest.current.t("workspace.loadFailed", { detail: codeError(e).detail }));
         return { saved: null, blocked: true };
       }
-    }).then((r) => r && alive && dispatch({ type: "loaded", saved: r.saved, blocked: r.blocked, group: latest.current.group }));
+    }).then((r) => r && alive && dispatch({ type: "loaded", saved: r.saved, blocked: r.blocked, group: latest.current.firstGroup ?? latest.current.group }));
     return () => {
       alive = false;
     };
@@ -585,6 +587,8 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
 
   // 보고 있는 탭의 폴더를 알린다 (탭이 없으면 원본)
   const activeTab = s.tabs.find((tab) => tab.id === s.active);
+  // 원본 폴더에 골라 열 수 있는 작업그룹 (탭 바 메뉴, 탭 없을 때 화면)
+  const choices = groupChoices(group, groups);
   const treeCwd = activeTab?.cwd ?? cwd;
   const treeWorktree = activeTab?.worktree ?? null;
   useEffect(() => {
@@ -779,6 +783,19 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
         <button className="tabbar-btn" data-action="new-group" title={t("workspace.newGroup")} onClick={() => createGroup()}>
           <WorktreeIcon />
         </button>
+        {/* 설정의 작업그룹을 골라 원본 폴더에 연다 (디자인 그룹 등. 새 작업그룹·첫 탭은 기본 그룹) */}
+        <button
+          className="tabbar-btn"
+          data-action="open-group"
+          title={t("workspace.openGroupMenu")}
+          disabled={!choices.length}
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            setMenu({ x: r.left, y: r.bottom + 2, items: choices.map((g) => ({ label: g.name, action: () => dispatch({ type: "newGroupTab", group: g, cwd: s.root }) })) });
+          }}
+        >
+          <GroupIcon />
+        </button>
         <div className="tabbar-spacer" />
         <button className="tabbar-btn" disabled={!activeTab || isViewer(activeTab)} title={t("workspace.splitRight")} onClick={() => dispatch({ type: "split", dir: "row" })}>
           <SplitIcon dir="row" />
@@ -805,11 +822,18 @@ export function Workspace({ cwd, visible, group, groups, shiftEnterFor, onTreeRo
       {s.loaded && s.tabs.length === 0 && (
         <div className="workspace-empty">
           <div className="workspace-empty-actions">
-            {group && (
-              <button data-action="origin-group" onClick={() => dispatch({ type: "newGroupTab", group, cwd: s.root })}>
-                {t("workspace.openGroup", { name: group.name })}
+            {/* 설정의 작업그룹마다 원본 폴더에 열기. 기본 그룹이 먼저 (data-action=origin-group) */}
+            {choices.map((g) => (
+              <button
+                key={g.id}
+                className={g === choices[0] && g === group ? undefined : "secondary"}
+                data-action={g === group ? "origin-group" : undefined}
+                data-group={g.id}
+                onClick={() => dispatch({ type: "newGroupTab", group: g, cwd: s.root })}
+              >
+                {t("workspace.openGroup", { name: g.name })}
               </button>
-            )}
+            ))}
             <button className="secondary" onClick={() => createGroup()}>
               {t("workspace.newGroup")}
             </button>
