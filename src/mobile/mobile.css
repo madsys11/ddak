@@ -290,6 +290,11 @@ textarea:focus {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* 글 속 웹 주소 (src/ChatText.tsx): 누르면 새 탭으로. 긴 주소는 아무 데서나 줄을 바꾼다 */
+.text a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
 .text.answer.changed,
 .text.answer.failed {
   color: var(--fg-dim);

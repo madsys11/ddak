@@ -10,6 +10,8 @@ import { Resizer } from "./Resizer";
 import { ChatFilterBar } from "./ChatFilterBar";
 import { applyFilter, groupsIn, loadFilter, saveFilter, type ChatFilter } from "./chatFilter";
 import { useLimits } from "./limits";
+import { ChatText } from "./ChatText";
+import { openLink } from "./terminalLinks";
 
 // src-tauri/src/chat.rs Message
 // held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음. via: 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
@@ -276,7 +278,9 @@ export function ChatPanel({ project, open, watching, onClose, onUnread, onPaused
                 {modeText(m.mode, t)}
               </div>
             ) : (
-              <div className="chat-text">{m.text}</div>
+              <div className="chat-text">
+                <ChatText text={m.text} onOpen={openLink} />
+              </div>
             )}
           </div>
         ))}

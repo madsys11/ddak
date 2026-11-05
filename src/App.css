@@ -1005,6 +1005,11 @@ button.secondary {
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* 글 속 웹 주소 (src/ChatText.tsx): 누르면 기본 브라우저로. 긴 주소는 아무 데서나 줄을 바꾼다 */
+.chat-text a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
 /* 세션이 띄운 선택 창 (src/PromptChoices.tsx): 질문은 터미널 글 그대로(고정폭), 선택지는 한 줄씩 버튼.
    승인일 수 있는 선택지는 누르면 확인 줄이 뜬다. 닫혔거나 답한 뒤에는 누를 수 없고, 보낸 답은 강조색 테두리 */
 .prompt {

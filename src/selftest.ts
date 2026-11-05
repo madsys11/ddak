@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
+import { flushSync } from "react-dom";
 import { Terminal, type ILink } from "@xterm/xterm";
 import { devHooks, liveTerms } from "./devHooks";
 import type { Groups } from "./useGroups";
@@ -38,6 +39,8 @@ import { en } from "./i18n/en";
 import { type PaneSession, commandOf, followSession, fromSaved } from "./workspaceState";
 import { screenPixelRatio, setZoomFactor } from "./zoom";
 import { NO_FILTER, applyFilter, groupOf, groupsIn, loadFilter, saveFilter } from "./chatFilter";
+import { ChatText } from "./ChatText";
+import { splitUrls } from "./urls";
 import { FILTER_KEY as CHAT_FILTER_KEY } from "./ChatPanel";
 import { PHONE_FILTER_KEY } from "./mobile/MobileApp";
 import { MONO_FONT, monoFaces } from "./monoFont";
@@ -794,6 +797,64 @@ async function testChatFilterUnit() {
   const broken = loadFilter(key, "p");
   localStorage.removeItem(key);
   check("채팅 필터: 기억 (끄면 지움, 깨졌으면 필터 없음)", back.mine && back.group === "web" && removed === "{}" && !broken.mine && broken.group === null, `${JSON.stringify(back)} ${removed} ${JSON.stringify(broken)}`);
+}
+
+// 채팅 글의 웹 주소 (src/urls.ts splitUrls, src/ChatText.tsx): 주소만 링크, 끝의 문장 부호는 글로, 이어 붙이면 원래 글.
+// 폰 모양(onOpen 없음)은 새 탭으로 여는 a
+async function testChatLinksUnit() {
+  const parts = (text: string) => splitUrls(text).map((p) => (p.url ? `[${p.url}]` : p.text)).join("|");
+  const got = [
+    parts("see https://claude.ai/code/artifact/abc-123."),
+    parts("https://a.com/x 와 http://b.org/y?q=1)"),
+    parts("no link here"),
+    parts("https:// 빈 주소"),
+    parts(""),
+  ];
+  const want = ["see |[https://claude.ai/code/artifact/abc-123]|.", "[https://a.com/x]| 와 |[http://b.org/y?q=1]|)", "no link here", "https:// 빈 주소", ""];
+  check("채팅 링크: 웹 주소만 나누고 끝의 문장 부호는 글로", got.every((g, i) => g === want[i]), got.join(" / "));
+  const el = document.createElement("div");
+  const root = createRoot(el);
+  flushSync(() => root.render(createElement(ChatText, { text: "art https://claude.ai/code/artifact/x1, ok" })));
+  const a = el.querySelector("a");
+  const phone = { text: el.textContent, href: a?.getAttribute("href"), target: a?.target, rel: a?.rel, n: el.querySelectorAll("a").length };
+  root.unmount();
+  check(
+    "채팅 링크 (폰 모양): 글은 그대로, 주소는 새 탭으로 여는 링크",
+    phone.text === "art https://claude.ai/code/artifact/x1, ok" && phone.href === "https://claude.ai/code/artifact/x1" && phone.target === "_blank" && phone.rel === "noopener noreferrer" && phone.n === 1,
+    JSON.stringify(phone),
+  );
+}
+
+// 맥 채팅 패널의 웹 주소: 누르면 기본 브라우저로 연다 (links.rs open_link, 자체 테스트는 기록). 웹뷰는 그 주소로 가지 않는다
+async function testChatLinks(root: string) {
+  const ws = () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(root)}"]`)!;
+  const panel = () => ws().querySelector<HTMLElement>(".chat-panel")!;
+  const shown = () => !!ws().querySelector(".chat-panel") && panel().style.display !== "none";
+  if (!shown()) ws().querySelector<HTMLElement>("[data-action=chat]")!.click();
+  await waitFor("채팅 패널", shown, 3000);
+  const token = await invoke<string>("selftest_chat_join", { project: root, name: "origin/linker" });
+  try {
+    const url = "https://claude.ai/code/artifact/selftest-L1";
+    await invoke("selftest_chat_post", { project: root, from: "origin/linker", text: `@user L1 ${url}.` });
+    const link = () => [...panel().querySelectorAll<HTMLAnchorElement>(".chat-text a")].find((a) => a.getAttribute("href") === url);
+    await waitFor("채팅 링크", () => !!link(), 5000).catch(() => null);
+    await invoke("selftest_opened_links");
+    const here = location.href;
+    const text = link()?.closest(".chat-text")?.textContent;
+    link()?.click();
+    const opened: [string, string][] = [];
+    for (let i = 0; i < 20 && opened.length === 0; i++) {
+      opened.push(...(await invoke<[string, string][]>("selftest_opened_links")));
+      if (opened.length === 0) await sleep(50);
+    }
+    check(
+      "채팅 링크 (맥): 글 속 주소를 누르면 기본 브라우저로 열고 웹뷰는 그대로",
+      !!link() && text === `@user L1 ${url}.` && opened.length === 1 && opened[0][0] === "url" && opened[0][1] === url && location.href === here,
+      `${!!link()} ${JSON.stringify(text)} ${JSON.stringify(opened)}`,
+    );
+  } finally {
+    await invoke("selftest_chat_leave", { token });
+  }
 }
 
 // 맥 채팅 패널의 필터 줄 (ChatFilterBar): 토글·작업그룹 탭을 바꾸면 보이는 메시지와 숨긴 수가 바뀌고 프로젝트마다 기억한다.
@@ -6738,6 +6799,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["mobileThemeUnit", testMobileThemeUnit],
     ["mobileChatUnit", testMobileChatUnit],
     ["chatFilterUnit", testChatFilterUnit],
+    ["chatLinksUnit", testChatLinksUnit],
     ["mobileChatFilterUnit", testMobileChatFilterUnit],
     ["mobileSettingsUnit", testMobileSettingsUnit],
     ["panels", testPanels],
@@ -6778,6 +6840,7 @@ export async function runSelftest(root: string, scenario: string, only: string[]
     ["groupPick", () => testGroupPick(root, t())],
     ["groupErrorClear", () => testGroupErrorClear(root, t())],
     ["chatFilter", () => testChatFilter(root)],
+    ["chatLinks", () => testChatLinks(root)],
     ["limitsDialog", () => testLimitsDialog(root)],
     ["lastExit", () => testLastExit(t())],
   ];

@@ -105,7 +105,7 @@
     { "files": ["src/zoom.ts"], "steps": ["zoom", "zoomIme"] },
     {
       "files": ["src/ChatPanel.tsx", "src-tauri/src/chat.rs"],
-      "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects", "sessionFollow", "chatFilter", "limitsDialog"]
+      "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects", "sessionFollow", "chatFilter", "chatLinks", "limitsDialog"]
     },
     {
       "files": ["src/limits.ts", "src/LimitsDialog.tsx", "src-tauri/src/limits.rs"],
@@ -114,6 +114,10 @@
     {
       "files": ["src/chatFilter.ts", "src/ChatFilterBar.tsx"],
       "steps": ["chatFilterUnit", "chatFilter", "mobileChatFilterUnit"]
+    },
+    {
+      "files": ["src/urls.ts", "src/ChatText.tsx"],
+      "steps": ["chatLinksUnit", "chatLinks", "terminalLinksUnit", "terminalLinks"]
     },
     {
       "files": ["src/MobileDialog.tsx", "src/mobile/**", "src-tauri/src/mobile.rs", "src-tauri/src/push.rs"],

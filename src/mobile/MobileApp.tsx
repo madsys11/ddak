@@ -9,6 +9,7 @@ import { MessageView, ReadMark, readTarget } from "./sync";
 import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 import { ModePicker, modeLabel, modeText } from "../ModePicker";
 import { ChatFilterBar } from "../ChatFilterBar";
+import { ChatText } from "../ChatText";
 import { applyFilter, groupsIn, loadFilter, saveFilter, type ChatFilter } from "../chatFilter";
 
 // 컴퓨터·프로젝트마다 기억하는 채팅 필터 (src/chatFilter.ts)
@@ -726,7 +727,9 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
                 ) : m.mode ? (
                   <div className={`text answer ${m.mode.result}`}>{modeText(m.mode, t)}</div>
                 ) : (
-                  <div className="text">{m.text}</div>
+                  <div className="text">
+                    <ChatText text={m.text} />
+                  </div>
                 )}
               </div>
             ))}

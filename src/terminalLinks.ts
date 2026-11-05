@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { IBufferRange, ILink, ILinkHandler, ILinkProvider, Terminal as XTerm } from "@xterm/xterm";
 import { isDocPath, requestOpenDoc } from "./docs";
 import { IS_WINDOWS, cmdKey, fileUrlPath } from "./platform";
+import { TRAIL_RE, URL_RE } from "./urls";
 
 // 터미널 링크: 화면 글자의 URL과 파일 경로를 ⌘+클릭하면 기본 앱으로 연다 (src-tauri/src/links.rs open_link). 마크다운은 문서 탭.
 // claude는 ddak 안에서 경로·URL을 OSC 8 없이 평문으로 그린다 (claude 2.1.310로 실험, 2026-10-26). 그래서 글자에서 찾는다.
@@ -11,11 +12,8 @@ import { IS_WINDOWS, cmdKey, fileUrlPath } from "./platform";
 
 export type FoundLink = { start: number; end: number; kind: "url" | "path"; target: string };
 
-const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+/gi;
 // 경로 후보 낱말: 공백과 감싸는 기호 밖의 연속된 글자
 const TOKEN_RE = /[^\s"'`<>()[\]{}|,;]+/g;
-// 문장 부호로 끝나면 뺀다 ("spec.md." "x.html:")
-const TRAIL_RE = /[.,:;!?)\]}>'"]+$/;
 // 줄·칸 번호 (src/x.ts:42, src/x.ts:42:7). 여는 것은 파일 자체
 const LINE_RE = /(:\d+){1,2}$/;
 // 한국어 문장에서 경로 뒤에 붙는 조사 ("docs/spec.md에", "x.html을")
