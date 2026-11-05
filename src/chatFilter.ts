@@ -1,6 +1,6 @@
 // 채팅 필터 (docs/spec.md "채팅방 설계" 필터, docs/reviews/2026-11-02-chat-filter.md): 맥 채팅 패널(ChatPanel.tsx)과
 // 폰 채팅(mobile/MobileApp.tsx)이 같이 쓴다. 보이는 것만 거른다 (읽음·알림·서버는 그대로).
-// - mine: 사용자가 보냈거나 받은 사람에 사용자가 있는 메시지 (@all이면 사용자도 받는다).
+// - mine: 받은 사람에 사용자가 있는 메시지 ("나에게 온 것만". @all이면 사용자도 받는다. 사용자가 보낸 것은 빠진다).
 // - group: 그 작업그룹에 속한 참여자가 관계된 메시지. 관계된 참여자 = 보낸 사람, 받은 사람, 그리고 선택 창 답·권한 모드 기록의
 //   대상 세션 (이 기록은 from이 user, to가 비어 있고 대상은 member에만 있다: prompts.rs prompt_result, modes.rs mode_result).
 // - 둘 다면 둘 다 맞는 것.
@@ -23,7 +23,7 @@ export const involved = (m: Filterable): string[] => [m.from, ...m.to, ...(m.ans
 export const isActive = (f: ChatFilter) => f.mine || f.group !== null;
 
 export function matches(m: Filterable, f: ChatFilter): boolean {
-  if (f.mine && m.from !== USER && !m.to.includes(USER)) return false;
+  if (f.mine && !m.to.includes(USER)) return false;
   return f.group === null || involved(m).some((n) => groupOf(n) === f.group);
 }
 

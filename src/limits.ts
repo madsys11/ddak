@@ -7,7 +7,7 @@ import { devHooks } from "./devHooks";
 // 제한)와 재리뷰 최대 횟수. 앱 전체에 하나라 작은 저장소로 둔다: App이 처음에 읽고(loadLimits) Workspace를 연다 (처음 만드는 세션이
 // 기본 횟수로 만들어지지 않게). 바뀌면 Rust가 "limits" 이벤트로 알린다.
 export type Limits = { wakeLimit: number; reReviews: number };
-export const DEFAULT_LIMITS: Limits = { wakeLimit: 10, reReviews: 2 };
+export const DEFAULT_LIMITS: Limits = { wakeLimit: 12, reReviews: 2 };
 // 고를 수 있는 범위 (limits.rs WAKE_RANGE·RE_REVIEW_RANGE)
 export const WAKE_RANGE = [1, 100] as const;
 export const RE_REVIEW_RANGE = [0, 5] as const;

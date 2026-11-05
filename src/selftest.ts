@@ -756,7 +756,7 @@ function testMobileSyncUnit() {
 
 // 폰 채팅 화면의 읽음 (src/mobile/MobileApp.tsx Chat): 실제 화면을 iframe에 그리고 맥 API만 대역으로 바꾼다. 위로 올려 읽다가
 // 보내면 맨 아래로 가서 최신을 보게 되므로 읽음을 알린다 (3단계 재리뷰 R4: 스크롤로 내려온 것이 아니라 알리지 않았다)
-// 채팅 필터 (src/chatFilter.ts): 나와 관련된 것만 (보냈거나 받은 사람에 user), 작업그룹 (관계된 참여자: 보낸 사람, 받은 사람,
+// 채팅 필터 (src/chatFilter.ts): 나에게 온 것만 (받은 사람에 user, 사용자가 보낸 것은 빠짐), 작업그룹 (관계된 참여자: 보낸 사람, 받은 사람,
 // 선택 창 답·권한 모드 기록의 member. 이 기록은 실제로 from user, to []로 저장된다), 둘 다면 AND. 숨긴 수와 그중 나에게 온 수.
 async function testChatFilterUnit() {
   const msgs = [
@@ -772,10 +772,10 @@ async function testChatFilterUnit() {
   ];
   const ids = (mine: boolean, group: string | null) => applyFilter(msgs, { mine, group }).shown.map((m) => m.id).join(",");
   const got = [ids(false, null), ids(true, null), ids(false, "origin"), ids(false, "web"), ids(true, "web")];
-  check("채팅 필터: 없음·나와 관련·작업그룹(origin, web)·둘 다", got.join(" / ") === "1,2,3,4,5,6,7,8,9 / 1,3,4,7,8,9 / 1,2,3,4,6,7,9 / 4,5,6,8 / 4,8", got.join(" / "));
+  check("채팅 필터: 없음·나에게 온 것만·작업그룹(origin, web)·둘 다", got.join(" / ") === "1,2,3,4,5,6,7,8,9 / 3,4,9 / 1,2,3,4,6,7,9 / 4,5,6,8 / 4", got.join(" / "));
   const web = applyFilter(msgs, { mine: false, group: "web" });
   const mine = applyFilter(msgs, { mine: true, group: null });
-  check("채팅 필터: 숨긴 수와 그중 나에게 온 수", web.hidden === 5 && web.hiddenToMe === 2 && mine.hidden === 3 && mine.hiddenToMe === 0, `${web.hidden}/${web.hiddenToMe} ${mine.hidden}/${mine.hiddenToMe}`);
+  check("채팅 필터: 숨긴 수와 그중 나에게 온 수", web.hidden === 5 && web.hiddenToMe === 2 && mine.hidden === 6 && mine.hiddenToMe === 0, `${web.hidden}/${web.hiddenToMe} ${mine.hidden}/${mine.hiddenToMe}`);
   const groups = groupsIn(msgs, ["user", "ops/x"]).join(",");
   const kept = groupsIn([], [], "gone").join(",");
   // 답·모드 기록에만 나오는 그룹도 고를 수 있다 (from user, to [])
@@ -796,7 +796,7 @@ async function testChatFilterUnit() {
   check("채팅 필터: 기억 (끄면 지움, 깨졌으면 필터 없음)", back.mine && back.group === "web" && removed === "{}" && !broken.mine && broken.group === null, `${JSON.stringify(back)} ${removed} ${JSON.stringify(broken)}`);
 }
 
-// 맥 채팅 패널의 필터 줄 (ChatFilterBar): 토글·작업그룹을 바꾸면 보이는 메시지와 숨긴 수가 바뀌고 프로젝트마다 기억한다.
+// 맥 채팅 패널의 필터 줄 (ChatFilterBar): 토글·작업그룹 탭을 바꾸면 보이는 메시지와 숨긴 수가 바뀌고 프로젝트마다 기억한다.
 // 앞 단계가 남긴 메시지가 있을 수 있어 이 단계의 표시(F1…)만 비교한다.
 async function testChatFilter(root: string) {
   const ws = () => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(root)}"]`)!;
@@ -817,12 +817,10 @@ async function testChatFilter(root: string) {
     const hidden = () => Number(panel().querySelector<HTMLElement>(".chat-filter-hidden")?.dataset.hidden ?? 0);
     const hiddenToMe = () => Number(panel().querySelector<HTMLElement>(".chat-filter-hidden")?.dataset.hiddenToMe ?? 0);
     const mineBtn = () => panel().querySelector<HTMLButtonElement>("[data-action=chat-filter-mine]")!;
-    const select = () => panel().querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")!;
-    const pick = (g: string) => {
-      select().value = g;
-      select().dispatchEvent(new Event("change", { bubbles: true }));
-    };
-    const options = [...select().options].map((o) => o.value).filter(Boolean);
+    const tabs = () => [...panel().querySelectorAll<HTMLButtonElement>("[data-action=chat-filter-group]")];
+    const pick = (g: string) => tabs().find((b) => b.dataset.group === g)!.click();
+    const options = tabs().map((b) => b.dataset.group).filter(Boolean);
+    const allFirst = tabs()[0]?.dataset.group === "" && tabs()[0]?.getAttribute("aria-pressed") === "true";
     const settle = () => sleep(100);
     mineBtn().click();
     await settle();
@@ -839,16 +837,16 @@ async function testChatFilter(root: string) {
     const empty = !!panel().querySelector("[data-filter-empty]") && marks() === "";
     pick("");
     await settle();
-    const cleared = { marks: marks(), noHidden: !panel().querySelector(".chat-filter-hidden"), stored: JSON.parse(localStorage.getItem(CHAT_FILTER_KEY) ?? "{}")[root] ?? null };
-    check("채팅 필터 (맥): 작업그룹 목록은 참여자와 메시지에서", ["origin", "solo", "web"].every((g) => options.includes(g)), options.join(","));
+    const cleared = { marks: marks(), noHidden: !panel().querySelector(".chat-filter-hidden"), stored: JSON.parse(localStorage.getItem(CHAT_FILTER_KEY) ?? "{}")[root] ?? null, all: tabs()[0]?.getAttribute("aria-pressed") };
+    check("채팅 필터 (맥): 탭은 전체가 먼저, 작업그룹은 참여자와 메시지에서", allFirst && ["origin", "solo", "web"].every((g) => options.includes(g)), `${allFirst} ${options.join(",")}`);
     check(
-      "채팅 필터 (맥): 나와 관련된 것만 → 내가 보낸 것과 나에게 온 것, 숨긴 수는 받은 메시지 전체 기준",
-      onlyMine.marks === "F1,F3,F5" && onlyMine.hidden === total - onlyMine.shown && onlyMine.hidden > 0 && onlyMine.pressed === "true",
+      "채팅 필터 (맥): 나에게 온 것만 → 내가 보낸 것은 빠짐, 숨긴 수는 받은 메시지 전체 기준",
+      onlyMine.marks === "F3,F5" && onlyMine.hidden === total - onlyMine.shown && onlyMine.hidden > 0 && onlyMine.pressed === "true",
       `${JSON.stringify(onlyMine)} total=${total}`,
     );
     check("채팅 필터 (맥): 작업그룹(web)과 함께 켜면 둘 다 맞는 것만, web만이면 그룹 사이 메시지도", mineWeb === "F5" && webOnly.marks === "F4,F5" && webOnly.toMe >= 1, `${mineWeb} ${JSON.stringify(webOnly)}`);
     check("채팅 필터 (맥): 프로젝트마다 기억 (켠 것만 저장, 다 끄면 지움)", stored?.group === "web" && stored?.mine === false && cleared.stored === null, `${JSON.stringify(stored)} ${JSON.stringify(cleared.stored)}`);
-    check("채팅 필터 (맥): 맞는 메시지가 없으면 안내, 끄면 모두 보임", empty && cleared.marks === "F1,F2,F3,F4,F5" && cleared.noHidden, `${empty} ${JSON.stringify(cleared)}`);
+    check("채팅 필터 (맥): 맞는 메시지가 없으면 안내, 전체 탭이면 모두 보임", empty && cleared.marks === "F1,F2,F3,F4,F5" && cleared.noHidden && cleared.all === "true", `${empty} ${JSON.stringify(cleared)}`);
   } finally {
     for (const token of tokens) await invoke("selftest_chat_leave", { token });
   }
@@ -895,8 +893,9 @@ async function testMobileChatFilterUnit() {
     check("폰 채팅 필터: 기억한 필터로 시작, 최신 페이지에 맞는 것이 없으면 안내와 이전 메시지, 받으면 나타남", mineOn && empty && hiddenFirst === "2" && texts() === "P40", `${mineOn} ${empty} hidden=${hiddenFirst} ${texts()}`);
     check("폰 채팅 필터: 숨겨도 읽음 알림은 그대로 (최신 51)", reads[0] === 51, reads.join(","));
     root.render(createElement(Chat, { computer, project: "q" }));
-    await waitFor("다른 프로젝트", () => doc.querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")?.value === "web", 3000).catch(() => null);
-    const q = [doc.querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")?.value, doc.querySelector("[data-action=chat-filter-mine]")?.getAttribute("aria-pressed")];
+    const pressedTab = () => doc.querySelector<HTMLElement>("[data-action=chat-filter-group][aria-pressed=true]")?.dataset.group;
+    await waitFor("다른 프로젝트", () => pressedTab() === "web", 3000).catch(() => null);
+    const q = [pressedTab(), doc.querySelector("[data-action=chat-filter-mine]")?.getAttribute("aria-pressed")];
     check("폰 채팅 필터: 컴퓨터/프로젝트마다 따로 기억", q[0] === "web" && q[1] === "false", JSON.stringify(q));
 
     // 위쪽을 보는 동안 새 메시지(나에게 옴)가 오면 읽지 않는다. 그 뒤 필터를 바꾸면 맨 아래로 가므로 그 번호까지 읽음을 알린다
@@ -921,9 +920,7 @@ async function testMobileChatFilterUnit() {
     await waitFor("새 메시지", () => texts().includes("R61"), 3000).catch(() => null);
     await sleep(100);
     const beforeFilter = reads.join(",");
-    const group = doc.querySelector<HTMLSelectElement>("[data-action=chat-filter-group]")!;
-    group.value = "web";
-    group.dispatchEvent(new Event("change", { bubbles: true }));
+    doc.querySelector<HTMLElement>("[data-action=chat-filter-group][data-group=web]")!.click();
     await waitFor("필터 뒤 읽음", () => reads.includes(61), 3000).catch(() => null);
     const zero = !!doc.querySelector("[data-filter-empty]");
     check("폰 채팅 필터: 위쪽을 보다가 필터를 바꾸면 (결과 0개여도) 맨 아래로 가며 최신까지 읽음을 알림", beforeFilter === "60" && zero && reads.at(-1) === 61, `${beforeFilter} → ${reads.join(",")} zero=${zero}`);
@@ -5979,8 +5976,9 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
     pinged.length === currentLimits().wakeLimit + 1 && pinged.filter((m) => m.held).length === 1 && !!pinged[currentLimits().wakeLimit].held && beforeResume > 0 && toldChatter && heldTag && !!pausedBar() && !!pausedNote,
     `${pinged.map((m) => !!m.held).join(",")} told=${toldChatter} tag=${heldTag} bar=${!!pausedBar()} wakes=${beforeResume} note=${JSON.stringify(pausedNote)}`,
   );
-  // 멈춤 알림 문구(Rust wake_limit)와 데스크톱 패널의 수가 맞는 것은 위 pausedNote가 본다. 폰 화면의 수도 같아야 한다
-  check("깨우기 제한: 폰이 모를 때 쓰는 기본 수가 데스크톱 기본과 같음", PHONE_WAKE_LIMIT === DEFAULT_LIMITS.wakeLimit, `${PHONE_WAKE_LIMIT} ${DEFAULT_LIMITS.wakeLimit}`);
+  // 멈춤 알림 문구(Rust wake_limit)와 데스크톱 패널의 수가 맞는 것은 위 pausedNote가 본다. 폰은 맥이 알려 준 값을 쓰고,
+  // 알려 주지 않는 예전 ddak에만 그때의 고정값 10을 쓴다 (기본이 12로 바뀌어도 예전 ddak은 10이다)
+  check("깨우기 제한: 폰이 모를 때 쓰는 수는 예전 ddak의 고정값", PHONE_WAKE_LIMIT === 10 && DEFAULT_LIMITS.wakeLimit === 12, `${PHONE_WAKE_LIMIT} ${DEFAULT_LIMITS.wakeLimit}`);
   pausedBar()?.querySelector("button")?.click();
   const resumed = await waitFor("재개 뒤 깨움", () => fromChatter() === beforeResume + 1, WAKE_IDLE_MS + 4000).then(() => true, () => false);
   await sleep(1000);

@@ -843,18 +843,46 @@ button.secondary {
   flex: 1;
   font-weight: 600;
 }
-/* 채팅 필터 줄 (src/ChatFilterBar.tsx): 켜진 필터는 강조색 테두리 */
+/* 채팅 필터 줄 (src/ChatFilterBar.tsx): 작업그룹 탭(고른 것은 강조색 밑줄, 넘치면 가로로 밀림)과 "나에게 온 것만"(켜면 강조색 테두리) */
 .chat-filter {
   flex: none;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: 2px 6px;
+  padding: 0 8px;
   border-bottom: 1px solid var(--border);
 }
-.chat-filter-mine,
-.chat-filter-group {
+.chat-filter-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.chat-filter-tabs::-webkit-scrollbar {
+  display: none;
+}
+.chat-filter-tab {
+  flex: none;
+  padding: 5px 8px 3px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  white-space: nowrap;
+}
+.chat-filter-tab:hover {
+  color: var(--fg);
+}
+.chat-filter-tab.on {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+.chat-filter-mine {
+  flex: none;
   padding: 1px 8px;
   font-size: 12px;
   color: var(--fg-dim);
@@ -862,11 +890,7 @@ button.secondary {
   border: 1px solid var(--input-border);
   border-radius: 10px;
 }
-.chat-filter-group {
-  max-width: 50%;
-}
-.chat-filter-mine.on,
-.chat-filter-group.on {
+.chat-filter-mine.on {
   color: var(--fg);
   border-color: var(--accent);
 }

@@ -136,7 +136,7 @@ struct Inner {
 // 세션이 다른 세션에게 보낸 메시지를 센다 (@all도 1개). 제한(wake_limit)개까지는 깨우고, 그 뒤 메시지는 저장만 하고 깨우지 않는다
 // (held). 사용자 메시지가 그 작업그룹에 닿거나 사용자가 재개하면 다시 세고, 보류된 알림을 받는 사람마다 한 번 알린다.
 // 이미 깨운 세션의 작업은 멈추지 않는다 (새 알림을 넣지 않을 뿐). 제한은 앱 메뉴 "협업 제한…"에서 바꾼다 (limits.rs).
-pub const DEFAULT_WAKE_LIMIT: u32 = 10;
+pub const DEFAULT_WAKE_LIMIT: u32 = 12;
 
 #[derive(Default)]
 struct Limit {
