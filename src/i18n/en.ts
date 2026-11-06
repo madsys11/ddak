@@ -124,6 +124,8 @@ export const en = {
   "chat.clearOk": "Clear",
   "chat.membersHint": "Sessions in this project's chat room. Click one to mention it. A message goes only to the sessions it mentions (@all for everyone).",
   "chat.all": "Everyone (@all)",
+  "chat.allInGroup": "Whole group",
+  "chat.noGroupMembers": "No sessions from this work group are in the chat room now.",
   "chat.noRecipient": "Not sent: choose who gets it. Mention a session with @name, or @all for everyone.",
   "chat.noMembers": "No sessions have joined yet.",
   "chat.empty": "No messages yet.",

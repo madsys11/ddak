@@ -10,7 +10,7 @@ import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 import { ModePicker, modeLabel, modeText } from "../ModePicker";
 import { ChatFilterBar } from "../ChatFilterBar";
 import { ChatText } from "../ChatText";
-import { applyFilter, groupsIn, loadFilter, saveFilter, type ChatFilter } from "../chatFilter";
+import { applyFilter, chipMembers, everyoneMention, groupsIn, loadFilter, saveFilter, type ChatFilter } from "../chatFilter";
 
 // 컴퓨터·프로젝트마다 기억하는 채팅 필터 (src/chatFilter.ts)
 export const PHONE_FILTER_KEY = "ddak.phone.chatFilter";
@@ -646,6 +646,9 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
   // 선택 창마다 마지막 답 기록 (필터 전 전체로)
   const answers = lastAnswers(messages);
   const { shown, hidden, hiddenToMe } = applyFilter(messages, filter);
+  // 참여자 칩은 고른 작업그룹 탭을 따른다 (src/chatFilter.ts chipMembers)
+  const chips = chipMembers(members.members, filter.group);
+  const everyone = everyoneMention(chips, filter.group);
 
   return (
     <div className="screen chat">
@@ -744,34 +747,37 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
             <ModePicker member={picking} mode={members.modes[picking]} t={t} onPick={(mode) => api.setMode(computer, project, picking, mode)} onClose={() => setPicking(null)} />
           )}
           <div className="chips">
-            {/* 모두에게는 @all을 골라야 한다 (멘션이 없으면 보내지 않는다) */}
-            {members.members.length > 1 && (
-              <button className="chip" data-member="all" onClick={() => mention("all")}>
-                {t("chat.all")}
+            {/* 모두에게는 @all을 골라야 한다 (멘션이 없으면 보내지 않는다). 그룹 탭에서는 그 그룹 세션을 모두 */}
+            {everyone !== null && (
+              <button className="chip" data-member="all" data-mention={everyone} onClick={() => mention(everyone)}>
+                {filter.group === null ? t("chat.all") : t("chat.allInGroup")}
               </button>
             )}
-            {members.members
-              .filter((m) => m !== USER)
-              .map((m) => {
-                const status = members.status?.[m];
-                const look = status === "working" ? " working" : status ? " awaiting" : members.waiting.includes(m) ? " waiting" : "";
-                const mode = members.modes?.[m];
-                return (
-                  <span key={m} className="chip-pair">
-                    <button className={`chip${look}`} onClick={() => mention(m)}>
-                      {m}
-                      {status && STATUS[status] && <span className="chip-note">{t(STATUS[status])}</span>}
-                      {members.waiting.includes(m) && <span className="chip-note">{t("chat.waiting")}</span>}
+            {chips.map((m) => {
+              const status = members.status?.[m];
+              const look = status === "working" ? " working" : status ? " awaiting" : members.waiting.includes(m) ? " waiting" : "";
+              const mode = members.modes?.[m];
+              return (
+                <span key={m} className="chip-pair">
+                  <button className={`chip${look}`} data-member={m} onClick={() => mention(m)}>
+                    {m}
+                    {status && STATUS[status] && <span className="chip-note">{t(STATUS[status])}</span>}
+                    {members.waiting.includes(m) && <span className="chip-note">{t("chat.waiting")}</span>}
+                  </button>
+                  {mode && (
+                    <button className={`chip mode-chip${picking === m ? " picking" : ""}`} data-mode-of={m} onClick={() => setPicking(picking === m ? null : m)}>
+                      {modeLabel(mode, t)}
                     </button>
-                    {mode && (
-                      <button className={`chip mode-chip${picking === m ? " picking" : ""}`} data-mode-of={m} onClick={() => setPicking(picking === m ? null : m)}>
-                        {modeLabel(mode, t)}
-                      </button>
-                    )}
-                  </span>
-                );
-              })}
+                  )}
+                </span>
+              );
+            })}
             {members.members.length <= 1 && <span className="hint">{t("chat.noMembers")}</span>}
+            {members.members.length > 1 && chips.length === 0 && (
+              <span className="hint" data-no-group-members>
+                {t("chat.noGroupMembers")}
+              </span>
+            )}
           </div>
           <div className="composer">
             <textarea ref={input} rows={2} value={draft} placeholder={t("phone.placeholder")} onChange={(e) => setDraft(e.target.value)} />

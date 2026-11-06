@@ -38,6 +38,18 @@ export function groupsIn(messages: Filterable[], members: string[], chosen: stri
   return [...groups].sort((a, b) => a.localeCompare(b));
 }
 
+// 입력란 위 참여자 칩: 작업그룹 탭을 골랐으면 그 그룹 세션만 (사용자 빼고). 전체면 모두
+export function chipMembers(members: string[], group: string | null): string[] {
+  return members.filter((m) => m !== USER && (group === null || groupOf(m) === group));
+}
+
+// "모두" 칩이 넣을 멘션 (앞의 @ 빼고. 칩 목록 chips 기준). 전체 탭은 @all, 그룹 탭은 @all이 다른 그룹까지 깨우므로
+// 그 그룹 세션 이름을 모두 (둘 이상일 때만, 하나면 그 칩과 같다). 없으면 null (칩을 보이지 않음)
+export function everyoneMention(chips: string[], group: string | null): string | null {
+  if (group === null) return chips.length > 0 ? "all" : null;
+  return chips.length > 1 ? chips.join(" @") : null;
+}
+
 // 보일 메시지와 숨긴 수 (그중 사용자가 받은 것). 받은 메시지 전체 기준
 export function applyFilter<M extends Filterable>(messages: M[], f: ChatFilter) {
   if (!isActive(f)) return { shown: messages, hidden: 0, hiddenToMe: 0 };

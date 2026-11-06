@@ -38,7 +38,7 @@ import type { Info, PushInfo } from "./mobile/api";
 import { en } from "./i18n/en";
 import { type PaneSession, commandOf, followSession, fromSaved } from "./workspaceState";
 import { screenPixelRatio, setZoomFactor } from "./zoom";
-import { NO_FILTER, applyFilter, groupOf, groupsIn, loadFilter, saveFilter } from "./chatFilter";
+import { NO_FILTER, applyFilter, chipMembers, everyoneMention, groupOf, groupsIn, loadFilter, saveFilter } from "./chatFilter";
 import { ChatText } from "./ChatText";
 import { splitUrls } from "./urls";
 import { FILTER_KEY as CHAT_FILTER_KEY } from "./ChatPanel";
@@ -788,6 +788,11 @@ async function testChatFilterUnit() {
     groups === "ops,origin,web" && fromRecords === "ans,mod" && kept === "gone" && groupOf("user") === null && groupOf("a/b/c") === "a",
     `${groups} ${fromRecords} ${kept}`,
   );
+  // 참여자 칩: 그룹 탭이면 그 그룹 세션만, "모두"는 전체면 @all, 그룹이면 그 그룹 세션 모두 (하나뿐이거나 없으면 칩 없음)
+  const people = ["user", "origin/dev", "origin/rev", "web/dev"];
+  const chipCases = [null, "origin", "web", "gone"].map((g) => `${chipMembers(people, g).join(",")}=${everyoneMention(chipMembers(people, g), g)}`);
+  const chipWant = ["origin/dev,origin/rev,web/dev=all", "origin/dev,origin/rev=origin/dev @origin/rev", "web/dev=null", "=null"];
+  check("채팅 칩: 그룹 탭이면 그 그룹 세션만, 모두는 @all 대신 그 그룹 세션 모두", chipCases.every((c, i) => c === chipWant[i]) && everyoneMention([], null) === null, chipCases.join(" / "));
   const key = "ddak.selftest.chatFilter";
   saveFilter(key, "p", { mine: true, group: "web" });
   const back = loadFilter(key, "p");
@@ -896,6 +901,38 @@ async function testChatFilter(root: string) {
     pick("solo");
     await settle();
     const empty = !!panel().querySelector("[data-filter-empty]") && marks() === "";
+    // 그룹 탭이면 입력란 위 칩도 그 그룹 세션만. "이 그룹 모두"는 그 그룹 세션 이름을 모두 넣는다 (@all은 다른 그룹까지 깨운다)
+    const chipNames = () => [...panel().querySelectorAll<HTMLElement>(".chat-members [data-member]")].map((b) => b.dataset.member);
+    const input = () => panel().querySelector<HTMLTextAreaElement>(".chat-input")!;
+    const setDraft = (text: string) => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input(), text);
+      input().dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    pick("origin");
+    await settle();
+    const originChips = chipNames().filter((n) => n !== "all");
+    const everyChip = panel().querySelector<HTMLElement>(".chat-members [data-member=all]");
+    const everyLabel = everyChip?.dataset.mention;
+    setDraft("");
+    await settle();
+    everyChip?.click();
+    await settle();
+    const everyDraft = input().value;
+    pick("web");
+    await settle();
+    const webChips = chipNames().join(",");
+    setDraft("");
+    pick("");
+    await settle();
+    const allChips = chipNames();
+    const allLabel = panel().querySelector<HTMLElement>(".chat-members [data-member=all]")?.dataset.mention;
+    check(
+      "채팅 칩 (맥): 그룹 탭이면 그 그룹 세션만, 이 그룹 모두는 그 그룹 이름들을 넣음, 전체면 @all (web은 세션이 하나라 모두 칩 없음)",
+      originChips.length >= 2 && originChips.every((n) => n?.startsWith("origin/")) && originChips.includes("origin/fa") && originChips.includes("origin/fb") &&
+        everyDraft === `@${originChips.join(" @")} ` && everyLabel === originChips.join(" @") && allLabel === "all" && webChips === "web/fa" &&
+        allChips[0] === "all" && ["origin/fa", "web/fa", "solo/fa"].every((n) => allChips.includes(n)),
+      `${originChips.join(",")} ${JSON.stringify(everyLabel)} ${JSON.stringify(everyDraft)} | ${webChips} | ${allLabel} ${allChips.join(",")}`,
+    );
     pick("");
     await settle();
     const cleared = { marks: marks(), noHidden: !panel().querySelector(".chat-filter-hidden"), stored: JSON.parse(localStorage.getItem(CHAT_FILTER_KEY) ?? "{}")[root] ?? null, all: tabs()[0]?.getAttribute("aria-pressed") };
@@ -984,6 +1021,20 @@ async function testMobileChatFilterUnit() {
     doc.querySelector<HTMLElement>("[data-action=chat-filter-group][data-group=web]")!.click();
     await waitFor("필터 뒤 읽음", () => reads.includes(61), 3000).catch(() => null);
     const zero = !!doc.querySelector("[data-filter-empty]");
+    // 그룹 탭이면 칩도 그 그룹 세션만 (web은 하나라 "이 그룹 모두" 칩 없음), 전체 탭이면 모두와 @all
+    const phoneChips = () => [...doc.querySelectorAll<HTMLElement>(".chips [data-member]")].map((b) => b.dataset.member).join(",");
+    const webChips = phoneChips();
+    doc.querySelector<HTMLElement>("[data-action=chat-filter-group][data-group=origin]")!.click();
+    await sleep(100);
+    const originChips = phoneChips();
+    const originAll = doc.querySelector<HTMLElement>(".chips [data-member=all]")?.dataset.mention;
+    doc.querySelector<HTMLElement>("[data-action=chat-filter-group][data-group='']")!.click();
+    await sleep(100);
+    check(
+      "폰 채팅 칩: 그룹 탭이면 그 그룹 세션만, 이 그룹 모두는 그 그룹 이름들, 전체면 @all",
+      webChips === "web/x" && originChips === "all,origin/dev,origin/rev" && originAll === "origin/dev @origin/rev" && phoneChips() === "all,origin/dev,origin/rev,web/x",
+      `${webChips} | ${originChips} ${originAll} | ${phoneChips()}`,
+    );
     check("폰 채팅 필터: 위쪽을 보다가 필터를 바꾸면 (결과 0개여도) 맨 아래로 가며 최신까지 읽음을 알림", beforeFilter === "60" && zero && reads.at(-1) === 61, `${beforeFilter} → ${reads.join(",")} zero=${zero}`);
 
     // 협업 제한: 멈춤 안내의 수는 맥이 members로 알려 준 값. 열린 화면이 members를 다시 읽으면 새 값, 예전 ddak(필드 없음)이면 기본

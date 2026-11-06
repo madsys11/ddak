@@ -8,7 +8,7 @@ import { PromptChoices, answerText, lastAnswers, type Answer, type Prompt } from
 import { modeText, type ModeChange } from "./ModePicker";
 import { Resizer } from "./Resizer";
 import { ChatFilterBar } from "./ChatFilterBar";
-import { applyFilter, groupsIn, loadFilter, saveFilter, type ChatFilter } from "./chatFilter";
+import { applyFilter, chipMembers, everyoneMention, groupsIn, loadFilter, saveFilter, type ChatFilter } from "./chatFilter";
 import { useLimits } from "./limits";
 import { ChatText } from "./ChatText";
 import { openLink } from "./terminalLinks";
@@ -224,6 +224,9 @@ export function ChatPanel({ project, open, watching, onClose, onUnread, onPaused
   // 선택 창마다 마지막 답 기록 (필터 전 전체로: 답 기록이 숨어도 질문의 상태는 그대로)
   const answers = lastAnswers(messages);
   const { shown, hidden, hiddenToMe } = applyFilter(messages, filter);
+  // 참여자 칩은 고른 작업그룹 탭을 따른다 (src/chatFilter.ts chipMembers)
+  const chips = chipMembers(members, filter.group);
+  const everyone = everyoneMention(chips, filter.group);
   // 앱 언어로 (시스템 언어가 아니라)
   const time = (ms: number) => new Date(ms).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
 
@@ -300,27 +303,26 @@ export function ChatPanel({ project, open, watching, onClose, onUnread, onPaused
       {listenError && <div className="chat-error" data-listen-error>{t("chat.listenError", { detail: listenError })}</div>}
       {/* 참여자 칩은 입력란 바로 위에 둔다 (누르면 멘션을 넣으므로 쓰는 곳 가까이) */}
       <div className="chat-members" title={t("chat.membersHint")}>
-        {/* 모두에게는 @all을 골라야 한다 (멘션이 없으면 보내지 않는다) */}
-        {members.length > 1 && (
-          <button className="chat-member" data-member="all" onClick={() => mention("all")}>
-            {t("chat.all")}
+        {/* 모두에게는 @all을 골라야 한다 (멘션이 없으면 보내지 않는다). 그룹 탭에서는 그 그룹 세션을 모두 */}
+        {everyone !== null && (
+          <button className="chat-member" data-member="all" data-mention={everyone} title={filter.group === null ? undefined : `@${everyone}`} onClick={() => mention(everyone)}>
+            {filter.group === null ? t("chat.all") : t("chat.allInGroup")}
           </button>
         )}
-        {members
-          .filter((m) => m !== USER)
-          .map((m) => (
-            <span key={m} className="chat-member-wrap">
-              <button className={`chat-member${waiting.includes(m) ? " waiting" : ""}`} data-member={m} onClick={() => mention(m)}>
-                {m}
+        {chips.map((m) => (
+          <span key={m} className="chat-member-wrap">
+            <button className={`chat-member${waiting.includes(m) ? " waiting" : ""}`} data-member={m} onClick={() => mention(m)}>
+              {m}
+            </button>
+            {waiting.includes(m) && (
+              <button className="chat-member-wake" data-waiting={m} title={t("chat.wakeHint")} onClick={() => invoke("chat_wake_member", { project, name: m }).catch(() => {})}>
+                {t("chat.waiting")}
               </button>
-              {waiting.includes(m) && (
-                <button className="chat-member-wake" data-waiting={m} title={t("chat.wakeHint")} onClick={() => invoke("chat_wake_member", { project, name: m }).catch(() => {})}>
-                  {t("chat.waiting")}
-                </button>
-              )}
-            </span>
-          ))}
+            )}
+          </span>
+        ))}
         {members.length <= 1 && <span className="chat-none">{t("chat.noMembers")}</span>}
+        {members.length > 1 && chips.length === 0 && <span className="chat-none" data-no-group-members>{t("chat.noGroupMembers")}</span>}
       </div>
       <textarea
         ref={input}

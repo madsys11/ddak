@@ -124,6 +124,8 @@ export const ko: Messages = {
   "chat.clearOk": "지우기",
   "chat.membersHint": "이 프로젝트 채팅방의 세션. 누르면 멘션합니다. 메시지는 멘션한 세션에만 갑니다 (모두에게는 @all).",
   "chat.all": "모두 (@all)",
+  "chat.allInGroup": "이 그룹 모두",
+  "chat.noGroupMembers": "이 작업그룹의 세션이 지금 채팅방에 없습니다.",
   "chat.noRecipient": "보내지 않았습니다: 받는 사람을 고르세요. 세션을 @이름으로 멘션하거나, 모두에게는 @all.",
   "chat.noMembers": "아직 참여한 세션이 없습니다.",
   "chat.empty": "아직 메시지가 없습니다.",
