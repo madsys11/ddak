@@ -132,7 +132,7 @@ export const ko: Messages = {
   "chat.filterMine": "나에게 온 것만",
   "chat.filterMineHint": "나에게 온 메시지(@user 또는 @all)만 봅니다",
   "chat.filterAllGroups": "전체",
-  "chat.filterGroupHint": "이 작업그룹의 세션이 보내거나 받은 메시지만 봅니다",
+  "chat.filterGroupHint": "{group}: 이 작업그룹의 세션이 보내거나 받은 메시지만 봅니다",
   "chat.filterHidden": "{n}개 숨김",
   "chat.filterHiddenToMe": "{n}개 숨김 (나에게 온 것 {m}개)",
   "chat.filterEmpty": "필터에 맞는 메시지가 없습니다.",

@@ -945,6 +945,38 @@ async function testChatFilter(root: string) {
     check("채팅 필터 (맥): 작업그룹(web)과 함께 켜면 둘 다 맞는 것만, web만이면 그룹 사이 메시지도", mineWeb === "F5" && webOnly.marks === "F4,F5" && webOnly.toMe >= 1, `${mineWeb} ${JSON.stringify(webOnly)}`);
     check("채팅 필터 (맥): 프로젝트마다 기억 (켠 것만 저장, 다 끄면 지움)", stored?.group === "web" && stored?.mine === false && cleared.stored === null, `${JSON.stringify(stored)} ${JSON.stringify(cleared.stored)}`);
     check("채팅 필터 (맥): 맞는 메시지가 없으면 안내, 전체 탭이면 모두 보임", empty && cleared.marks === "F1,F2,F3,F4,F5" && cleared.noHidden && cleared.all === "true", `${empty} ${JSON.stringify(cleared)}`);
+    // 탭이 패널 폭보다 많으면 다음 줄로: 가로로 밀면 Windows 마우스 휠로는 넘친 탭에 닿을 수 없었다. 모든 탭이 탭 묶음 안에 있고
+    // 묶음이 가로로 넘치지 않는지, 토글은 그대로 보이는지 본다. 탭은 지난 메시지의 그룹까지 쌓이므로 묶음은 세 줄까지만 보이고
+    // 세로로 밀어 마지막 탭에 닿으며, 채팅 본문과 입력란은 패널 안에 남아야 한다 (리뷰 R13)
+    const many = Array.from({ length: 30 }, (_, i) => `dev-review-${i + 1}/fa`);
+    tokens.push(...(await Promise.all(many.map((name) => invoke<string>("selftest_chat_join", { project: root, name })))));
+    await waitFor("탭 여럿", () => tabs().length >= 1 + 3 + many.length, 5000).catch(() => null);
+    const box = panel().querySelector<HTMLElement>(".chat-filter-tabs")!;
+    const outer = box.getBoundingClientRect();
+    const outside = tabs().filter((b) => {
+      const r = b.getBoundingClientRect();
+      return r.width === 0 || r.left < outer.left - 0.5 || r.right > outer.right + 0.5;
+    });
+    const tabHeight = tabs()[0].getBoundingClientRect().height;
+    box.scrollTop = box.scrollHeight;
+    await settle();
+    const last = tabs()[tabs().length - 1].getBoundingClientRect();
+    const lastReached = last.top >= box.getBoundingClientRect().top - 0.5 && last.bottom <= box.getBoundingClientRect().bottom + 0.5;
+    box.scrollTop = 0;
+    // 말줄임으로 잘려도 이름 전체를 볼 수 있게 탭 안내에 그룹 이름을 넣는다 (리뷰 R14)
+    const longTitle = tabs().find((b) => b.dataset.group === "dev-review-30")?.title ?? "";
+    check("채팅 필터 (맥): 작업그룹 탭 안내에 그룹 이름 전체", longTitle.startsWith("dev-review-30"), longTitle);
+    const mineRect = mineBtn().getBoundingClientRect();
+    const panelRect = panel().getBoundingClientRect();
+    const listHeight = panel().querySelector<HTMLElement>(".chat-list")!.getBoundingClientRect().height;
+    const inputRect = input().getBoundingClientRect();
+    check(
+      "채팅 필터 (맥): 탭이 넘치면 다음 줄로 (가로로 넘치지 않음, 세 줄까지 보이고 세로로 밀어 마지막 탭에 닿음, 토글·본문·입력란은 패널 안)",
+      tabs().length >= 1 + 3 + many.length && outside.length === 0 && box.scrollWidth <= box.clientWidth &&
+        outer.height > tabHeight * 1.5 && outer.height <= tabHeight * 3 + 1 && box.scrollHeight > box.clientHeight && lastReached &&
+        mineRect.width > 0 && mineRect.right <= panelRect.right + 0.5 && listHeight > 100 && inputRect.height > 0 && inputRect.bottom <= panelRect.bottom + 0.5,
+      `tabs=${tabs().length} outside=${outside.map((b) => b.dataset.group).join(",")} scrollW=${box.scrollWidth}/${box.clientWidth} h=${outer.height}/${tabHeight} scrollH=${box.scrollHeight} last=${lastReached} list=${listHeight} input=${inputRect.bottom}/${panelRect.bottom} panel=${panelRect.width}x${panelRect.height}`,
+    );
   } finally {
     for (const token of tokens) await invoke("selftest_chat_leave", { token });
   }

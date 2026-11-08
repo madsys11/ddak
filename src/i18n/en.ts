@@ -132,7 +132,7 @@ export const en = {
   "chat.filterMine": "To me",
   "chat.filterMineHint": "Show only messages sent to you (@user or @all)",
   "chat.filterAllGroups": "All",
-  "chat.filterGroupHint": "Show only messages sent by or to this work group's sessions",
+  "chat.filterGroupHint": "{group}: show only messages sent by or to this work group's sessions",
   "chat.filterHidden": "{n} hidden",
   "chat.filterHiddenToMe": "{n} hidden ({m} to you)",
   "chat.filterEmpty": "No messages match the filter.",
