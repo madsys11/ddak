@@ -167,6 +167,16 @@ function App() {
       unlisten.then((f) => f());
     };
   }, []);
+  // 보기 메뉴 "채팅 열기/닫기" (⌥⌘B, src-tauri/src/menu.rs): 보이는 프로젝트의 채팅 패널을 여닫는다 (탭 바의 채팅 버튼과 같다)
+  useEffect(() => {
+    const unlisten = listen<string>("menu", ({ payload }) => {
+      const path = activeRef.current;
+      if (payload === "toggle_chat" && path) setChatOpen((o) => ({ ...o, [path]: !o[path] }));
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
   // 앱 메뉴 "협업 제한…" (src-tauri/src/menu.rs, src/LimitsDialog.tsx)
   const [limitsOpen, setLimitsOpen] = useState(false);
   useEffect(() => {

@@ -37,6 +37,10 @@ const GIT_GRAPH: &str = "git_graph";
 // 보기 메뉴: 파일 트리 보이기(체크, ⌘B)·패널 크기 초기화 (프론트 src/prefs.tsx)
 const TOGGLE_SIDEBAR: &str = "toggle_sidebar";
 const TOGGLE_SIDEBAR_KEY: &str = "CmdOrCtrl+B";
+// 보기 메뉴: 보이는 프로젝트의 채팅 패널 여닫기 (프론트 src/App.tsx, 탭 바의 채팅 버튼과 같다). ⌘B 파일 트리(왼쪽)의 짝으로
+// ⌥⌘B (오른쪽 패널)
+const TOGGLE_CHAT: &str = "toggle_chat";
+const TOGGLE_CHAT_KEY: &str = "CmdOrCtrl+Alt+B";
 const RESET_PANELS: &str = "reset_panels";
 const EDIT_GROUPS: &str = "edit_groups";
 // 앱 메뉴: 모바일 연결 창 (프론트 src/MobileDialog.tsx, src-tauri/src/mobile.rs)
@@ -127,6 +131,7 @@ fn build<R: Runtime>(app: &AppHandle<R>, spec: &MenuSpec) -> tauri::Result<Menu<
         .item(&MenuItemBuilder::with_id(GIT_GRAPH, l(GIT_GRAPH)).build(app)?)
         .separator()
         .item(&CheckMenuItemBuilder::with_id(TOGGLE_SIDEBAR, l(TOGGLE_SIDEBAR)).checked(spec.sidebar).accelerator(TOGGLE_SIDEBAR_KEY).build(app)?)
+        .item(&MenuItemBuilder::with_id(TOGGLE_CHAT, l(TOGGLE_CHAT)).accelerator(TOGGLE_CHAT_KEY).build(app)?)
         .item(&MenuItemBuilder::with_id(RESET_PANELS, l(RESET_PANELS)).build(app)?)
         .separator();
     for (id, accel) in ZOOM_ITEMS {
@@ -171,7 +176,7 @@ pub fn shortcuts() -> impl Iterator<Item = (&'static str, &'static str)> {
         .iter()
         .filter_map(|(id, key)| key.map(|key| (*id, key)))
         .chain(ZOOM_ITEMS.iter().copied())
-        .chain([(TOGGLE_SIDEBAR, TOGGLE_SIDEBAR_KEY), (CLOSE_WINDOW, CLOSE_WINDOW_KEY)])
+        .chain([(TOGGLE_SIDEBAR, TOGGLE_SIDEBAR_KEY), (TOGGLE_CHAT, TOGGLE_CHAT_KEY), (CLOSE_WINDOW, CLOSE_WINDOW_KEY)])
 }
 
 // 메뉴 항목 실행 (메뉴 클릭과 Windows 단축키가 같이 쓴다)
@@ -189,7 +194,7 @@ pub fn run<R: Runtime>(app: &AppHandle<R>, id: &str) {
             let _ = window.close();
         }
     } else if TERMINAL_ITEMS.iter().map(|(item, _)| *item).chain(ZOOM_ITEMS.iter().map(|(item, _)| *item)).any(|item| item == id)
-        || [GIT_GRAPH, TOGGLE_SIDEBAR, RESET_PANELS, MOBILE, LIMITS].contains(&id)
+        || [GIT_GRAPH, TOGGLE_SIDEBAR, TOGGLE_CHAT, RESET_PANELS, MOBILE, LIMITS].contains(&id)
         || id.starts_with(THEME_PREFIX)
         || id.starts_with(LOCALE_PREFIX)
         || id.starts_with(SOUND_PREFIX)
@@ -231,17 +236,25 @@ mod tests {
         assert!(shortcut_matches("CmdOrCtrl+=", true, false, false, 0xBB));
         assert!(shortcut_matches("CmdOrCtrl+-", true, false, false, 0xBD));
         assert!(shortcut_matches("CmdOrCtrl+0", true, false, false, 0x30));
+        // 채팅 여닫기 ⌥⌘B (Windows Ctrl+Alt+B). ⌘B(파일 트리)와 갈린다
+        assert!(shortcut_matches(TOGGLE_CHAT_KEY, true, false, true, 0x42));
+        assert!(!shortcut_matches(TOGGLE_CHAT_KEY, true, false, false, 0x42) && !shortcut_matches(TOGGLE_SIDEBAR_KEY, true, false, true, 0x42));
+        // 단축키 표에 들어 있다 (Windows winkeys.rs가 이 표로 실행한다). 같은 단축키가 둘이면 안 된다
+        assert!(shortcuts().any(|(id, key)| id == TOGGLE_CHAT && key == TOGGLE_CHAT_KEY));
+        let keys: Vec<&str> = shortcuts().map(|(_, key)| key).collect();
+        assert!(keys.iter().all(|k| keys.iter().filter(|x| *x == k).count() == 1), "{keys:?}");
         // 모든 메뉴 단축키를 알아본다 (모르는 글자를 쓰면 Windows에서 말없이 안 먹는다)
         for (id, key) in shortcuts() {
             let ctrl = key.contains("Ctrl");
             let shift = key.contains("Shift");
+            let alt = key.contains("Alt");
             let last = key.rsplit('+').next().unwrap();
             let vk = match last {
                 "=" => 0xBB,
                 "-" => 0xBD,
                 k => k.as_bytes()[0].to_ascii_uppercase() as u32,
             };
-            assert!(shortcut_matches(key, ctrl, shift, false, vk), "{id} {key}");
+            assert!(shortcut_matches(key, ctrl, shift, alt, vk), "{id} {key}");
         }
     }
 }

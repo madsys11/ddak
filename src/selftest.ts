@@ -6143,6 +6143,24 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   const listenerPty = listenerPane.el.querySelector<HTMLElement>(".terminal")!.dataset.pty;
   check("깨우기 제한: 그 작업그룹 세션의 터미널에 사용자가 입력하면 다시 센다", pausedAgain && typedIn === "abc" && unpaused, `${pausedAgain} ${JSON.stringify(typedIn)} ${unpaused} backend=${backendPaused} pty=${listenerPty}`);
 
+  // 머리의 제한 초기화 (대화 지우기 옆): 확인 없이 이 프로젝트의 셈을 지운다. 멈춘 그룹은 재개하고 보류된 알림을 한 번 보낸다
+  // (멈추기 전의 셈도 지우는 것은 cargo test reset_limits_clears_every_group_of_the_project)
+  const resetBtn = () => panel()!.querySelector<HTMLButtonElement>(".chat-head [data-action=chat-reset-limits]");
+  const resetNextToClear = resetBtn()?.nextElementSibling?.getAttribute("data-action") === "chat-clear";
+  await openAdd("menu");
+  choose("pick/chatter");
+  const pausedThird = await waitFor("세 번째 멈춤", pausedBar, 10000).then(() => true, () => false);
+  await sleep(WAKE_IDLE_MS + 1000);
+  const beforeReset = fromChatter();
+  resetBtn()?.click();
+  const resetDone = await waitFor("초기화 뒤 깨움", () => fromChatter() === beforeReset + 1 && !pausedBar(), WAKE_IDLE_MS + 4000).then(() => true, () => false);
+  const pausedAfterReset = await invoke<string[]>("chat_paused", { project: root });
+  check(
+    "깨우기 제한: 채팅 머리의 제한 초기화를 누르면 멈춤이 풀리고 보류된 알림을 한 번 알림 (대화 지우기 옆)",
+    resetNextToClear && pausedThird && resetDone && pausedAfterReset.length === 0,
+    `next=${resetNextToClear} paused=${pausedThird} ${beforeReset}→${fromChatter()} bar=${!!pausedBar()} backend=${pausedAfterReset}`,
+  );
+
   // 멈춘 작업그룹이 많아도 알림 목록은 높이가 정해진 스크롤 영역이고, 참여자 칩과 입력란은 패널 안에 남는다 (리뷰 2단계 R2)
   devHooks.chatPausedExtra = Array.from({ length: 12 }, (_, i) => `group-${i + 1}`);
   toggle().click();
@@ -6181,6 +6199,13 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
     keptAll && emptied && next.id === maxId + 1 && shownAgain,
     `${keptAll} ${emptied} ${maxId}→${next.id} ${shownAgain}`,
   );
+
+  // 보기 메뉴 "채팅 열기/닫기" (⌥⌘B, 단축키 표는 cargo test menu::): 보이는 프로젝트의 채팅을 여닫는다 (탭 바 버튼과 같은 상태)
+  await clickMenu("View", "Open/Close Chat");
+  const menuClosed = await waitFor("메뉴로 닫기", () => !shown() && !toggle().classList.contains("active"), 2000).then(() => true, () => false);
+  await clickMenu("View", "Open/Close Chat");
+  const menuOpened = await waitFor("메뉴로 열기", () => shown() && toggle().classList.contains("active"), 2000).then(() => true, () => false);
+  check("채팅 패널: 보기 메뉴 \"채팅 열기/닫기\"로 닫고 다시 엶 (탭 바 버튼도 같이)", menuClosed && menuOpened, `${menuClosed} ${menuOpened}`);
 
   toggle().click();
   await waitFor("채팅 닫기", () => !shown(), 2000);

@@ -841,6 +841,10 @@ button.secondary {
 }
 .chat-title {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
 }
 /* 채팅 필터 줄 (src/ChatFilterBar.tsx): 작업그룹 탭(고른 것은 강조색 밑줄, 넘치면 다음 줄로)과 "나에게 온 것만"(켜면 강조색 테두리).
@@ -917,7 +921,10 @@ button.secondary {
   color: var(--fg);
   background: var(--hover);
 }
+/* 머리의 단추 (제한 초기화, 대화 지우기). 좁은 패널(최소 240)에서도 한 줄로 */
 .chat-clear {
+  flex: none;
+  white-space: nowrap;
   padding: 1px 8px;
   margin-right: 4px;
   font-size: 11px;

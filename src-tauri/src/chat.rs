@@ -638,6 +638,29 @@ impl Chats {
         (self.on_message)(project, Change::Limits);
     }
 
+    // 사용자가 이 프로젝트의 모든 작업그룹 셈을 지운다 (채팅 패널의 제한 초기화). 멈춘 그룹은 재개하고, 아직 멈추지 않은 그룹도
+    // 처음부터 다시 센다. 보류된 알림은 (받는 사람, 보낸 사람)마다 한 번 알린다 (resume과 같다). 셈이 없으면 아무것도 하지 않는다.
+    pub fn reset_limits(&self, project: &Path) {
+        let mut held = {
+            let mut inner = self.inner.lock().unwrap();
+            let keys: Vec<(PathBuf, String)> = inner.limits.keys().filter(|(p, _)| p == project).cloned().collect();
+            if keys.is_empty() {
+                return;
+            }
+            let mut held = Vec::new();
+            for key in keys {
+                held.extend(inner.limits.remove(&key).map(|l| l.held).unwrap_or_default());
+            }
+            held
+        };
+        held.sort();
+        held.dedup();
+        if !held.is_empty() {
+            (self.on_message)(project, Change::Released(&held));
+        }
+        (self.on_message)(project, Change::Limits);
+    }
+
     // 사용자가 이 참여자의 터미널에 입력했다 (pty_write): 그 작업그룹에 사용자가 개입한 것이므로 자동 깨우기를 다시 센다
     // (재개와 같다: 보류분은 받는 사람마다 한 번 깨운다). 지시를 채팅이 아니라 터미널에 쓰면 셈이 쌓이기만 해서 정상적인
     // 리뷰 흐름도 멈췄다 (2026-10-25). 셈이 없으면 아무것도 하지 않는다 (키마다 불린다).
@@ -1024,6 +1047,13 @@ pub fn chat_resume(state: tauri::State<'_, ChatsState>, project: String, group: 
     Ok(())
 }
 
+// 이 프로젝트의 자동 깨우기 셈을 모든 작업그룹에서 지운다 (채팅 패널의 제한 초기화 버튼)
+#[tauri::command]
+pub fn chat_reset_limits(state: tauri::State<'_, ChatsState>, project: String) -> Result<(), String> {
+    chats_of(&state)?.reset_limits(&real(&project));
+    Ok(())
+}
+
 // 깨우기를 기다리는 참여자 (채팅 패널의 대기 표시). 대기가 바뀌면 "chat-wake" 이벤트가 온다.
 #[tauri::command]
 pub fn chat_waiting(state: tauri::State<'_, ChatsState>, ptys: tauri::State<'_, crate::pty::Ptys>, project: String) -> Result<Vec<String>, String> {
@@ -1245,6 +1275,52 @@ mod tests {
         assert_eq!(taken(), ["limits /p/w", "paused g2 3"]);
         assert!(chats.post(p, "g2/dev", "@g1/dev z").unwrap().held);
         assert_eq!(chats.wake_limit(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 제한 초기화 (채팅 패널): 이 프로젝트의 모든 작업그룹 셈을 지운다. 멈춘 그룹은 재개하고 보류분은 한 번, 멈추기 전의 셈도
+    // 처음부터. 다른 프로젝트는 그대로, 셈이 없으면 아무것도 하지 않는다
+    #[test]
+    fn reset_limits_clears_every_group_of_the_project() {
+        let dir = temp("resetlimits");
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = log.clone();
+        let chats = Chats::new(dir.clone(), Box::new(move |project, c| {
+            let entry = match c {
+                Change::Limits => format!("limits {}", project.display()),
+                Change::Released(r) => format!("released {} {r:?}", project.display()),
+                _ => return,
+            };
+            sink.lock().unwrap().push(entry);
+        }), 0);
+        let taken = || std::mem::take(&mut *log.lock().unwrap());
+        let (p, q) = (Path::new("/p/w"), Path::new("/p/q"));
+        for (project, name) in [(p, "g1/dev"), (p, "g1/rev"), (p, "g2/dev"), (q, "g1/dev"), (q, "g1/rev")] {
+            chats.join(project, name, name);
+        }
+        let post = |project: &Path, from: &str, text: &str| chats.post(project, from, text).unwrap();
+        // p의 g1은 멈추고 두 번 보류 (같은 알림), g2는 한 번만 셈. q의 g1은 멈춤
+        for _ in 0..DEFAULT_WAKE_LIMIT {
+            post(p, "g1/dev", "@g1/rev x");
+            post(q, "g1/dev", "@g1/rev x");
+        }
+        assert!(post(p, "g1/rev", "@g1/dev a").held && post(p, "g1/rev", "@g1/dev b").held);
+        post(p, "g2/dev", "@g1/dev y");
+        taken();
+        chats.reset_limits(p);
+        assert_eq!(taken(), [r#"released /p/w [("g1/dev", "g1/rev")]"#, "limits /p/w"]);
+        assert!(chats.paused(p).is_empty());
+        assert_eq!(chats.paused(q), ["g1"], "다른 프로젝트까지 풀림");
+        // g2도 처음부터 센다: 한도만큼 더 보내야 멈춘다
+        for _ in 0..DEFAULT_WAKE_LIMIT - 1 {
+            assert!(!post(p, "g2/dev", "@g1/dev z").held);
+        }
+        assert!(chats.paused(p).is_empty(), "g2의 앞 셈이 남음");
+        assert!(!post(p, "g2/dev", "@g1/dev z").held && chats.paused(p) == ["g2"]);
+        // 셈이 없는 프로젝트는 알리지 않는다
+        taken();
+        chats.reset_limits(Path::new("/p/none"));
+        assert!(taken().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

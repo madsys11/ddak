@@ -163,6 +163,7 @@ pub fn run() {
             chat::chat_paused,
             chat::chat_clear,
             chat::chat_resume,
+            chat::chat_reset_limits,
             limits::limits_get,
             limits::limits_set,
             chat::selftest_chat_join,
