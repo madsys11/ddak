@@ -81,6 +81,7 @@ export const ko: Messages = {
   "groupPick.hint": "{name}을(를) 이 작업그룹으로 엽니다. 나중에 탭 바에서 다른 작업그룹도 열 수 있습니다.",
   "workspace.splitRight": "오른쪽으로 분할 (⌘D)",
   "workspace.splitDown": "아래로 분할 (⇧⌘D)",
+  "workspace.saveFailed": "탭을 저장하지 못했습니다: {detail}",
   "workspace.loadFailed": "저장된 탭을 읽지 못했습니다: {detail}. 앱을 다시 켤 때까지 이 프로젝트의 탭 변경은 저장하지 않습니다.",
   "doc.open": "미리 보기로 열기",
   "doc.openDefault": "기본 앱으로 열기",
@@ -272,7 +273,7 @@ export const ko: Messages = {
   "setup.save": "저장",
 
   "group.createFailed": "작업그룹을 만들지 못했습니다: {detail}",
-  "group.noRepos": "이 프로젝트에 worktree를 만들 git 저장소가 없습니다.",
+  "group.noRepos": "이 프로젝트에는 git 저장소가 없어 새 작업그룹(worktree)을 만들 수 없습니다. 사이드바 프로젝트 줄의 +로 저장소를 추가하거나, ⌘T로 원본 폴더의 셸 탭을 여세요.",
   "group.linkPrivilege": "Windows가 “{name}” 링크를 허용하지 않았습니다. 개발자 모드를 켠 뒤(설정 → 시스템 → 개발자용) 다시 시도하세요.",
 
   "terminal.linkHint": "⌘+클릭으로 열기",

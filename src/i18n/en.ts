@@ -81,6 +81,7 @@ export const en = {
   "groupPick.hint": "{name} opens with this work group. Later tabs can open any work group from the tab bar.",
   "workspace.splitRight": "Split Right (⌘D)",
   "workspace.splitDown": "Split Down (⇧⌘D)",
+  "workspace.saveFailed": "Could not save the tabs: {detail}",
   "workspace.loadFailed": "Could not read the saved tabs: {detail}. Tab changes in this project are not saved until the app restarts.",
   "doc.open": "Open Preview",
   "doc.openDefault": "Open in Default App",
@@ -272,7 +273,7 @@ export const en = {
   "setup.save": "Save",
 
   "group.createFailed": "Could not create the work group: {detail}",
-  "group.noRepos": "This project has no git repository to make a worktree from.",
+  "group.noRepos": "This project has no git repository, so a new work group (worktree) can't be made. Add one with + on the project row in the sidebar, or open a shell tab in the original folder with ⌘T.",
   "group.linkPrivilege": "Windows did not allow a link to “{name}”. Turn on Developer Mode (Settings → System → For developers), then try again.",
 
   "terminal.linkHint": "⌘-click to open",

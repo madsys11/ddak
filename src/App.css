@@ -294,6 +294,38 @@ button:hover {
   display: flex;
   flex-direction: column;
 }
+/* 프로젝트 화면의 오류 (탭 바 아래, src/Workspace.tsx errors). 닫기 × */
+.workspace-errors {
+  flex: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--tabbar-bg);
+}
+.workspace-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 4px 4px 12px;
+  color: var(--error);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.workspace-error span {
+  flex: 1;
+  padding-top: 1px;
+}
+.workspace-error-close {
+  flex: none;
+  padding: 0 8px;
+  font-size: 15px;
+  line-height: 1.2;
+  color: var(--fg-dim);
+  background: none;
+  border: none;
+}
+.workspace-error-close:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
 .workspace-empty {
   flex: 1;
   display: grid;

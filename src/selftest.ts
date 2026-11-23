@@ -2181,7 +2181,7 @@ async function testProjects(root: string, first: Terminal) {
   );
   await waitFor("읽기 끝", () => tabsIn(other) === 1, 5000);
   await sleep(500);
-  const noRepos = [...document.querySelectorAll(".sidebar-error")].some((e) => e.textContent?.includes("no git repository"));
+  const noRepos = [...document.querySelectorAll(".workspace-error, .sidebar-error")].some((e) => e.textContent?.includes("no git repository"));
   check("프로젝트: 저장한 상태를 읽는 동안 새 작업그룹은 만들지 않음", !noRepos);
   await waitFor("두 번째 프로젝트 활성", () => projectRow(other)?.classList.contains("active"));
   // other를 나중에 넣었지만 이름순이라 앞이다
@@ -2309,7 +2309,7 @@ async function testProjects(root: string, first: Terminal) {
   await sleep(2500);
   devHooks.workspaceLoad = undefined;
   const files = (await run(first, `ls "${data}/workspaces" | grep -c '^other-.*\\.json$'; ls "${data}/workspaces" | grep -c '^other-.*\\.json\\.bad$'`)).map((l) => l.trim()).filter((l) => /^\d+$/.test(l));
-  const loadError = [...document.querySelectorAll(".sidebar-error")].some((e) => e.textContent?.startsWith("Could not read the saved tabs"));
+  const loadError = [...document.querySelectorAll(".workspace-error, .sidebar-error")].some((e) => e.textContent?.startsWith("Could not read the saved tabs"));
   check("프로젝트: 정리된 Workspace의 늦은 읽기는 파일을 치우지 않음", files.join(",") === "1,1" && !loadError, `${files.join(",")} ${loadError}`);
 
   // 이전 Workspace의 늦은 저장이 새 Workspace의 상태를 덮지 않는다 (리뷰 후속 P2): 첫 저장을 늦춘 채 탭을 둘 더 열고 바로
@@ -2337,7 +2337,8 @@ async function testProjects(root: string, first: Terminal) {
   const before = await hash();
   devHooks.workspaceLoad = () => Promise.reject("injected read failure");
   await devHooks.addProject!(other);
-  const failed = await waitFor("읽기 실패 알림", () => [...document.querySelectorAll(".sidebar-error")].find((e) => e.textContent?.startsWith("Could not read the saved tabs")), 5000).catch(() => null);
+  // 그 프로젝트 화면의 탭 바 아래에 보인다 (사이드바가 아니라)
+  const failed = await waitFor("읽기 실패 알림", () => [...document.querySelectorAll(`.project-workspace[data-project="${CSS.escape(other)}"] .workspace-error[data-error=load]`)].find((e) => e.textContent?.startsWith("Could not read the saved tabs")), 5000).catch(() => null);
   devHooks.workspaceLoad = undefined;
   await waitFor("기본으로 열림", () => tabsIn(other) === 1, 5000);
   await menu("new_tab");
@@ -4664,7 +4665,7 @@ async function testGroupWorktree(root: string, first: Terminal) {
   // 실패하면 되돌린다: 커밋 없는 저장소가 있으면 worktree를 만들 수 없다
   await run(first, `git init -q "${root}/zempty"`);
   await clickMenu("Terminal", "New Work Group");
-  const err = await waitFor("실패 오류", () => [...document.querySelectorAll(".sidebar .sidebar-error")].map((e) => e.textContent ?? "").find((e) => e.startsWith("Could not create the work group")), 15000);
+  const err = await waitFor("실패 오류", () => [...document.querySelectorAll(".project-workspace:not([style*='none']) .workspace-error[data-error=group]")].map((e) => e.textContent ?? "").find((e) => e.startsWith("Could not create the work group")), 15000);
   check("작업그룹 추가: 실패하면 오류 표시, 탭은 그대로", err.includes("zempty") && tabCount() === before + 2, err);
   const left = (await run(first, `git -C "${root}/server" branch --list 'ddak/test-3*' | wc -l; ls "${pwd.replace(/test-1$/, "")}"`)).map((l) => l.trim()).filter(Boolean);
   check("작업그룹 추가: 실패하면 만든 worktree·브랜치를 지움", left.includes("0") && !left.includes("test-3"), left.join("|"));
@@ -5229,56 +5230,60 @@ async function testAddSession(root: string, first: Terminal) {
 // {session}(과 주소)을 파일에 쓰고, follower는 claude처럼 그 ID를 startup으로 알린다. 이어서 하기는 받은 {session}을 파일에 쓰고
 // 실패한다 → [y/N]에 y → 처음 인자.
 // (창이 좁아 긴 줄이 접히므로 값은 파일로 받는다. 설정은 셸 작은따옴표로 쓰므로 작은따옴표를 쓰지 않는다)
-// 작업그룹 만들기에 실패한 오류는 원인을 고쳐 다음 만들기가 성공하면 사라진다 (파일 트리 위에 계속 남았다).
-// 자기가 띄운 오류만 지운다: 다른 프로젝트가 같은 문구로 띄운 오류(리뷰 R1)도, 그 사이 다른 곳이 띄운 오류도 남긴다.
+// 작업그룹 만들기에 실패한 오류는 그 프로젝트 화면의 탭 바 아래에 보이고 (사이드바·파일 트리 위가 아니라. 파일 트리 오류처럼
+// 보였다), 원인을 고쳐 다음 만들기가 성공하면 사라진다. 프로젝트마다 따로라 다른 프로젝트의 같은 문구 오류는 남는다 (리뷰 R1).
+// 사이드바의 오류(없는 폴더 추가)와도 섞이지 않는다. ×로 닫을 수 있다. 저장소가 없으면 할 일(저장소 추가, ⌘T 셸 탭)을 알린다.
 // 따로 만든 프로젝트에서 해서 root의 작업그룹 번호에 끼어들지 않는다.
 async function testGroupErrorClear(root: string, first: Terminal) {
   const projA = root.replace(/\/proj$/, "/group-error-a");
   const projB = root.replace(/\/proj$/, "/group-error-b");
   const commit = (dir: string) => run(first, `git init -q '${dir}' && git -C '${dir}' -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init`);
-  const errors = () => [...document.querySelectorAll(".sidebar .sidebar-error")].map((e) => e.textContent ?? "");
-  const groupErr = () => errors().find((e) => e.startsWith("Could not create the work group"));
+  const ws = (proj: string) => document.querySelector<HTMLElement>(`.project-workspace[data-project="${CSS.escape(proj)}"]`);
+  const sidebarErrors = () => [...document.querySelectorAll(".sidebar .sidebar-error")].map((e) => e.textContent ?? "");
+  const groupErrEl = (proj: string) => ws(proj)?.querySelector<HTMLElement>(".workspace-error[data-error=group]") ?? null;
+  const groupErr = (proj: string) => groupErrEl(proj)?.querySelector("span")?.textContent ?? "";
   const open = async (proj: string) => {
     await run(first, `mkdir -p '${proj}'`);
     await devHooks.addProject!(proj);
-    const ws = () => document.querySelector(`.project-workspace[data-project="${CSS.escape(proj)}"]`);
-    const btn = await waitFor(`${proj} 탭 바`, () => ws()?.querySelector<HTMLElement>("[data-action=new-group]"));
+    const btn = await waitFor(`${proj} 탭 바`, () => ws(proj)?.querySelector<HTMLElement>("[data-action=new-group]"));
     await waitFor(`${proj} 첫 탭`, () => tabsIn(proj) === 1, 15000);
     return btn;
   };
   // A·B 모두 저장소가 없어 같은 문구로 실패한다
   const newA = await open(projA);
   newA.click();
-  const errA = await waitFor("A 실패 오류", groupErr, 15000).catch(() => "");
-  check("작업그룹 오류: 실패하면 표시", errA.includes("no git repository"), errors().join("|"));
+  const errA = await waitFor("A 실패 오류", () => groupErr(projA), 15000).catch(() => "");
+  const bar = ws(projA)?.querySelector(".tabbar");
+  const below = !!bar && !!groupErrEl(projA) && bar.nextElementSibling === groupErrEl(projA)!.parentElement && bar.getBoundingClientRect().bottom <= groupErrEl(projA)!.getBoundingClientRect().top + 0.5;
+  check(
+    "작업그룹 오류: 실패하면 그 프로젝트 화면의 탭 바 바로 아래에 보이고 사이드바에는 없음, 저장소가 없으면 할 일을 알림",
+    errA.startsWith("Could not create the work group") && errA.includes("no git repository") && errA.includes("⌘T") && below && !sidebarErrors().some((e) => e.includes("work group")),
+    `${errA} below=${below} | ${sidebarErrors().join("|")}`,
+  );
   const newB = await open(projB);
-  // B가 띄웠는지 알 수 있게 먼저 다른 문구로 바꿔 둔다 (없는 폴더 추가)
+  // 사이드바 오류(없는 폴더 추가)를 띄워 둔다: 작업그룹 오류와 섞이지 않아야 한다
   const missing = root.replace(/\/proj$/, "/group-error-nope");
   await devHooks.addProject!(missing);
-  await waitFor("다른 오류로 바뀜", () => !groupErr() && errors().some((e) => e.includes(missing)), 5000);
+  const other = await waitFor("사이드바 오류", () => sidebarErrors().find((e) => e.includes(missing)), 5000).catch(() => "");
   newB.click();
-  await waitFor("B 실패 오류", () => groupErr() === errA, 15000);
-  // A를 고쳐 성공해도 B가 나중에 띄운 같은 문구의 오류는 남는다
+  await waitFor("B 실패 오류", () => groupErr(projB) === errA, 15000).catch(() => null);
+  // A를 고쳐 성공하면 A의 오류만 사라지고, B가 띄운 같은 문구의 오류와 사이드바 오류는 남는다
   await commit(`${projA}/r`);
+  projectRow(projA)?.click();
   newA.click();
-  await waitFor("A 성공", () => tabsIn(projA) === 2, 15000).catch(() => null);
-  check("작업그룹 오류: 다른 프로젝트가 같은 문구로 띄운 오류는 지우지 않음", tabsIn(projA) === 2 && groupErr() === errA, errors().join("|"));
-  // B를 고쳐 성공하면 자기 오류가 사라진다
-  await commit(`${projB}/r`);
+  await waitFor("A 성공", () => tabsIn(projA) === 2 && !groupErrEl(projA), 15000).catch(() => null);
+  check(
+    "작업그룹 오류: 다음 만들기가 성공하면 사라지고, 다른 프로젝트의 같은 문구 오류와 사이드바 오류는 남음",
+    tabsIn(projA) === 2 && !groupErrEl(projA) && groupErr(projB) === errA && !!other && sidebarErrors().includes(other),
+    `${tabsIn(projA)} A=${groupErr(projA)} B=${groupErr(projB)} | ${sidebarErrors().join("|")}`,
+  );
+  // ×로 닫는다 (원인은 그대로라 다시 누르면 다시 뜬다)
+  projectRow(projB)?.click();
+  groupErrEl(projB)?.querySelector<HTMLElement>(".workspace-error-close")?.click();
+  const closed = await waitFor("닫기", () => !groupErrEl(projB) && !ws(projB)?.querySelector(".workspace-errors"), 2000).then(() => true, () => false);
   newB.click();
-  await waitFor("B 성공", () => tabsIn(projB) === 2, 15000).catch(() => null);
-  check("작업그룹 오류: 다음 만들기가 성공하면 사라짐", tabsIn(projB) === 2 && !groupErr(), errors().join("|"));
-
-  // 실패 → 다른 오류(없는 폴더 추가) → 성공: 다른 오류는 남는다
-  await run(first, `git init -q '${projB}/empty'`);
-  newB.click();
-  await waitFor("B 두 번째 실패 오류", groupErr, 15000).catch(() => "");
-  await devHooks.addProject!(missing);
-  const other = await waitFor("다른 오류", () => errors().find((e) => e.includes(missing)), 5000).catch(() => "");
-  await run(first, `git -C '${projB}/empty' -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init`);
-  newB.click();
-  await waitFor("B 두 번째 성공", () => tabsIn(projB) === 3, 15000).catch(() => null);
-  check("작업그룹 오류: 다른 곳이 띄운 오류는 지우지 않음", tabsIn(projB) === 3 && !!other && errors().includes(other), errors().join("|"));
+  const again = await waitFor("다시 실패", () => groupErr(projB) === errA, 15000).then(() => true, () => false);
+  check("작업그룹 오류: ×로 닫고, 다시 실패하면 다시 보임", closed && again, `${closed} ${again}`);
 
   const realConfirm = devHooks.confirm;
   devHooks.confirm = async () => true;
