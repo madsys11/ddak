@@ -940,6 +940,12 @@ button.secondary {
 .chat-clear:disabled {
   opacity: 0.5;
 }
+/* 제한 초기화가 끝남 (잠시, src/ResetLimitsButton.tsx): 꺼져 있어도 흐리지 않고 강조색 */
+.chat-clear.done {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+}
 .chat-members {
   flex: none;
   display: flex;

@@ -12,6 +12,7 @@ import { applyFilter, chipMembers, everyoneMention, groupsIn, loadFilter, saveFi
 import { useLimits } from "./limits";
 import { ChatText } from "./ChatText";
 import { openLink } from "./terminalLinks";
+import { ResetLimitsButton } from "./ResetLimitsButton";
 
 // src-tauri/src/chat.rs Message
 // held: 자동 깨우기 제한에 걸려 받는 사람을 깨우지 않음. via: 사용자가 폰에서 보냈으면 그 기기 이름 (mobile.rs)
@@ -236,9 +237,13 @@ export function ChatPanel({ project, open, watching, onClose, onUnread, onPaused
       <div className="chat-head">
         <span className="chat-title">{t("chat.title")}</span>
         {/* 협업 제한 초기화: 이 프로젝트의 모든 작업그룹 셈을 지운다 (멈춘 그룹은 재개, chat.rs reset_limits). 되돌릴 것이 없어 확인은 받지 않는다 */}
-        <button className="chat-clear" data-action="chat-reset-limits" title={t("chat.resetLimitsHint")} onClick={() => invoke("chat_reset_limits", { project }).catch((e) => setError(String(e)))}>
-          {t("chat.resetLimits")}
-        </button>
+        <ResetLimitsButton
+          className="chat-clear"
+          t={t}
+          onReset={() => (devHooks.resetLimitsFail ? Promise.reject("injected failure") : invoke("chat_reset_limits", { project }))}
+          setError={setError}
+          errorText={String}
+        />
         <button className="chat-clear" data-action="chat-clear" title={t("chat.clear")} disabled={messages.length === 0} onClick={clear}>
           {t("chat.clear")}
         </button>

@@ -10,6 +10,7 @@ import { PromptChoices, answerText, lastAnswers } from "../PromptChoices";
 import { ModePicker, modeLabel, modeText } from "../ModePicker";
 import { ChatFilterBar } from "../ChatFilterBar";
 import { ChatText } from "../ChatText";
+import { ResetLimitsButton } from "../ResetLimitsButton";
 import { applyFilter, chipMembers, everyoneMention, groupsIn, loadFilter, saveFilter, type ChatFilter } from "../chatFilter";
 
 // 컴퓨터·프로젝트마다 기억하는 채팅 필터 (src/chatFilter.ts)
@@ -657,6 +658,10 @@ export function Chat({ computer, project, home = false }: { computer: Computer; 
           ‹
         </button>
         <h1>{name || "…"}</h1>
+        {/* 협업 제한 초기화 (맥 채팅 패널 머리와 같다). 받지 못하는 예전 ddak이면 숨긴다 */}
+        {!outdated && members.resetLimits && (
+          <ResetLimitsButton className="bar-text" t={t} onReset={() => api.resetLimits(computer, project).then(() => loadMembers())} setError={setError} errorText={(e) => errorText(e, computer.name)} />
+        )}
         {home && <HomeButton />}
       </header>
       {outdated && <div className="banner bad">{t("phone.update", { name: computer.name })}</div>}

@@ -20,7 +20,7 @@ import { insertAt } from "./dragPath";
 import selftestPlan from "../scripts/selftest-plan.json";
 import { gitDecorations, gitSummary } from "./gitStatus";
 import { THEMES, isThemeId } from "./themes";
-import { LOCALES, isLocale, translate, type MessageKey } from "./i18n";
+import { LOCALES, isLocale, translate, type Locale, type MessageKey } from "./i18n";
 import { EMPTY_PROJECT_STATUS, type ProjectStatus, countStatuses, statusSummary, topState } from "./projectStatus";
 import type { ProgramStatus } from "./programStatus";
 import mobileCss from "./mobile/mobile.css?raw";
@@ -40,6 +40,7 @@ import { type PaneSession, commandOf, followSession, fromSaved } from "./workspa
 import { screenPixelRatio, setZoomFactor } from "./zoom";
 import { NO_FILTER, applyFilter, chipMembers, everyoneMention, groupOf, groupsIn, loadFilter, saveFilter } from "./chatFilter";
 import { ChatText } from "./ChatText";
+import { RESET_DONE_MS } from "./ResetLimitsButton";
 import { splitUrls } from "./urls";
 import { FILTER_KEY as CHAT_FILTER_KEY } from "./ChatPanel";
 import { PHONE_FILTER_KEY } from "./mobile/MobileApp";
@@ -1087,6 +1088,55 @@ async function testMobileChatFilterUnit() {
     await reload(undefined);
     const fallback = await waitFor("멈춤 기본", () => has(PHONE_WAKE_LIMIT), 3000).then(() => true, () => false);
     check("폰 채팅: 멈춤 안내의 수는 맥이 알려 준 대화 제한, 다시 읽으면 새 값, 모르면 기본", seven && three && fallback, `${seven} ${three} ${fallback} ${pausedText()}`);
+
+    // 머리의 제한 초기화 (src/ResetLimitsButton.tsx): 받는 ddak(members의 resetLimits)이면 보인다. 누르면 보내는 동안 꺼지고,
+    // 성공하면 다시 읽어 멈춤이 사라지고 잠시 "초기화됨" (그동안도 꺼짐, 여러 번 누르지 않게), 그 뒤 원래대로.
+    // 실패하면 오류 줄과 바로 다시 누를 수 있음. 예전 ddak(필드 없음)이면 단추가 없다
+    let supports = true;
+    let pausedNow = ["origin"];
+    let fail = false;
+    let resets = 0;
+    Object.assign(phoneApi, {
+      members: async () => ({ members: ["user", "origin/dev"], waiting: [], paused: pausedNow, open: true, ...(supports ? { resetLimits: true } : {}) }),
+      resetLimits: async () => {
+        resets++;
+        await sleep(300);
+        if (fail) throw new PhoneApiError(500, "x");
+        pausedNow = [];
+        return {};
+      },
+    });
+    root.unmount();
+    root = createRoot(doc.getElementById("root")!);
+    root.render(createElement(Chat, { computer, project: "t" }));
+    const resetBtn = () => doc.querySelector<HTMLButtonElement>(".bar [data-action=chat-reset-limits]");
+    await waitFor("초기화 단추", () => resetBtn() && doc.querySelector(".paused"), 3000).catch(() => null);
+    resetBtn()?.click();
+    await sleep(50);
+    const busy = resetBtn()?.dataset.state === "busy" && resetBtn()!.disabled;
+    resetBtn()?.click();
+    const done = await waitFor("초기화됨", () => resetBtn()?.dataset.state === "done" && !doc.querySelector(".paused"), 3000).then(() => true, () => false);
+    const doneLabel = resetBtn()?.textContent ?? "";
+    const doneOff = !!resetBtn()?.disabled;
+    resetBtn()?.click();
+    const idle = await waitFor("원래대로", () => resetBtn()?.dataset.state === "idle" && !resetBtn()!.disabled, RESET_DONE_MS + 1500).then(() => true, () => false);
+    const once = resets === 1;
+    fail = true;
+    resetBtn()?.click();
+    const failed = await waitFor("실패", () => resetBtn()?.dataset.state === "idle" && !!doc.querySelector(".banner.bad"), 3000).then(() => true, () => false);
+    // 실패 뒤 다시 눌러 성공하면 그 오류는 사라진다 (리뷰 R1: 초기화됨과 실패 안내가 함께 남았다)
+    fail = false;
+    resetBtn()?.click();
+    const retried = await waitFor("다시 성공", () => resetBtn()?.dataset.state === "done" && !doc.querySelector(".banner.bad"), 3000).then(() => true, () => false);
+    await waitFor("원래대로", () => resetBtn()?.dataset.state === "idle", RESET_DONE_MS + 1500).catch(() => null);
+    supports = false;
+    dispatchEvent(new CustomEvent("ddak-shown", { detail: { tag: "c/t", kind: "members", id: "old" } }));
+    const hidden = await waitFor("예전 ddak", () => !resetBtn(), 3000).then(() => true, () => false);
+    check(
+      "폰 채팅: 머리의 제한 초기화는 보내는 동안 끄고, 성공하면 멈춤이 사라지고 잠시 초기화됨(눌러도 다시 보내지 않음), 실패는 오류 줄, 다시 성공하면 그 오류 지움, 예전 ddak이면 없음",
+      busy && done && doneLabel === phoneT("chat.resetLimitsDone") && doneOff && idle && once && failed && retried && resets === 3 && hidden,
+      `busy=${busy} done=${done} "${doneLabel}" off=${doneOff} idle=${idle} resets=${resets} failed=${failed} retried=${retried} hidden=${hidden}`,
+    );
   } finally {
     root.unmount();
     frame.remove();
@@ -6153,13 +6203,26 @@ async function testChatPanel(root: string, openAdd: (how: "menu" | "tab") => Pro
   await sleep(WAKE_IDLE_MS + 1000);
   const beforeReset = fromChatter();
   resetBtn()?.click();
+  // 성공하면 잠시 "초기화됨"으로 바뀌고 꺼진다 (멈춘 그룹이 없으면 바뀌는 것이 없어 여러 번 누르게 됐다), 그 뒤 원래대로
+  const resetShown = await waitFor("초기화됨", () => resetBtn()?.dataset.state === "done" && resetBtn()!.disabled && ["en", "ko"].some((l) => resetBtn()!.textContent === translate(l as Locale, "chat.resetLimitsDone")), 2000).then(() => true, () => false);
   const resetDone = await waitFor("초기화 뒤 깨움", () => fromChatter() === beforeReset + 1 && !pausedBar(), WAKE_IDLE_MS + 4000).then(() => true, () => false);
+  const resetIdle = await waitFor("단추 원래대로", () => resetBtn()?.dataset.state === "idle" && !resetBtn()!.disabled, RESET_DONE_MS + 1500).then(() => true, () => false);
   const pausedAfterReset = await invoke<string[]>("chat_paused", { project: root });
   check(
-    "깨우기 제한: 채팅 머리의 제한 초기화를 누르면 멈춤이 풀리고 보류된 알림을 한 번 알림 (대화 지우기 옆)",
-    resetNextToClear && pausedThird && resetDone && pausedAfterReset.length === 0,
-    `next=${resetNextToClear} paused=${pausedThird} ${beforeReset}→${fromChatter()} bar=${!!pausedBar()} backend=${pausedAfterReset}`,
+    "깨우기 제한: 채팅 머리의 제한 초기화를 누르면 멈춤이 풀리고 보류된 알림을 한 번 알림, 단추는 잠시 초기화됨 (대화 지우기 옆)",
+    resetNextToClear && pausedThird && resetShown && resetDone && resetIdle && pausedAfterReset.length === 0,
+    `next=${resetNextToClear} paused=${pausedThird} shown=${resetShown} idle=${resetIdle} ${beforeReset}→${fromChatter()} bar=${!!pausedBar()} backend=${pausedAfterReset}`,
   );
+  // 실패하면 패널 오류 줄, 다시 눌러 성공하면 그 오류는 사라진다 (리뷰 R1: 초기화됨과 실패 안내가 함께 남았다)
+  const resetError = () => [...panel()!.querySelectorAll(".chat-error")].some((el) => el.textContent === "injected failure");
+  devHooks.resetLimitsFail = true;
+  resetBtn()?.click();
+  const resetFailed = await waitFor("초기화 실패", () => resetError() && resetBtn()?.dataset.state === "idle", 2000).then(() => true, () => false);
+  devHooks.resetLimitsFail = undefined;
+  resetBtn()?.click();
+  const resetRetried = await waitFor("다시 성공", () => resetBtn()?.dataset.state === "done" && !resetError(), 2000).then(() => true, () => false);
+  await waitFor("단추 원래대로", () => resetBtn()?.dataset.state === "idle", RESET_DONE_MS + 1500).catch(() => null);
+  check("깨우기 제한: 제한 초기화가 실패하면 오류 줄, 다시 눌러 성공하면 그 오류는 사라짐", resetFailed && resetRetried, `${resetFailed} ${resetRetried}`);
 
   // 멈춘 작업그룹이 많아도 알림 목록은 높이가 정해진 스크롤 영역이고, 참여자 칩과 입력란은 패널 안에 남는다 (리뷰 2단계 R2)
   devHooks.chatPausedExtra = Array.from({ length: 12 }, (_, i) => `group-${i + 1}`);

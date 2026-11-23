@@ -121,6 +121,7 @@ export const ko: Messages = {
   "chat.close": "채팅 닫기",
   "chat.clear": "대화 지우기",
   "chat.resetLimits": "제한 초기화",
+  "chat.resetLimitsDone": "초기화됨 ✓",
   "chat.resetLimitsHint": "협업 제한: 이 프로젝트의 모든 작업그룹에서 세션끼리 주고받은 메시지 수를 처음부터 다시 셉니다. 멈춘 작업그룹은 재개합니다.",
   "chat.clearConfirm": "이 프로젝트의 채팅 메시지를 모두 지울까요? 지운 내용은 앱 데이터 폴더(chats/cleared)에 보관됩니다.",
   "chat.clearOk": "지우기",

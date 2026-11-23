@@ -121,6 +121,7 @@ export const en = {
   "chat.close": "Close Chat",
   "chat.clear": "Clear Chat",
   "chat.resetLimits": "Reset Limits",
+  "chat.resetLimitsDone": "Limits Reset ✓",
   "chat.resetLimitsHint": "Collaboration Limits: start counting messages between sessions again in every work group of this project. Paused work groups resume.",
   "chat.clearConfirm": "Delete all messages in this project's chat? They are kept in the app data folder (chats/cleared).",
   "chat.clearOk": "Clear",

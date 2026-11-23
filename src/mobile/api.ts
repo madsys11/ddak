@@ -16,8 +16,8 @@ export type Message = { id: number; time: number; from: string; text: string; to
 export type Project = { id: string; name: string; sessions: number; awaiting?: number; paused: string[]; open?: boolean; unread?: number };
 // status: 참여자마다 "working"이나 기다리는 종류 (permission·question·auth·dialog·blocked). 없으면 쉬는 중
 // prompts: 맥에 열려 있는 선택 창 id, modes: 참여자마다 claude 권한 모드 (모드 줄을 읽은 것만. 둘 다 예전 ddak에는 없다)
-// wakeLimit: 자동 깨우기 제한 (협업 제한. 예전 ddak에는 없다)
-export type Members = { members: string[]; waiting: string[]; status?: Record<string, string>; paused: string[]; prompts?: string[]; modes?: Record<string, string>; open?: boolean; wakeLimit?: number };
+// wakeLimit: 자동 깨우기 제한 (협업 제한. 예전 ddak에는 없다). resetLimits: 제한 초기화(POST …/reset-limits)를 받는 ddak이면 true
+export type Members = { members: string[]; waiting: string[]; status?: Record<string, string>; paused: string[]; prompts?: string[]; modes?: Record<string, string>; open?: boolean; wakeLimit?: number; resetLimits?: boolean };
 // 맥이 가진 이 폰의 푸시 구독 주소와, 푸시 서비스가 없앴다고 답한 주소 (푸시를 모르는 ddak에는 없다)
 export type PushInfo = { endpoint: string | null; gone: string | null };
 export type Info = { id: string; name: string; version: string; api: number; push?: PushInfo };
@@ -86,6 +86,8 @@ export const api = {
   open: (c: Computer, project: string) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/open`, c.token, {}),
   read: (c: Computer, project: string, id: number) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/read`, c.token, { id }),
   resume: (c: Computer, project: string, group: string) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/resume`, c.token, { group }),
+  // 협업 제한 초기화: 그 프로젝트의 모든 작업그룹 셈을 지운다 (members의 resetLimits가 true인 ddak만)
+  resetLimits: (c: Computer, project: string) => request<unknown>(c.api, `/api/projects/${encodeURIComponent(project)}/reset-limits`, c.token, {}),
   setPush: (c: Computer, body: PushBody) => request<unknown>(c.api, "/api/push", c.token, body),
   deletePush: (c: Computer) => request<unknown>(c.api, "/api/push", c.token, undefined, "DELETE"),
 };

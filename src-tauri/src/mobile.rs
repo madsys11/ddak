@@ -688,7 +688,7 @@ impl Mobile {
                 let prompts = (self.ctx.prompts)(&project);
                 let modes: serde_json::Map<String, Value> = (self.ctx.modes)(&project).into_iter().map(|(n, m)| (n, json!(m))).collect();
                 let open = self.is_open(&project);
-                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "wakeLimit": chats.wake_limit(), "prompts": prompts, "modes": modes, "open": open }))
+                (200, json!({ "members": chats.members(&project), "waiting": (self.ctx.waiting)(&project), "status": status, "paused": chats.paused(&project), "wakeLimit": chats.wake_limit(), "resetLimits": true, "prompts": prompts, "modes": modes, "open": open }))
             }
             // 맥에서 연다 (프론트가 열면 set_opened로 알려 와 목록·참여자가 바뀐다)
             (Post, "open") => {
@@ -735,6 +735,11 @@ impl Mobile {
                 }
                 None => (400, json!({ "error": "group" })),
             },
+            // 협업 제한 초기화 (맥 채팅 패널 머리와 같다, chat.rs reset_limits). members의 resetLimits로 받는 것을 알린다
+            (Post, "reset-limits") => {
+                chats.reset_limits(&project);
+                (200, json!({}))
+            }
             _ => (404, json!({ "error": "not found" })),
         }
     }
@@ -1520,6 +1525,29 @@ mod tests {
         assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/read"), &h, "{}").0, 400);
         assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/read"), &h, &format!(r#"{{"id":{}}}"#, m.id)).0, 200);
         assert_eq!(listed()["unread"], 0);
+    }
+
+    // 폰의 협업 제한 초기화: members가 받는다고 알리고, POST reset-limits가 그 프로젝트의 셈을 지운다 (멈춘 그룹 재개)
+    #[test]
+    fn reset_limits_from_phone() {
+        let f = fixture("reset-limits");
+        let token = pair(&f);
+        let auth = authed(&token);
+        let mut h = base();
+        h.push(("Authorization", &auth));
+        let id = project_id(&f.project);
+        let members = || serde_json::from_str::<Value>(&http(f.port, "GET", &format!("/api/projects/{id}/members"), &h, "").1).unwrap();
+        let chats = &f.mobile.ctx.chats;
+        chats.join(&f.project, "origin/dev", "k1");
+        chats.join(&f.project, "origin/rev", "k2");
+        for _ in 0..chats.wake_limit() {
+            chats.post(&f.project, "origin/dev", "@origin/rev x").unwrap();
+        }
+        let before = members();
+        assert_eq!((before["paused"].clone(), before["resetLimits"].clone()), (json!(["origin"]), json!(true)));
+        assert_eq!(http(f.port, "POST", &format!("/api/projects/{id}/reset-limits"), &h, "{}").0, 200);
+        assert_eq!(members()["paused"], json!([]));
+        assert!(!chats.post(&f.project, "origin/dev", "@origin/rev y").unwrap().held);
     }
 
     #[test]

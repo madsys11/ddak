@@ -87,6 +87,25 @@ textarea:focus {
   background: transparent;
   border: none;
 }
+/* 머리의 글자 단추 (제한 초기화, src/ResetLimitsButton.tsx). 끝나면 잠시 강조색 */
+.bar-text {
+  flex: none;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: calc(13px * var(--font-scale, 1));
+  padding: 5px 10px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.bar-text:disabled {
+  opacity: 0.5;
+}
+.bar-text.done {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent);
+}
 .bar-side svg {
   display: block;
   margin: auto;

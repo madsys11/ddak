@@ -50,6 +50,8 @@ export const devHooks: {
   gitDetailDelay?: (sha: string) => number;
   gitDetailFail?: (sha: string) => boolean;
   gitGraphFail?: () => boolean;
+  // 채팅 패널의 제한 초기화를 실패시킨다 (ResetLimitsButton의 실패 → 다시 눌러 성공 검사)
+  resetLimitsFail?: boolean;
   // Git Graph의 커밋하지 않은 변경 응답을 늦춘다 (ms, 폴링 주기보다 오래 걸리는 조회. 리뷰 R1)
   gitStatusDelay?: () => number;
   gitFingerprintFail?: () => boolean;

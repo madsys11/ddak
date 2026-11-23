@@ -107,6 +107,7 @@
       "files": ["src/ChatPanel.tsx", "src-tauri/src/chat.rs"],
       "steps": ["trashDrag", "panels", "mobile", "mobileChatUnit", "addSession", "gitGraph", "projects", "sessionFollow", "chatFilter", "chatLinks", "limitsDialog"]
     },
+    { "files": ["src/ResetLimitsButton.tsx"], "steps": ["addSession", "mobileChatFilterUnit"] },
     {
       "files": ["src/limits.ts", "src/LimitsDialog.tsx", "src-tauri/src/limits.rs"],
       "steps": ["limitsUnit", "limitsStartup", "limitsDialog", "addSession"]
