@@ -8,6 +8,13 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [react()],
 
+  // 빌드 목표 es2021: ||= 등을 낮추지 않는다. 기본(es2020 포함)이면 esbuild 0.25 압축이 xterm requestMode의 ||= 를 낮추며
+  // 선언을 지워 ReferenceError로 터미널이 멈췄다 (DECRQM을 묻는 codex 0.172). 맥 최소 버전 11.0(Safari 14)과 맞춘다
+  // (tauri.conf.json). 결과는 scripts/check-bundle.mjs가 본다 (docs/reviews/2026-11-25-bundle-target.md)
+  build: {
+    target: "es2021",
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

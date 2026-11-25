@@ -254,6 +254,14 @@ Tauri 2 + React(TypeScript) + Rust. Electron은 쓰지 않는다 (무거움). �
 | 문서 탭 | markdown-it 15 (문서의 HTML은 끔) |
 
 - Vite는 6으로 고정 (이 맥의 Node 20.10에서 Vite 7+가 돌지 않는다. Node를 올리면 Vite도 올려도 된다).
+- 데스크톱 빌드 목표는 es2021 (`vite.config.ts` `build.target`), 지원하는 맥은 macOS 11 이상 (`tauri.conf.json`
+  `bundle.macOS.minimumSystemVersion: "11.0"`, Safari 14부터 `||=`를 안다). Windows WebView2는 Chromium이라 상관없다.
+  - 이유: Vite 기본 목표(es2020 포함)면 esbuild 0.25 압축이 `||=`를 낮추며 선언을 지운다. xterm.js 6 requestMode(DECRQM 응답)가
+    `void 0||(r={})`가 되어, 시작할 때 DECRQM을 묻는 프로그램(codex 0.172)을 띄우면 ReferenceError로 그 터미널이 멈췄다.
+    esbuild 0.28은 바르게 낮추지만 Vite 6은 0.25를 쓴다.
+  - `npm run build`(tauri build가 부른다)가 끝에 `scripts/check-bundle.mjs`로 번들을 본다: 깨진 모양이 없고 xterm requestMode의
+    `||=`가 남아 있어야 통과. 자체 테스트는 압축하지 않는 개발판이라 이것을 잡지 못한다.
+  - 폰 화면 빌드(`vite.mobile.config.ts`)는 기본 목표 그대로다 (xterm이 없고 깨진 모양도 없다).
 
 ## 현재 동작
 
